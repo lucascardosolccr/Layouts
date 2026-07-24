@@ -135,8 +135,7 @@ class DataLoaderAndCleaner:
         # ---------------------------------------------------------
         # BLINDAGEM CONTRA TYPE MISMATCH (Numpy Int64 vs String)
         # ---------------------------------------------------------
-        # Força as colunas identificadoras a serem tratadas como texto, 
-        # impedindo falhas em operações de agrupamento ou plotagem.
+        # Força as colunas identificadoras a serem tratadas como texto
         categorical_identifiers = ['NO_LOCAL', 'SG_UF', 'NO_SALA', 'CO_ENTIDADE']
         for col in categorical_identifiers:
             if col in self.df.columns:
@@ -286,20 +285,22 @@ class MachineLearningEngine:
         ).reset_index()
         
         X = locais[['QTD_SALAS', 'CAPACIDADE_MEDIA', 'CAPACIDADE_TOTAL']]
-        X_scaled = StandardScaler().fit_transform(X)
-        
-        # Fit do K-Means com 4 clusters fixos para garantir coerência de negócio
-        kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-        locais['ID_CLUSTER'] = kmeans.fit_predict(X_scaled)
-        
-        cluster_means = locais.groupby('ID_CLUSTER')['CAPACIDADE_TOTAL'].mean().sort_values()
-        labels = {
-            cluster_means.index[0]: 'C1: Operação Base (Pulverizados/Menores)',
-            cluster_means.index[1]: 'C2: Polos Intermediários (Comportamento Padrão)',
-            cluster_means.index[2]: 'C3: Centros Estratégicos (Alta Concentração)',
-            cluster_means.index[3]: 'C4: Super-Polos Logísticos (Risco Elevado/Massivos)'
-        }
-        locais['PERFIL_COMPORTAMENTAL_IA'] = locais['ID_CLUSTER'].map(labels)
+        # Segurança caso haja locais insuficientes para o KMeans rodar com 4 clusters
+        if len(X) >= 4:
+            X_scaled = StandardScaler().fit_transform(X)
+            kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+            locais['ID_CLUSTER'] = kmeans.fit_predict(X_scaled)
+            
+            cluster_means = locais.groupby('ID_CLUSTER')['CAPACIDADE_TOTAL'].mean().sort_values()
+            labels = {
+                cluster_means.index[0]: 'C1: Operação Base (Pulverizados/Menores)',
+                cluster_means.index[1]: 'C2: Polos Intermediários (Comportamento Padrão)',
+                cluster_means.index[2]: 'C3: Centros Estratégicos (Alta Concentração)',
+                cluster_means.index[3]: 'C4: Super-Polos Logísticos (Risco Elevado/Massivos)'
+            }
+            locais['PERFIL_COMPORTAMENTAL_IA'] = locais['ID_CLUSTER'].map(labels)
+        else:
+            locais['PERFIL_COMPORTAMENTAL_IA'] = 'C1: Operação Base (Pulverizados/Menores)'
         
         # Injeta o resultado do K-Means de volta na base principal
         self.df = self.df.merge(locais[['NO_LOCAL', 'PERFIL_COMPORTAMENTAL_IA']], on='NO_LOCAL', how='left')
@@ -313,15 +314,18 @@ class VisualizerAndExporter:
         self.graficos_dir = f"{output_dir}/graficos"
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(self.graficos_dir, exist_ok=True)
-        self.generated_figs = {}
+        self.generated_figs = {} # Acréscimo para exibir nativamente no Streamlit (Evolução)
 
     def plot_and_save(self, fig, filename):
+        # Salva para o diretório de exportação (Preservação de lógica original)
         fig.write_html(f"{self.graficos_dir}/{filename}.html", include_plotlyjs='cdn')
         try:
             fig.write_image(f"{self.graficos_dir}/{filename}.png", scale=3)
             fig.write_image(f"{self.graficos_dir}/{filename}.svg")
         except Exception:
             pass 
+        
+        # Armazena na memória para o Streamlit renderizar dinamicamente
         self.generated_figs[filename] = fig
 
     def generate_charts(self, df, uf_stats, pareto_uf, top_locais, faixas_df, clusters_df):
@@ -1082,7 +1086,7 @@ class SystemOrchestrator:
         self.results = {} # Container de memória para uso posterior no Streamlit
 
     def run(self, progress_bar=None, status_text=None):
-        logger.info("🚀 Inicializando Plataforma Master BI (Versão 7.1 - UI Integrada com Fix Mismatch)...")
+        logger.info("🚀 Inicializando Plataforma Master BI (Versão 7.2 - UI Integrada e Seguro Contra TypeMismatch)...")
         
         def update_ui(msg, val):
             if status_text: status_text.text(msg)
@@ -1254,7 +1258,12 @@ def main_streamlit():
                     
                     st.markdown("#### Pré-visualização do Relatório Estatístico")
                     if not stats_df.empty:
-                        st.dataframe(stats_df.style.highlight_max(axis=0), use_container_width=True)
+                        # -------------------------------------------------------------
+                        # FIX: Renderização estática da tabela em vez do highlight_max.
+                        # Impede que o Pandas tente achar o MAIOR valor em uma coluna
+                        # que mistura números inteiros com Textos, evitando o TypeMismatch.
+                        # -------------------------------------------------------------
+                        st.dataframe(stats_df, use_container_width=True)
                     
                     # Exibir alguns Gráficos nativos do Streamlit como bônus (Sem perder o HTML original)
                     figs = orchestrator.results.get('figs', {})
