@@ -37,7 +37,6 @@ st.set_page_config(
 # ==========================================
 # CONFIGURAÇÃO DE LOGS (Adaptada para UI e Arquivo)
 # ==========================================
-# Criar um buffer para capturar logs e exibir no Streamlit
 log_stream = io.StringIO()
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +50,7 @@ logging.basicConfig(
 logger = logging.getLogger("InteligenciaAnalitica")
 
 # ==========================================
-# NÚCLEO DA APLICAÇÃO
+# NÚCLEO DA APLICAÇÃO (Preservado e Evoluído)
 # ==========================================
 
 class DataLoaderAndCleaner:
@@ -134,11 +133,10 @@ class DataLoaderAndCleaner:
         self.df.drop_duplicates(inplace=True)
         
         # ---------------------------------------------------------
-        # MELHORIA DE ROBUSTEZ: Prevenção de Type Mismatch
-        # Forçar colunas de entidade categórica para string (texto) ANTES da sanitização.
-        # Impede que códigos numéricos puramente numéricos de escolas sejam traduzidos 
-        # como inteiros, quebrando as renderizações e agrupamentos futuros do Plotly.
+        # BLINDAGEM CONTRA TYPE MISMATCH (Numpy Int64 vs String)
         # ---------------------------------------------------------
+        # Força as colunas identificadoras a serem tratadas como texto, 
+        # impedindo falhas em operações de agrupamento ou plotagem.
         categorical_identifiers = ['NO_LOCAL', 'SG_UF', 'NO_SALA', 'CO_ENTIDADE']
         for col in categorical_identifiers:
             if col in self.df.columns:
@@ -315,18 +313,15 @@ class VisualizerAndExporter:
         self.graficos_dir = f"{output_dir}/graficos"
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(self.graficos_dir, exist_ok=True)
-        self.generated_figs = {} # Acréscimo para exibir nativamente no Streamlit (Evolução)
+        self.generated_figs = {}
 
     def plot_and_save(self, fig, filename):
-        # Salva para o diretório de exportação (Preservação de lógica original)
         fig.write_html(f"{self.graficos_dir}/{filename}.html", include_plotlyjs='cdn')
         try:
             fig.write_image(f"{self.graficos_dir}/{filename}.png", scale=3)
             fig.write_image(f"{self.graficos_dir}/{filename}.svg")
         except Exception:
             pass 
-        
-        # Armazena na memória para o Streamlit renderizar dinamicamente
         self.generated_figs[filename] = fig
 
     def generate_charts(self, df, uf_stats, pareto_uf, top_locais, faixas_df, clusters_df):
@@ -1301,9 +1296,6 @@ def main_streamlit():
                         st.code(traceback.format_exc(), language='python')
                     
                 finally:
-                    # Limpeza silenciosa de diretórios temporários na saída (Padrões Corporativos)
-                    # Para não quebrar o download (pois ele depende do arquivo ainda existir),
-                    # delegamos a gestão de tempfiles ao próprio sistema operacional ao longo do tempo.
                     pass
 
 if __name__ == "__main__":
