@@ -51,7 +51,7 @@ logging.basicConfig(
 logger = logging.getLogger("InteligenciaAnalitica")
 
 # ==========================================
-# NÚCLEO DA APLICAÇÃO ORIGINAL (PRESERVADO)
+# NÚCLEO DA APLICAÇÃO
 # ==========================================
 
 class DataLoaderAndCleaner:
@@ -133,6 +133,18 @@ class DataLoaderAndCleaner:
         
         self.df.drop_duplicates(inplace=True)
         
+        # ---------------------------------------------------------
+        # MELHORIA DE ROBUSTEZ: Prevenção de Type Mismatch
+        # Forçar colunas de entidade categórica para string (texto) ANTES da sanitização.
+        # Impede que códigos numéricos puramente numéricos de escolas sejam traduzidos 
+        # como inteiros, quebrando as renderizações e agrupamentos futuros do Plotly.
+        # ---------------------------------------------------------
+        categorical_identifiers = ['NO_LOCAL', 'SG_UF', 'NO_SALA', 'CO_ENTIDADE']
+        for col in categorical_identifiers:
+            if col in self.df.columns:
+                self.df[col] = self.df[col].astype(str)
+        # ---------------------------------------------------------
+
         for col in self.df.select_dtypes(include=['object']).columns:
             self.df[col] = self.df[col].apply(self.clean_text_pipeline)
             
@@ -335,6 +347,10 @@ class VisualizerAndExporter:
         # 3. Treemap
         if 'SG_UF' in df.columns and 'NO_LOCAL' in df.columns:
             df_tree = df.copy()
+            # Double safety casting text to bypass any Plotly numerical sort exceptions
+            df_tree['NO_LOCAL'] = df_tree['NO_LOCAL'].astype(str)
+            df_tree['SG_UF'] = df_tree['SG_UF'].astype(str)
+            
             limite = df_tree['QT_CAPACIDADE_MAXIMA_SALA'].quantile(0.70)
             df_tree.loc[df_tree['QT_CAPACIDADE_MAXIMA_SALA'] < limite, 'NO_LOCAL'] = 'DEMAIS POLOS'
             fig_tree = px.treemap(df_tree, path=[px.Constant("Brasil"), 'SG_UF', 'NO_LOCAL'], values='QT_CAPACIDADE_MAXIMA_SALA', title='Treemap: Hierarquia Logística')
@@ -378,8 +394,11 @@ class VisualizerAndExporter:
         if not uf_stats.empty:
             uf_wf = uf_stats.head(10).copy()
             outros_val = uf_stats.iloc[10:]['CAPACIDADE_TOTAL'].sum() if len(uf_stats) > 10 else 0
-            wf_names = list(uf_wf['SG_UF']) + ['DEMAIS ESTADOS']
+            
+            # Type casting blindado na estrutura para ordenação correta do eixo X no Plotly
+            wf_names = [str(x) for x in uf_wf['SG_UF']] + ['DEMAIS ESTADOS']
             wf_vals = list(uf_wf['CAPACIDADE_TOTAL']) + [outros_val]
+            
             fig_wf = go.Figure(go.Waterfall(name="Acumulado", orientation="v", measure=["relative"]*10 + ["total"],
                 x=wf_names, y=wf_vals, textposition="outside", text=[f"{v:,.0f}" for v in wf_vals], connector={"line":{"color":"rgb(63, 63, 63)"}}))
             fig_wf.update_layout(title="Waterfall: Composição Cumulativa Nacional")
@@ -1068,7 +1087,7 @@ class SystemOrchestrator:
         self.results = {} # Container de memória para uso posterior no Streamlit
 
     def run(self, progress_bar=None, status_text=None):
-        logger.info("🚀 Inicializando Plataforma Master BI (Versão 7.0 - UI Integrada)...")
+        logger.info("🚀 Inicializando Plataforma Master BI (Versão 7.1 - UI Integrada com Fix Mismatch)...")
         
         def update_ui(msg, val):
             if status_text: status_text.text(msg)
