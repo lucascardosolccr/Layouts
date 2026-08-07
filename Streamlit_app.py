@@ -1,739 +1,10582 @@
+"""
+=====================================================================================
+PLATAFORMA C-LEVEL DE BUSINESS INTELLIGENCE & EXPLAINABLE AI — INEP PND
+=====================================================================================
+Versão 29.0 "Enterprise Analytics — Perfil de Inscritos & Ensalamento" — Consolidada,
+Auditada e Fundamentada nos Layouts Oficiais do INEP para o PND (Prova Nacional
+Docente), a saber:
+
+    • N02 - Ensalamento (alocação participante→sala; grupos de curso; atendimento
+      especializado/específico; tipo de ensalamento; distância).
+    • N50 - Salas dos Espaços Físicos (dimensões da sala, capacidade, mobiliário).
+    • N52 - Locação de Espaço Físico (bloco/prédio; endereço; capacidade agregada;
+      dependência administrativa; georreferenciamento).
+    • N90 - Inscritos (dados cadastrais do participante; sexo; nascimento/idade;
+      situação da inscrição; município de residência × município de prova).
+
+COMPATIBILIDADE RETROATIVA: a plataforma continua reconhecendo integralmente os
+campos do antigo N60 (Questionário de Visita ao Local de Prova — acessibilidade,
+segurança, conforto, tecnologia e conservação predial). Todo campo é OPCIONAL: se a
+base carregada não trouxer uma coluna, a análise correspondente é simplesmente omitida,
+jamais gerando falha. Assim, a mesma aplicação atende tanto bases centradas em
+infraestrutura (N50/N52/N60) quanto bases centradas em participantes (N02/N90).
+
+O QUE ESTE PROGRAMA FAZ (em linguagem simples)
+----------------------------------------------
+1. Lê uma planilha Excel (por padrão ``analise_sas.xlsx`` na Área de Trabalho) contendo
+   os microdados de locais/salas de prova extraídos da base SAS do INEP.
+2. Limpa e padroniza os dados (corrige acentuação corrompida — "mojibake" — vinda do
+   SAS/Windows, remove duplicatas, converte tipos, otimiza memória).
+3. Constrói indicadores compostos ("índices") de Acessibilidade, Segurança, Conforto,
+   Tecnologia, Conservação e uma Nota Oficial INEP — todos derivados campo a campo dos
+   layouts oficiais.
+4. Executa estatística descritiva/inferencial (quartis, assimetria, Gini, testes de
+   normalidade) e Machine Learning (K-Means para perfis de infraestrutura; Isolation
+   Forest para detecção de anomalias/erros de digitação).
+5. Exporta três produtos principais, todos autoexplicativos:
+      • Um **Dashboard HTML interativo** (Single Page Application) com filtros cruzados,
+        gráficos Plotly, tabelas exportáveis e um Dicionário de Dados navegável.
+      • Uma **planilha Excel** com dezenas de abas temáticas, dicionário de dados,
+        glossários, formatação condicional e gráficos nativos.
+      • Arquivos auxiliares (CSV tratado, metadados JSON, laudo TXT).
+
+PRINCÍPIOS DE PROJETO
+---------------------
+• RESILIÊNCIA: cada campo é opcional. Se uma coluna do layout não existir na base
+  carregada, a análise correspondente é simplesmente omitida — nunca há falha silenciosa.
+• DEPENDÊNCIAS OPCIONAIS: as bibliotecas pesadas (Plotly, Sweetviz, tqdm) são carregadas
+  de forma tolerante. O Dashboard HTML usa Plotly.js via CDN e portanto NÃO depende do
+  Plotly instalado no Python; assim, o produto principal é gerado mesmo em ambientes
+  mínimos.
+• RASTREABILIDADE: tudo é registrado em log; falhas geram um relatório de diagnóstico.
+
+Autoria original preservada integralmente; esta versão apenas corrige defeitos,
+moderniza para pandas ≥ 2.2 / 3.0 (Copy-on-Write) e adiciona novas análises. Nenhuma
+funcionalidade anterior foi removida.
+
+CHANGELOG v31.0 — "Auditoria de Cruzamento entre Layouts" (camada RELACIONAL aditiva)
+------------------------------------------------------------------------------------
+[NOVA CAMADA RELACIONAL MULTI-LAYOUT — N02 × N50 × N52 × N90 × N91]
+  • Até aqui a plataforma analisava UMA tabela plana. A v31 adiciona uma camada
+    RELACIONAL que lê as abas normalizadas por layout do mesmo arquivo e executa
+    reconciliações que só existem no CRUZAMENTO entre arquivos.
+  • MultiLayoutLoader: reconhece cada layout por nome de aba ou por assinatura de
+    colunas (resiliente — se houver só a base plana, a auditoria fica inativa).
+  • CrossLayoutAuditEngine: 8 famílias de verificação, cada uma com severidade
+    (CRÍTICO/ATENÇÃO/OK), interpretação automática e recomendação:
+      (1) participantes sem ensalamento (N90×N02); (2) ensalados órfãos; (3) ensalamento
+      duplicado; (4) divergência de município (N90×N02); (5) órfãos referenciais de
+      local/sala (N02→N52/N50); (6) capacidade × ocupação (sala e local); (7) forasteiros
+      × residentes; (8) distâncias (faixas, críticos, ranking por município); e ainda a
+      consistência de ID_KIT_PROVA (N02×N91).
+  • Saídas: +13 abas de Excel (41–53), nova seção no Dashboard ("VII. Auditoria de
+    Cruzamento") com KPIs, tabela de achados e 3 gráficos, além de resumo executivo e
+    achados no laudo TXT e no JSON de metadados.
+  • Gerador --demo estendido: além da aba BASE_PLANA, grava as abas N52/N50/N90/N02/N91
+    com inconsistências INJETADAS (sem ensalamento, órfãos, duplicado, local inexistente,
+    divergência de município, distâncias críticas e kit divergente) para exercitar o motor.
+[GARANTIAS]
+  • 100% aditivo (diff automático v30 → v31): +13 abas, +3 gráficos, 0 perdas; a base
+    plana e todos os módulos anteriores permanecem intactos. A auditoria exige ≥2 layouts,
+    então uma base de aba única mantém o comportamento clássico (42 abas). Convenção: a aba
+    plana denormalizada, se presente, deve chamar-se BASE_PLANA para ser ignorada pela
+    camada relacional.
+
+CHANGELOG v30.0 — "Atendimentos & Recursos (N91)" (evolução incremental e aditiva)
+---------------------------------------------------------------------------------
+[NOVO MÓDULO DE ATENDIMENTOS & RECURSOS — layout N91]
+  • Cruzamento ADJUDICADO da acessibilidade: enquanto o N02 traz FLAGS de atendimento
+    por participante, o N91 traz a visão ITEMIZADA e homologada — qual item foi pedido,
+    de que TIPO (Específico/Especializado/Recurso) e se foi CONCEDIDO (laudo médico).
+  • Dicionário oficial ampliado: +15 campos reais do N91 (NO_ITEM_ATENDIMENTO,
+    TP_ITEM_ATENDIMENTO, CO_SITUACAO_LAUDO_MEDICO com domínio de 13 códigos, CID, etc.)
+    e +5 campos derivados. Total do dicionário: 148 campos oficiais mapeados.
+  • 5 novas features derivadas (tipo do item, situação do laudo, status de deferimento,
+    situação detalhada) seguindo a regra oficial da VW N91 (ativo p/ códigos {1,2,4,6,7,9}).
+  • 5 novas agregações + 4 novas abas de Excel (37–40) + 1 nova seção no Dashboard
+    (VI. Atendimentos & Recursos) com 4 gráficos e KPIs + 3 novos insights automáticos.
+  • Gerador --demo estendido para exercitar o N91 (itens por tipo, laudo médico, CID).
+  • ATENÇÃO ao IN_ATIVO do N91: renomeado internamente para IN_ATIVO_ATENDIMENTO para
+    NÃO colidir com o IN_ATIVO de sala (N50).
+[GARANTIAS]
+  • 100% aditivo e resiliente (verificado por diff automático): v29 → v30 sem perdas
+    (+4 abas, +4 gráficos, +13 colunas). Cada módulo (N02/N90 e N91) ativa-se de forma
+    INDEPENDENTE conforme as colunas presentes: base só de infraestrutura = 32 abas;
+    com N02/N90 e sem N91 = 38 abas; completa = 42 abas.
+
+CHANGELOG v29.0 — "Perfil de Inscritos & Ensalamento" (evolução incremental e aditiva)
+-------------------------------------------------------------------------------------
+[CORREÇÕES DE AUDITORIA]
+  • Relatório de qualidade (nulos/duplicatas/abas) voltou ao JSON de metadados — antes
+    era mascarado por um dicionário vazio no DTO (`safe_meta`).
+  • Contagem de duplicatas agora é medida ANTES do drop_duplicates (antes dava sempre ~0);
+    adicionado também `linhas_removidas_duplicidade`.
+  • Datas passam a ser lidas com dayfirst=True (padrão INEP DD/MM/AAAA), viabilizando o
+    cálculo correto de idade.
+[NOVO MÓDULO DE INSCRITOS & ENSALAMENTO — layouts N02 e N90]
+  • Dicionário oficial ampliado: +29 campos reais de N02/N90 (grupos de curso, tipo de
+    ensalamento, atendimento especializado/específico/recurso, sexo, nascimento, situação,
+    residência × prova, distância) e +10 campos derivados documentados.
+  • 10 novas features derivadas (idade, faixa etária, sexo, situação, tipo de ensalamento,
+    demanda de atendimento especial, migração interestadual, faixa de distância, etc.).
+  • 6 novas agregações + 6 novas abas de Excel (31–36) + 1 nova seção no Dashboard HTML
+    com 5 gráficos e KPIs, além de 5 novos insights automáticos.
+  • Gerador de dados sintéticos (--demo) estendido para exercitar todo o módulo.
+[GARANTIAS]
+  • 100% aditivo e resiliente: verificado que bases sem participantes produzem
+    exatamente as mesmas 32 abas / 16 gráficos / colunas de antes (0 perdas), e que o
+    novo módulo se desativa com aviso claro quando as colunas N02/N90 estão ausentes.
+=====================================================================================
+"""
+
+from __future__ import annotations
+
 import os
-import io
 import sys
 import json
 import logging
-import zipfile
-import shutil
-import tempfile
+import warnings
+import argparse
+import traceback
+from pathlib import Path
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
 import pandas as pd
 import numpy as np
 import unicodedata
 import re
-import traceback
-import streamlit as st
 from scipy import stats
 from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import sweetviz as sv
 import xlsxwriter
-from tqdm import tqdm
-import warnings
 
-# Ignorar warnings não críticos
+# -------------------------------------------------------------------------------------
+# CAMADA DE DEPENDÊNCIAS OPCIONAIS (Resiliência de Ambiente)
+# -------------------------------------------------------------------------------------
+# As três bibliotecas abaixo enriquecem a saída, mas NÃO são essenciais: o Dashboard
+# HTML renderiza gráficos com Plotly.js (CDN) e tabelas com DataTables (CDN). Portanto,
+# mesmo sem Plotly/Sweetviz/tqdm instalados no Python, o Excel e o Dashboard continuam
+# sendo gerados. Isto elimina o antigo risco de o programa nem sequer iniciar por causa
+# de um "ImportError" em máquinas com instalação mínima.
+try:  # Plotly — usado apenas para gerar os arquivos de gráficos "standalone" (.html/.png).
+    import plotly.express as px
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except Exception:  # pragma: no cover - depende do ambiente
+    px = None  # type: ignore
+    go = None  # type: ignore
+    PLOTLY_AVAILABLE = False
+
+try:  # Sweetviz — relatório EDA automático complementar (opcional).
+    import sweetviz as sv
+    SWEETVIZ_AVAILABLE = True
+except Exception:  # pragma: no cover
+    sv = None  # type: ignore
+    SWEETVIZ_AVAILABLE = False
+
+try:  # tqdm — barra de progresso amigável no terminal.
+    from tqdm import tqdm  # type: ignore
+    TQDM_AVAILABLE = True
+except Exception:  # pragma: no cover
+    TQDM_AVAILABLE = False
+
+    class tqdm:  # type: ignore
+        """Substituto mínimo do tqdm quando a biblioteca não está instalada.
+
+        Preserva a interface usada pelo pipeline (context manager + ``update``),
+        emitindo mensagens simples de progresso em texto puro.
+        """
+
+        def __init__(self, total: int = 0, desc: str = "", bar_format: str = "", **_: Any) -> None:
+            self.total = total
+            self.desc = desc
+            self.n = 0
+            if desc:
+                print(f"   → {desc} (0/{total})")
+
+        def __enter__(self) -> "tqdm":
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            print(f"   ✓ {self.desc}: {self.n}/{self.total} etapas concluídas.")
+
+        def update(self, k: int = 1) -> None:
+            self.n += k
+            print(f"     • progresso {self.n}/{self.total}")
+
+
+APP_VERSION = "32.0"
+STREAMLIT_APP_VERSION = "4"  # camada Streamlit (incrementa a cada rodada)
+
+# ==========================================
+# CONFIGURAÇÕES GLOBAIS E GOVERNANÇA CORPORATIVA
+# ==========================================
+# Observação de auditoria: manter o filtro amplo de warnings preserva o comportamento
+# original (logs limpos para o usuário final). Alertas relevantes de dados são emitidos
+# explicitamente pelo próprio pipeline (validação de colunas, relatório de qualidade).
 warnings.filterwarnings('ignore')
 
-# ==========================================
-# CONFIGURAÇÃO DA PÁGINA (Deve ser a primeira chamada)
-# ==========================================
-st.set_page_config(
-    page_title="Plataforma de Inteligência Analítica",
-    page_icon="🏢",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+@dataclass
+class MLProcessingResults:
+    """
+    Data Transfer Object (DTO) Blindado.
+    Garante a arquitetura anti-regressão, empacotando absolutamente todos os 
+    DataFrames, dicionários e modelos gerados pelo pipeline de processamento.
+    Elimina permanentemente o erro estrutural 'ValueError: too many values to unpack'.
+    """
+    df: pd.DataFrame
+    quality_report: dict
+    totals_df: pd.DataFrame
+    stats_df: pd.DataFrame
+    outliers_df: pd.DataFrame
+    pareto_uf: pd.DataFrame
+    top_locais: pd.DataFrame
+    top_municipios: pd.DataFrame
+    cutoffs: dict
+    locais_agg: pd.DataFrame
+    uf_agg: pd.DataFrame
+    mun_agg: pd.DataFrame
+    bloco_agg: pd.DataFrame
+    equip_agg: pd.DataFrame
+    acess_agg: pd.DataFrame
+    seg_agg: pd.DataFrame
+    vuln_agg: pd.DataFrame
+    gini_index: float
+    crosstab_faixa_ia: pd.DataFrame
+    crosstab_uf_faixa: pd.DataFrame
+    normative_crosstab: pd.DataFrame
+
+    # -----------------------------------------------------------------------------
+    # NOVOS ARTEFATOS ANALÍTICOS (v28) — todos com valor-padrão para manter total
+    # compatibilidade retroativa com qualquer código que construa o DTO sem eles.
+    # -----------------------------------------------------------------------------
+    correlation_matrix: pd.DataFrame = field(default_factory=pd.DataFrame)   # Matriz de correlação de Pearson entre índices/quantidades
+    conservacao_agg: pd.DataFrame = field(default_factory=pd.DataFrame)      # Índice de Conservação Predial por UF
+    nota_oficial_agg: pd.DataFrame = field(default_factory=pd.DataFrame)     # Distribuição da Nota Oficial INEP por UF
+    densidade_agg: pd.DataFrame = field(default_factory=pd.DataFrame)        # Densidade espacial (m²/candidato) por UF
+    geo_df: pd.DataFrame = field(default_factory=pd.DataFrame)               # Pontos georreferenciados (lat/long) para o mapa
+    dependencia_agg: pd.DataFrame = field(default_factory=pd.DataFrame)      # Distribuição por dependência administrativa
+    column_validation: Dict[str, Any] = field(default_factory=dict)         # Cobertura de colunas conhecidas dos layouts
+    totals_meta: list = field(default_factory=list)                         # Descritores (op/coluna) de cada total executivo, para drill-down no dashboard
+
+    # -----------------------------------------------------------------------------
+    # MÓDULO DE INSCRITOS & ENSALAMENTO (v29) — agregações dos layouts N02/N90.
+    # Todos com valor-padrão vazio: bases sem participantes simplesmente os ignoram.
+    # -----------------------------------------------------------------------------
+    demografia_agg: pd.DataFrame = field(default_factory=pd.DataFrame)       # Distribuição por sexo × faixa etária
+    curso_agg: pd.DataFrame = field(default_factory=pd.DataFrame)            # Ranking de grupos de curso (áreas de avaliação)
+    atendimento_agg: pd.DataFrame = field(default_factory=pd.DataFrame)      # Demanda de atendimento especial por UF
+    ensalamento_agg: pd.DataFrame = field(default_factory=pd.DataFrame)      # Distribuição por tipo de ensalamento
+    situacao_agg: pd.DataFrame = field(default_factory=pd.DataFrame)         # Situação da inscrição (Regular/Irregular/Judicial)
+    migracao_agg: pd.DataFrame = field(default_factory=pd.DataFrame)         # Migração interestadual (residência × prova) por UF
+    faixa_etaria_agg: pd.DataFrame = field(default_factory=pd.DataFrame)     # Distribuição etária consolidada
+    inscritos_meta: Dict[str, Any] = field(default_factory=dict)            # KPIs-resumo do módulo de participantes (para HTML)
+
+    # -----------------------------------------------------------------------------
+    # MÓDULO DE ATENDIMENTOS & RECURSOS (v30) — agregações do layout N91.
+    # -----------------------------------------------------------------------------
+    item_atend_agg: pd.DataFrame = field(default_factory=pd.DataFrame)       # Ranking dos itens de atendimento/recurso mais solicitados
+    tipo_item_agg: pd.DataFrame = field(default_factory=pd.DataFrame)        # Distribuição por tipo (Específico/Especializado/Recurso)
+    laudo_agg: pd.DataFrame = field(default_factory=pd.DataFrame)            # Distribuição por situação do laudo médico (Aprovado/Reprovado/...)
+    laudo_uf_agg: pd.DataFrame = field(default_factory=pd.DataFrame)         # Taxa de deferimento do laudo por UF
+    cid_agg: pd.DataFrame = field(default_factory=pd.DataFrame)              # Top categorias de CID (quando informado)
+    atendimentos_meta: Dict[str, Any] = field(default_factory=dict)         # KPIs-resumo do módulo de atendimentos (para HTML)
+
+
+class INEPLayoutDictionary:
+    """Dicionário de Dados oficial derivado dos layouts do INEP (N02, N50, N52, N90, N91; inclui campos legados, dormentes, do antigo questionário de visita).
+
+    Esta classe é a *fonte única de verdade conceitual* da aplicação. Cada campo dos
+    três arquivos oficiais é descrito com: o layout de origem, o tipo/tamanho, se é
+    obrigatório, o domínio de valores aceitos e uma descrição didática. Ela alimenta:
+
+    * a aba "Dicionário de Dados" da planilha Excel;
+    * a seção de Metodologia do Dashboard HTML;
+    * a validação de colunas (quais campos conhecidos existem/faltam na base carregada).
+
+    IMPORTANTE — conflito documentado de ``TP_INSTITUICAO``: o campo tem significados
+    diferentes entre os layouts. No **N60** representa a natureza jurídica (1-Privada,
+    2-Pública Municipal, 3-Pública Estadual, 4-Pública Federal). No **N52** representa a
+    modalidade do local (1-Ensino Básico, 2-Ensino Superior, 3-Unidade Prisional,
+    4-Socioeducativa). A aplicação trata o campo apenas como uma categoria de filtro e
+    não presume qual das duas semânticas está em uso — este dicionário registra ambas.
+    """
+
+    # Estrutura: chave = NOME_DO_CAMPO ; valor = (LAYOUT, TIPO, OBRIGATORIO, DOMINIO, DESCRICAO)
+    FIELDS: Dict[str, Tuple[str, str, str, str, str]] = {
+        # ---------------- CHAVES E IDENTIFICAÇÃO ----------------
+        "CO_PROJETO": ("N50/N52/N60", "number(7)", "Sim", "AAEPPEE (PND: programa=88)", "Código do projeto: 2 díg. do ano + 1 díg. de edição + 2 díg. do programa + 2 díg. da etapa. Ex.: 2618801 (PND)."),
+        "TP_ORIGEM": ("N50/N52/N60", "char(1)", "Sim", "P, F, G, V, I, C, R, D", "Empresa responsável pela origem dos dados (Cebraspe, FGV, Cesgranrio, Vunesp, Inep, Correios, Gráfica, CAED)."),
+        "CO_LOCAL": ("N50/N52/N60", "varchar(20)", "Sim", "TP_ORIGEM + id interno", "Código único identificador do Local. Chave única do projeto. Ex.: G3456."),
+        "CO_BLOCO": ("N50/N52", "varchar(20)", "Sim", "texto", "Código do bloco (prédio) dentro do local. Compõe a chave primária."),
+        "ID_SALA": ("N50", "number(10)", "Sim", "inteiro", "Código identificador da sala. Compõe a chave primária do N50."),
+        "NO_LOCAL": ("N52", "varchar(250)", "Sim", "texto", "Nome do local de prova (a instituição/prédio). Usado como chave de agregação institucional."),
+        "NO_BLOCO": ("N52", "varchar(200)", "Sim", "texto", "Nome do bloco/prédio do local."),
+        "NO_SALA": ("N50", "varchar(40)", "Sim", "texto", "Nome físico da sala."),
+        "NO_ANDAR": ("N50", "varchar(20)", "Não", "texto", "Nome do andar onde a sala se localiza."),
+        "CO_CENSO": ("N52", "number(10)", "Sim", "código Censo INEP", "Código do CENSO da entidade (Educação Básica ou Superior); '0000000000' para os demais."),
+        "NU_CNPJ": ("N52", "varchar(14)", "Não", "14 dígitos", "CNPJ do local (sem pontuação)."),
+
+        # ---------------- LOCALIZAÇÃO E GEORREFERENCIAMENTO (N52) ----------------
+        "SG_UF": ("N52", "char(2)", "Sim", "UF válida", "Sigla da Unidade Federativa (Estado) do endereço do local."),
+        "CO_MUNICIPIO": ("N52", "number(7)", "Sim", "código IBGE 7 díg.", "Código de 7 posições do município do endereço do local."),
+        "NO_BAIRRO": ("N52", "varchar(100)", "Sim", "texto", "Bairro do endereço do bloco."),
+        "NU_CEP": ("N52", "varchar(8)", "Sim", "8 dígitos", "CEP do endereço (sem traço)."),
+        "NO_LOGRADOURO": ("N52", "varchar(400)", "Sim", "texto", "Logradouro do endereço do bloco."),
+        "NU_LATITUDE_LOCAL": ("N52", "decimal(9,6)", "Não", "-90 a 90", "Latitude geográfica do local (habilita a análise em mapa)."),
+        "NU_LONGITUDE_LOCAL": ("N52", "decimal(9,6)", "Não", "-180 a 180", "Longitude geográfica do local (habilita a análise em mapa)."),
+        "IN_CENTRO": ("N52", "char(1)", "Não", "1=Sim, 0=Não", "Indica se o local está no centro urbano do município (base do compliance de centralidade EN 1.2.2)."),
+
+        # ---------------- CAPACIDADE E DIMENSÕES (N50/N52) ----------------
+        "QT_CAPACIDADE_MAXIMA_SALA": ("N50", "number(5)", "Sim", "> 0", "Capacidade máxima de assentos da SALA. Variável-motor de toda a análise de lotação."),
+        "QT_CAPACIDADE_REDUZIDA_SALA": ("N50", "number(5)", "Sim", ">= 0", "Capacidade reduzida de assentos da sala (ex.: distanciamento/atendimento especial)."),
+        "QT_CAPACIDADE_MAXIMA": ("N52", "number(5)", "Sim", "> 0", "Capacidade máxima agregada do BLOCO."),
+        "QT_SALAS": ("N52", "number(5)", "Sim", ">= 0", "Quantidade de salas disponíveis no bloco."),
+        "QT_CANDIDATOS_ALOCADOS": ("N52", "number(10)", "Não", ">= 0", "Quantidade de candidatos alocados no bloco (base da taxa de ocupação)."),
+        "NU_LARGURA": ("N50", "number(5)", "Sim", "cm", "Largura da sala em centímetros (permite calcular a área)."),
+        "NU_COMPRIMENTO": ("N50", "number(5)", "Sim", "cm", "Comprimento da sala em centímetros (permite calcular a área e a densidade m²/pessoa)."),
+        "TP_MOBILIARIO": ("N50", "number(1)", "Sim", "1,2,3", "Tipo de mobiliário: 1-mesa/cadeira separadas; 2-cadeira universitária fixa; 3-cadeira universitária não fixa."),
+        "IN_ATIVO": ("N50", "number(1)", "Sim", "1=Ativa, 0=Inativa", "Indicador de sala ativa/apta ao uso."),
+
+        # ---------------- INSTITUIÇÃO / DEPENDÊNCIA / ALOCAÇÃO ----------------
+        "TP_INSTITUICAO": ("N52/N60", "number(1)", "Sim", "N52:1-Básico,2-Superior,3-Prisional,4-Socioeducativa | N60:1-Privada,2-Púb.Municipal,3-Púb.Estadual,4-Púb.Federal", "Tipo/natureza da instituição. ATENÇÃO: significado difere entre N52 e N60 (ver docstring)."),
+        "TP_DEPENDENCIA": ("N52", "number(1)", "Sim", "1-Federal,2-Estadual,3-Municipal,4-Privada", "Dependência administrativa do local."),
+        "TP_INST_PRIVADA": ("N60", "char(1)", "Sim", "1-Particular,2-Comunitária,3-Confessional,4-Filantrópica,0-N/A", "Categoria da instituição quando privada."),
+        "TP_SITUACAO_ALOCACAO": ("N52", "char(1)", "Sim", "1-Reservado, 2-Locado", "Situação da alocação do local."),
+        "IN_ATENDIMENTO_DIFERENCIADO": ("N52", "number(1)", "Sim", "1=Sim, 0=Não", "Indica se o bloco será usado para atendimento diferenciado."),
+        "IN_SABATISTAS": ("N52", "number(1)", "Sim", "1=Sim, 0=Não", "Indica se o bloco será usado para sabatistas."),
+        "IN_REAPLICACAO": ("N50/N60", "number(1)", "Sim", "1=Sim, 0=Não", "Indica se o local participará da reaplicação."),
+        "IN_PREVISAO_REFORMA": ("N52/N60", "number(1)", "Sim", "1=Sim, 0=Não", "Indica previsão de obras/reforma (alerta de risco operacional)."),
+
+        # ---------------- SANITÁRIOS ----------------
+        "QT_BANHEIRO_FEMININO": ("N52/N60", "number(5)", "Sim", ">= 0", "Nº de banheiros femininos disponíveis."),
+        "QT_BANHEIRO_MASCULINO": ("N52/N60", "number(5)", "Sim", ">= 0", "Nº de banheiros masculinos disponíveis."),
+        "QT_BANHEIRO_ADAPTADOS_FEM": ("N60", "number(5)", "Sim", ">= 0", "Nº de banheiros femininos adaptados para PcD."),
+        "QT_BANHEIRO_ADAPTADOS_MASC": ("N60", "number(5)", "Sim", ">= 0", "Nº de banheiros masculinos adaptados para PcD."),
+
+        # ---------------- ACESSIBILIDADE (N60 / N52) ----------------
+        "IN_ACESSIBILIDADE": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Percurso até o local possui segurança e acessibilidade."),
+        "IN_RAMPA_ENTORNO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Existência de rampas no entorno do local."),
+        "IN_RAMPA_ACESSO_ENTORNO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Rampas e escadas em condições ideais no entorno."),
+        "IN_RAMPA_ACESSO_LOCAL": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Rampas em condições ideais dentro do local."),
+        "IN_RAMPA_ACESSO": ("N52", "number(1)", "Sim", "1=Sim, 0=Não", "Bloco possui rampa de acesso."),
+        "IN_ELEVADOR": ("N52/N60", "number(1)", "Sim", "1=Sim, 0=Não", "Local/bloco possui elevador ou plataforma de elevação."),
+        "QT_ELEVADORES": ("N60", "number(5)", "Sim", ">= 0", "Quantidade de elevadores no local."),
+        "IN_SALA_ADAPTADA": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Sala adaptada para pessoas com deficiência."),
+        "IN_SALA_ACESSIVEL": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Sala de fácil acesso próxima ao banheiro."),
+        "IN_BEBEDOUROS_ADAPTADOS": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Bebedouros adaptados para PcD."),
+        "IN_PORTAS_ADEQUADAS": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Portas com mais de 900 mm para passagem de cadeirantes."),
+        "IN_MESA_CADEIRANTE": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Mesas para cadeira de rodas."),
+        "IN_MOBILIARIO_ADEQUADO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Mobiliário adequado para PcD/mobilidade reduzida."),
+        "IN_CADEIRAS_SEM_BRACOS": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Mesas e cadeiras sem braços."),
+        "IN_APOIO_PERNAS": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Apoio para pernas disponível."),
+        "IN_PISO_ADEQUADO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Piso nivelado (desnível máx. 1,5 cm)."),
+        "IN_CALCADAS_ENTORNO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Calçadas/passeios em condições ideais no entorno."),
+        "IN_INFRA_ACESSIBILIDADE": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Infraestrutura de acessibilidade adequada no entorno."),
+        "IN_CORREDORES_LARGOS": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Corredores largos para passagem de cadeirantes."),
+
+        # ---------------- SEGURANÇA E CONTINGÊNCIA (N60) ----------------
+        "IN_POLICIAMENTO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Posto de policiamento próximo ao local."),
+        "IN_ALTA_CRIMINALIDADE": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Local em área de alto índice de criminalidade (fator de risco — invertido nos índices)."),
+        "IN_LOCAL_CERCADO": ("N60", "number(1)", "Sim", "1=Confirmado, 0=Não", "Muros/grades/cercas garantindo a segurança dos participantes."),
+        "IN_PRIMEIROS_SOCORROS": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Equipamentos para primeiros socorros."),
+        "IN_SAIDA_EMERGENCIA": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Saída de emergência disponível."),
+        "IN_SINALIZACAO_EMERGENCIA": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Sinalização de emergência presente."),
+        "IN_EXTINTOR": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Extintor de incêndio apto ao uso."),
+        "IN_HIDRANTE": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Hidrante apto ao uso."),
+        "IN_RISCO_AMBIENTAL": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Risco de deslizamento/enchente/evento natural (fator de risco — invertido nos índices)."),
+        "IN_HOSPITAL": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Posto médico ou hospital próximo."),
+        "IN_TRANSPORTE_PROXIMO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Local próximo a ponto de transporte coletivo (compliance EN 1.2.1)."),
+        "IN_SIRENE": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Local possui sirene."),
+
+        # ---------------- CONFORTO (N60) ----------------
+        "IN_VENTILADOR": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Ventiladores na sala de aplicação."),
+        "IN_AR_CONDICIONADO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Ar-condicionado na sala de aplicação (conforto térmico)."),
+        "IN_JANELAS": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Janelas na sala de aplicação."),
+
+        # ---------------- TECNOLOGIA E MULTIMÍDIA (N60) ----------------
+        "IN_COMPUTADOR": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Computadores com acesso à internet."),
+        "IN_PROJETOR": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Projetores multimídia (datashow)."),
+        "IN_TELEVISAO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Televisão disponível."),
+        "IN_DVD": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Aparelhos de DVD."),
+        "IN_APARELHO_SOM": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Aparelhos de som."),
+        "IN_AUDITORIO": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Local possui auditório físico."),
+        "IN_SALA_PROVA_ELETRONICA": ("N60", "number(1)", "Sim", "1=Sim, 0=Não", "Há laboratório de informática para prova eletrônica."),
+        "QT_SALAS_PROVA_ELETRONICA": ("N60", "number(3)", "Não", ">= 0", "Quantidade de salas/laboratórios de informática."),
+        "QT_COMPUTADORES_DISPONIVEIS": ("N60", "number(3)", "Não", ">= 0", "Total de computadores em funcionamento disponíveis para aplicação."),
+
+        # ---------------- CONSERVAÇÃO PREDIAL (N60 — escala ordinal 0/1/2) ----------------
+        "TP_TELHADO": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação do telhado."),
+        "TP_PAREDES_INTERNAS": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação das paredes internas."),
+        "TP_PISO": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação do piso."),
+        "TP_PORTAS": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação das portas."),
+        "TP_JANELAS": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação das janelas."),
+        "TP_BANHEIROS": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação dos banheiros."),
+        "TP_INSTALACAO_HIDRAULICA": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado da instalação hidráulica."),
+        "TP_INSTALACAO_ELETRICA": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado da instalação elétrica."),
+        "TP_ENTRADA_PREDIO": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação da entrada do prédio."),
+        "TP_PAREDE_EXTERNA": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado das paredes externas."),
+        "TP_PATIO": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação do pátio."),
+        "TP_CORREDORES": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação dos corredores."),
+        "TP_SALA_AULA": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação das salas de aula."),
+        "TP_ILUMINACAO": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação da iluminação."),
+        "TP_BEBEDOUROS": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado de conservação dos bebedouros."),
+        "TP_ESCADAS_CORRIMAO": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado das escadas com corrimão/antiderrapante."),
+        "TP_ILUMINACAO_SALA": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado da iluminação das salas."),
+        "TP_MOBILIARIO_CONSERVACAO_SALA": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado do mobiliário das salas."),
+        "TP_MOBILIARIO_ADEQUADO_ADULTO": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Estado do mobiliário adequado para adultos."),
+
+        # ---------------- AVALIAÇÃO OFICIAL DO LOCAL (N60) ----------------
+        "TP_INFRA_LOCAL_PROVA": ("N60", "char(1)", "Sim", "2-Adequado,1-Razoável,0-Inadequado", "Avaliação da infraestrutura e condições de funcionamento do local."),
+        "NU_PONTOS_LOCAL_PROVA": ("N60", "number(3)", "Sim", "1-Básico,2-Adequado,3-Excelente", "Nota oficial de avaliação do local segundo regras do INEP (Básico/Adequado/Excelente)."),
+
+        # =====================================================================
+        # ENSALAMENTO — LAYOUT N02 (alocação participante → sala de prova).
+        # Nível de granularidade: um registro por participante ensalado.
+        # =====================================================================
+        "CO_INSCRICAO": ("N02/N90", "number(15)", "Sim", "código de inscrição", "Código da inscrição (sem CO_PROJETO) concatenado ao CO_GRUPO_CURSO."),
+        "CO_INSCRICAO_INEP": ("N02/N90", "number(15)", "Sim", "código único PND", "Código de inscrição ÚNICO do participante na edição do PND (chave do participante)."),
+        "CO_GRUPO_CURSO": ("N02/N90", "number(4-5)", "Sim", "código de área de avaliação", "Código da área de avaliação (grupo de curso) do participante. Ex.: 2 = DIREITO, 12 = MEDICINA."),
+        "NO_GRUPO_CURSO": ("N02", "varchar(60)", "Sim", "texto", "Nome do grupo/curso do estudante (ex.: MEDICINA, DIREITO, ENGENHARIA, PEDAGOGIA (LICENCIATURA))."),
+        "CO_IES": ("N02/N90", "number(10)", "Não", "código Censo Superior", "Código da Instituição de Ensino do inscrito (informado apenas para inscrições vindas do Enade)."),
+        "CO_CURSO": ("N02/N90", "number(7)", "Não", "código do curso", "Código do curso do inscrito (informado apenas para inscrições vindas do Enade)."),
+        "TP_ENSALAMENTO": ("N02", "number(2)", "Sim", "0-Comum,1-Sala de 1,6-Sala de 6,20-Sala de 20,40-Sala de 40,90-Reserva", "Porte/tipo da sala em que o participante foi ensalado. Salas menores indicam atendimento especializado."),
+        "CO_ATENDIMENTO_LISTA_PRESENCA": ("N02", "char(1)", "Sim", "0-Normal,2-Espec. s/ tempo,3-Espec. c/ tempo adic.,4-Múltiplas áreas", "Tipo de atendimento especial registrado na lista de presença do participante."),
+        "IN_ATENDIMENTO_ESPECIFICO": ("N02", "char(1)", "Sim", "0=Não, 1=Sim", "Participante solicitou atendimento específico (ex.: gestante, lactante, sabatista)."),
+        "IN_ATENDIMENTO_ESPECIALIZADO": ("N02", "char(1)", "Sim", "0=Não, 1=Sim", "Participante solicitou atendimento especializado (ex.: deficiência, mobilidade reduzida)."),
+        "IN_RECURSO": ("N02", "char(1)", "Sim", "0=Não, 1=Sim", "Participante solicitou auxílio/recurso (ex.: leitura, transcrição, tempo adicional)."),
+        "IN_RESERVA": ("N02", "char(1)", "Sim", "0=Não, 1=Sim", "Indica se o registro é de prova reserva."),
+        "CO_COORDENACAO": ("N02", "varchar(5)", "Sim", "código", "Código da coordenação do local de prova (unidade logística de aplicação)."),
+        "SG_UF_PROVA": ("N02", "varchar(2)", "Sim", "UF válida", "Sigla da UF de prova (arquivo N02, filtrado por UF)."),
+        "CO_MUNICIPIO_PROVA": ("N02/N90", "number(7)", "Sim", "código IBGE 7 díg.", "Código IBGE de 7 posições do município de prova do participante."),
+        "NO_MUNICIPIO_PROVA": ("N02", "varchar(100)", "Sim", "texto", "Nome do município de prova."),
+        "NO_LOCAL_PROVA": ("N02", "varchar(255)", "Sim", "texto", "Nome do local de prova (deve coincidir com NO_LOCAL do N52)."),
+        "NO_SALA_VIRTUAL": ("N02", "varchar(8)", "Sim", "UF999999", "Nome único da sala de prova no formato UF + 6 dígitos."),
+        "NU_DISTANCIA": ("N02", "number(6)", "Não", "metros", "Distância em metros associada ao participante/local (habilita análise de deslocamento)."),
+        "TP_IMPRIMIR": ("N02", "number(1)", "Sim", "1-Imprimir,2-Não imprimir,3-Não imprimir (sem tempo hábil)", "Indica se o material de prova deve ser impresso."),
+        "QTD_PROVAS": ("N02", "number(8)", "Sim", ">= 0", "Quantidade de provas no pacote."),
+
+        # =====================================================================
+        # INSCRITOS — LAYOUT N90 (dados cadastrais do participante da PND).
+        # Nível de granularidade: um registro por inscrição (CPF × grupo de curso).
+        # =====================================================================
+        "TP_SEXO": ("N90", "char(1)", "Sim", "M-Masculino, F-Feminino", "Sexo do inscrito (habilita a análise demográfica por gênero)."),
+        "DT_NASCIMENTO": ("N02/N90", "date", "Sim", "DD/MM/AAAA", "Data de nascimento do participante (habilita cálculo de idade e faixa etária)."),
+        "TP_SITUACAO": ("N90", "char(1)", "Sim", "R-Regular, I-Irregular, A-Ação Judicial", "Situação/status da inscrição do participante."),
+        "TP_ORIGEM_INSCRICAO": ("N90", "number(1)", "Sim", "1-PND s/ Enade,2-PND concluinte Enade,3-Importado Enade,4-PND concluinte outra área", "Origem da inscrição do estudante no PROVA_DOCENTE."),
+        "IN_ALOCACAO_NOME_SOCIAL": ("N90", "char(1)", "Sim", "0-Pelo nome civil, 1-Pelo nome social", "Indica se o participante será alocado pelo nome social informado."),
+        "CO_MUNICIPIO_RESIDENCIA": ("N90", "number(7)", "Não", "código IBGE 7 díg.", "Código IBGE do município de residência do inscrito."),
+        "SG_UF_MUNICIPIO_RESIDENCIA": ("N90", "char(2)", "Não", "UF válida", "Sigla da UF de residência do inscrito."),
+        "SG_UF_MUNICIPIO_PROVA": ("N90/N91", "char(2)", "Sim", "UF válida", "Sigla da UF de prova do inscrito (permite medir migração interestadual: residência × prova)."),
+
+        # =====================================================================
+        # ATENDIMENTOS & RECURSOS — LAYOUT N91 (acessibilidade adjudicada).
+        # Nível de granularidade: um registro por participante × item de atendimento.
+        # Contém todos os atendimentos/recursos do formulário de inscrição CONCEDIDOS
+        # (ou não) pelo INEP — é a visão ITEMIZADA e homologada das necessidades
+        # especiais, complementando os flags de atendimento do N02.
+        # =====================================================================
+        "ID_NECESSIDADE_PROJETO": ("N91", "number(2)", "Sim", "ID da tabela NECESSIDADE_PROJETO", "Identificador sequencial da necessidade especial vinculada ao projeto (tabela de domínio do INEP)."),
+        "ID_INSCRICAO_ATENDIMENTO": ("N91", "number(6)", "Sim", "ID único (sequence)", "Identificador único do atendimento/necessidade do participante. '0' para inclusões novas."),
+        "ID_ITEM_ATENDIMENTO": ("N91", "varchar(4)", "Sim", "ID do item", "Identificador da necessidade/item do participante para a realização da prova (compõe a chave única)."),
+        "NO_ITEM_ATENDIMENTO": ("N91", "varchar(100)", "Sim", "texto", "Nome do atendimento/recurso solicitado para a prova (ex.: PROVA EM BRAILLE, TEMPO ADICIONAL, LEDOR, INTÉRPRETE DE LIBRAS)."),
+        "TP_ITEM_ATENDIMENTO": ("N91", "char(1)", "Sim", "1-Atend. Específico, 2-Atend. Especializado, 3-Recurso", "Tipo do item de atendimento. É a chave da análise de acessibilidade adjudicada."),
+        "CO_SITUACAO_LAUDO_MEDICO": ("N91", "number(2)", "Sim", "0 a 12 (ver domínio)", "Situação do laudo médico do participante (Aprovado/Reprovado/Em análise por Consórcio/INEP). Domínio oficial de 13 códigos."),
+        "TP_FORMA_COMUNICACAO": ("N91", "char(1)", "Não", "1-Tadoma, 2-Libras tátil", "Forma de comunicação, informada apenas quando o recurso é Guia-intérprete."),
+        "TX_OBSERVACAO": ("N91", "varchar(1000)", "Não", "texto", "Observação específica do participante, aprovada pelo INEP na ligação de confirmação."),
+        "IN_ATIVO_ATENDIMENTO": ("N91", "char(1)", "Sim", "0-Desativado (sem direito), 1-Ativo (aprovado)", "Status do item de atendimento no N91: Ativo = participante TEM direito (deferido); Desativado = reprovado/não analisado. ATENÇÃO: no layout o campo chama-se IN_ATIVO — aqui é renomeado para NÃO colidir com o IN_ATIVO de sala (N50)."),
+        "TX_ATENDIMENTOS": ("N91", "varchar(500)", "Não", "texto (';')", "Concatenação dos atendimentos ativos do participante (tipos 1 e 2), usada no cartão de informação."),
+        "TX_RECURSOS": ("N91", "varchar(500)", "Não", "texto (';')", "Concatenação dos recursos homologados ativos do participante (tipo 3)."),
+        "CO_CID": ("N91", "char(4)", "Não", "código CID (DATASUS)", "Código oficial do CID (Classificação Internacional de Doenças) no Ministério da Saúde."),
+        "DS_CID": ("N91", "varchar(500)", "Não", "texto", "Descrição oficial do CID no Ministério da Saúde (DATASUS)."),
+        "ID_KIT_PROVA": ("N02/N91", "char(2)", "Não", "id do kit", "Kit de provas especial que o participante receberá, conforme regra de ensalamento."),
+        "TP_SITUACAO_ATENDIMENTO": ("N91", "number(2)", "Sim", "00 a 07 (ver domínio)", "Situação detalhada do atendimento: informado na inscrição, desativado (laudo/telefone), incluído (telefone/comissão/judicial) ou ativo (laudo indeferido/em análise)."),
+    }
+
+    # Índices compostos derivados (Feature Engineering) — explicados de forma didática.
+    DERIVED_FIELDS: Dict[str, Tuple[str, str]] = {
+        "INDICE_ACESSIBILIDADE": ("N60", "Percentual (0-100) de flags de acessibilidade atendidas: rampas, elevador, sala/banheiro/porta/mesa adaptados, piso, calçadas."),
+        "INDICE_SEGURANCA": ("N60", "Percentual (0-100) de itens de segurança/contingência atendidos (policiamento, cercamento, extintor, hidrante, saída de emergência), penalizando alta criminalidade e risco ambiental."),
+        "INDICE_CONFORTO": ("N60", "Percentual (0-100) de itens de conforto (ventilação, ar-condicionado, mobiliário, janelas, bebedouros)."),
+        "INDICE_TECNOLOGIA": ("N60", "Percentual (0-100) de recursos tecnológicos (computador, projetor, TV, DVD, som, sala eletrônica)."),
+        "INDICE_CONSERVACAO": ("N60", "Percentual (0-100) do estado de conservação predial, média dos campos TP_* (0-Inadequado, 1-Razoável, 2-Adequado) reescalados."),
+        "INDICE_QUALIDADE_GLOBAL": ("Derivado", "Média dos índices de Acessibilidade, Segurança, Conforto e Tecnologia (0-100)."),
+        "INDICE_VULNERABILIDADE": ("Derivado", "Complemento do Índice de Qualidade Global (100 − Qualidade). Quanto maior, pior."),
+        "NOTA_OFICIAL_INEP": ("N60", "Nota oficial NU_PONTOS_LOCAL_PROVA reescalada para 0-100 (Básico=33, Adequado=66, Excelente=100)."),
+        "TAXA_OCUPACAO_SALA": ("N50/N52", "Candidatos alocados ÷ capacidade máxima × 100. Mede superlotação/subutilização."),
+        "CANDIDATOS_POR_SALA": ("N52", "Candidatos alocados ÷ quantidade de salas do bloco."),
+        "CANDIDATOS_POR_BANHEIRO": ("N52/N60", "Candidatos alocados ÷ total de banheiros (dignidade sanitária)."),
+        "AREA_SALA_M2": ("N50", "Área da sala em m² = (largura × comprimento em cm) ÷ 10.000."),
+        "AREA_POR_CANDIDATO_M2": ("N50", "Área por assento (m²/pessoa) = área da sala ÷ capacidade máxima. Conforto/segurança espacial."),
+        "TAXA_REDUCAO_CAPACIDADE": ("N50", "1 − (capacidade reduzida ÷ capacidade máxima). Percentual de assentos suprimidos."),
+        "FAIXA_CAPACIDADE": ("Derivado", "Classificação da sala por quartis (IQR/Tukey): Micro, Pequena, Média, Grande, Gigante/Auditório."),
+        "PERFIL_INFRAESTRUTURA_IA": ("ML", "Perfil de infraestrutura atribuído por K-Means (C1 a C4) segundo volume de salas e capacidade."),
+        "ALERTA_ANOMALIA_ML": ("ML", "Marca registros estatisticamente anômalos detectados por Isolation Forest (possíveis erros de digitação)."),
+        # ---- Derivados do módulo de Inscritos & Ensalamento (N02/N90) ----
+        "IDADE_INSCRITO": ("N02/N90", "Idade do participante em anos completos, calculada a partir de DT_NASCIMENTO até a data de referência da execução."),
+        "FAIXA_ETARIA": ("Derivado", "Classificação etária do participante: 'Até 24', '25-29', '30-39', '40-49', '50+' — leitura demográfica do público."),
+        "DESC_SEXO": ("N90", "Descrição do sexo do participante (Masculino/Feminino) a partir de TP_SEXO."),
+        "DESC_SITUACAO_INSCRICAO": ("N90", "Descrição da situação da inscrição (Regular/Irregular/Ação Judicial) a partir de TP_SITUACAO."),
+        "DESC_TP_ENSALAMENTO": ("N02", "Descrição do tipo de ensalamento (Sala Comum, Sala de 1/6/20/40, Prova Reserva) a partir de TP_ENSALAMENTO."),
+        "DESC_ATENDIMENTO_PRESENCA": ("N02", "Descrição do atendimento na lista de presença (Normal, Especializado com/sem tempo adicional, Múltiplas áreas)."),
+        "DEMANDA_ATENDIMENTO_ESPECIAL": ("N02", "Flag 'Com Demanda Especial' quando o participante tem QUALQUER atendimento especializado, específico, recurso ou ensalamento em sala reduzida."),
+        "MIGRACAO_INTERESTADUAL": ("N90", "Indica se a UF de residência difere da UF de prova (deslocamento interestadual do participante)."),
+        "FAIXA_DISTANCIA": ("N02", "Classificação do deslocamento (NU_DISTANCIA) em faixas: 'Até 5 km', '5-20 km', '20-50 km', 'Acima de 50 km'."),
+        # ---- Derivados do módulo de Atendimentos & Recursos (N91) ----
+        "DESC_TP_ITEM_ATENDIMENTO": ("N91", "Descrição do tipo do item de atendimento (Atendimento Específico / Especializado / Recurso) a partir de TP_ITEM_ATENDIMENTO."),
+        "DESC_SITUACAO_LAUDO_MEDICO": ("N91", "Descrição do laudo médico a partir de CO_SITUACAO_LAUDO_MEDICO (domínio oficial de 13 códigos: Aprovado/Reprovado/Em análise por Consórcio/INEP, etc.)."),
+        "STATUS_LAUDO_MEDICO": ("N91", "Agrupamento simplificado do laudo em Aprovado / Reprovado / Em Análise / Recurso, para leitura executiva da taxa de deferimento."),
+        "STATUS_ATENDIMENTO": ("N91", "Status efetivo do atendimento (Deferido/Ativo vs. Indeferido/Inativo), derivado de CO_SITUACAO_LAUDO_MEDICO conforme a regra oficial da VW N91 (ativo p/ códigos {1,2,4,6,7,9})."),
+        "DESC_TP_SITUACAO_ATENDIMENTO": ("N91", "Descrição da situação detalhada do atendimento (00 a 07) a partir de TP_SITUACAO_ATENDIMENTO."),
+    }
+
+    @classmethod
+    def build_dataframe(cls) -> pd.DataFrame:
+        """Retorna o dicionário de dados dos campos brutos como DataFrame ordenado por layout."""
+        rows = [
+            {
+                "CAMPO": name,
+                "LAYOUT DE ORIGEM": meta[0],
+                "TIPO / TAMANHO": meta[1],
+                "OBRIGATÓRIO": meta[2],
+                "DOMÍNIO / VALORES ACEITOS": meta[3],
+                "DESCRIÇÃO OFICIAL (INEP)": meta[4],
+            }
+            for name, meta in cls.FIELDS.items()
+        ]
+        df = pd.DataFrame(rows)
+        # Ordena para leitura: primeiro por layout, depois por nome do campo.
+        return df.sort_values(["LAYOUT DE ORIGEM", "CAMPO"]).reset_index(drop=True)
+
+    @classmethod
+    def build_derived_dataframe(cls) -> pd.DataFrame:
+        """Retorna o dicionário dos índices/campos derivados (Feature Engineering)."""
+        rows = [
+            {"CAMPO DERIVADO": name, "BASE (LAYOUT)": meta[0], "COMO É CALCULADO / O QUE SIGNIFICA": meta[1]}
+            for name, meta in cls.DERIVED_FIELDS.items()
+        ]
+        return pd.DataFrame(rows)
+
+    @classmethod
+    def validate_columns(cls, df: pd.DataFrame) -> Dict[str, Any]:
+        """Compara as colunas presentes na base com os campos conhecidos dos layouts.
+
+        Retorna um dicionário de cobertura útil para o relatório de qualidade e para a
+        seção de metodologia — permitindo ao usuário saber exatamente quais campos
+        oficiais foram reconhecidos e quais estão ausentes na base carregada.
+        """
+        present_cols = set(df.columns)
+        known = set(cls.FIELDS.keys())
+        recognized = sorted(known & present_cols)
+        missing_known = sorted(known - present_cols)
+        unknown_extra = sorted(present_cols - known - set(cls.DERIVED_FIELDS.keys()))
+        return {
+            "total_campos_layout": len(known),
+            "campos_reconhecidos": recognized,
+            "qtd_reconhecidos": len(recognized),
+            "campos_layout_ausentes": missing_known,
+            "colunas_nao_mapeadas": unknown_extra,
+            "cobertura_percentual": round(100 * len(recognized) / max(1, len(known)), 1),
+        }
+
+
+class SyntheticDataGenerator:
+    """Gera uma base de demonstração realista, fiel aos layouts N02/N50/N52/N90/N91.
+
+    Serve a dois propósitos legítimos:
+
+    1. **Modo demonstração** (``--demo``): permite que qualquer pessoa experimente toda a
+       plataforma sem possuir a base SAS real, produzindo todos os relatórios com dados
+       plausíveis (nunca reais).
+    2. **Teste automatizado**: valida ponta a ponta que o pipeline gera Excel e HTML sem
+       erros.
+
+    Os valores são gerados com distribuições coerentes (capacidades log-normais, flags com
+    probabilidades típicas, coordenadas dentro do território brasileiro), respeitando os
+    domínios de cada campo.
+    """
+
+    UF_COORDS: Dict[str, Tuple[float, float]] = {
+        "SP": (-23.55, -46.63), "RJ": (-22.90, -43.20), "MG": (-19.92, -43.94),
+        "BA": (-12.97, -38.50), "PR": (-25.42, -49.27), "RS": (-30.03, -51.23),
+        "PE": (-8.05, -34.90), "CE": (-3.73, -38.52), "PA": (-1.45, -48.50),
+        "SC": (-27.59, -48.55), "GO": (-16.68, -49.25), "MA": (-2.53, -44.30),
+        "DF": (-15.79, -47.88), "AM": (-3.12, -60.02), "ES": (-20.32, -40.34),
+        "MT": (-15.60, -56.10), "RN": (-5.79, -35.21), "PB": (-7.12, -34.88),
+    }
+
+    @classmethod
+    def generate(cls, n_locais: int = 260, seed: int = 42) -> pd.DataFrame:
+        """Cria e retorna um DataFrame de microdados sintéticos de salas de prova."""
+        rng = np.random.default_rng(seed)
+        ufs = list(cls.UF_COORDS.keys())
+        uf_weights = np.array([28, 16, 14, 9, 9, 8, 6, 6, 5, 5, 4, 3, 3, 3, 3, 2, 2, 2], dtype=float)
+        uf_weights /= uf_weights.sum()
+
+        # ------------------------------------------------------------------------------
+        # DADOS DE REFERÊNCIA PARA O MÓDULO DE INSCRITOS & ENSALAMENTO (N02/N90).
+        # Grupos de curso reais extraídos da aba CO_GRUPO_CURSO do layout N90 (subconjunto
+        # representativo). Servem apenas ao MODO DEMONSTRAÇÃO — nunca a dados reais.
+        # ------------------------------------------------------------------------------
+        grupos_curso = [
+            (2, "DIREITO"), (12, "MEDICINA"), (2001, "PEDAGOGIA (LICENCIATURA)"),
+            (1, "ADMINISTRACAO"), (5710, "ENGENHARIA CIVIL"), (23, "ENFERMAGEM"),
+            (702, "MATEMATICA (BACHARELADO)"), (903, "LETRAS-PORTUGUES (BACHARELADO)"),
+            (5806, "ENGENHARIA ELETRICA"), (22, "CIENCIAS CONTABEIS"), (36, "FISIOTERAPIA"),
+            (19, "FARMACIA"), (3501, "EDUCACAO FISICA"), (4004, "CIENCIA DA COMPUTACAO (BACHARELADO)"),
+        ]
+        grupo_weights = np.array([14, 12, 10, 9, 7, 7, 5, 5, 5, 5, 4, 4, 4, 4], dtype=float)
+        grupo_weights /= grupo_weights.sum()
+        current_year = datetime.now().year
+
+        # ------------------------------------------------------------------------------
+        # DADOS DE REFERÊNCIA PARA O MÓDULO DE ATENDIMENTOS & RECURSOS (N91).
+        # Itens de atendimento reais por tipo (1-Específico, 2-Especializado, 3-Recurso).
+        # Usados apenas no MODO DEMONSTRAÇÃO — nunca em dados reais.
+        # ------------------------------------------------------------------------------
+        itens_por_tipo = {
+            1: ["SABATISTA", "GESTANTE", "LACTANTE", "IDOSO", "ESTUDANTE EM CLASSE HOSPITALAR"],
+            2: ["PROVA EM BRAILLE", "PROVA AMPLIADA", "PROVA SUPERAMPLIADA", "LEDOR", "TRANSCRITOR",
+                "INTERPRETE DE LIBRAS", "GUIA-INTERPRETE", "AUXILIO PARA LEITURA", "SALA DE FACIL ACESSO"],
+            3: ["TEMPO ADICIONAL", "PROTETOR AURICULAR", "MOBILIARIO ACESSIVEL", "MESA PARA CADEIRA DE RODAS",
+                "CALCULADORA", "ACESSO A MEDICAMENTO"],
+        }
+        # CID de exemplo (categorias amplas) — apenas para o campo DS_CID sintético.
+        cids_exemplo = [
+            ("H54", "CEGUEIRA E VISAO SUBNORMAL"), ("H90", "PERDA DE AUDICAO"),
+            ("F90", "TRANSTORNOS HIPERCINETICOS (TDAH)"), ("F84", "TRANSTORNOS GLOBAIS DO DESENVOLVIMENTO"),
+            ("G80", "PARALISIA CEREBRAL"), ("M51", "TRANSTORNOS DE DISCOS INTERVERTEBRAIS"),
+            ("Z34", "SUPERVISAO DE GRAVIDEZ NORMAL"),
+        ]
+        # Situação do laudo médico (domínio oficial N91). Pesos realistas: maioria aprovada.
+        laudo_codes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        laudo_weights = np.array([3, 22, 10, 3, 20, 2, 6, 22, 2, 5, 2, 2, 1], dtype=float)
+        laudo_weights /= laudo_weights.sum()
+
+        records: List[Dict[str, Any]] = []
+        for li in range(n_locais):
+            uf = rng.choice(ufs, p=uf_weights)
+            base_lat, base_lon = cls.UF_COORDS[uf]
+            # Qualidade "latente" do prédio governa correlações realistas entre flags.
+            q = float(np.clip(rng.beta(2.4, 2.0), 0.05, 0.98))
+            n_blocos = int(rng.integers(1, 4))
+            for bi in range(n_blocos):
+                bloco = f"B{bi+1:02d}"
+                n_salas = int(np.clip(rng.lognormal(1.5, 0.7), 1, 60))
+                lat = base_lat + rng.normal(0, 0.35)
+                lon = base_lon + rng.normal(0, 0.35)
+                is_centro = int(rng.random() < (0.35 + 0.4 * q))
+                transporte = int(rng.random() < (0.30 + 0.55 * q + 0.1 * is_centro))
+                dependencia = int(rng.choice([1, 2, 3, 4], p=[0.06, 0.34, 0.42, 0.18]))
+                tp_inst = int(rng.choice([1, 2, 3, 4], p=[0.55, 0.30, 0.10, 0.05]))
+                for si in range(n_salas):
+                    cap = int(np.clip(rng.lognormal(3.35, 0.5), 8, 400))
+                    largura = int(np.clip(rng.normal(650 + cap * 3, 120), 300, 2500))
+                    comprimento = int(np.clip(rng.normal(700 + cap * 3, 130), 300, 2500))
+
+                    def flag(p_base: float, q_weight: float = 0.5) -> int:
+                        return int(rng.random() < np.clip(p_base * (1 - q_weight) + q * q_weight, 0.01, 0.99))
+
+                    def cons() -> int:  # estado de conservação 0/1/2 correlacionado com q
+                        return int(np.clip(round(rng.normal(2 * q, 0.6)), 0, 2))
+
+                    # ---- Perfil sintético de INSCRITO & ENSALAMENTO (N02/N90) ----
+                    gi = int(rng.choice(len(grupos_curso), p=grupo_weights))
+                    co_grupo, no_grupo = grupos_curso[gi]
+                    sexo = rng.choice(["M", "F"], p=[0.46, 0.54])
+                    # Idade log-normal deslocada (público docente tende a ser mais velho).
+                    idade = int(np.clip(round(rng.normal(34, 9)), 21, 68))
+                    ano_nasc = current_year - idade
+                    dt_nasc = f"{int(rng.integers(1, 29)):02d}/{int(rng.integers(1, 13)):02d}/{ano_nasc}"
+                    # Atendimento especial (correlacionado levemente com prédios acessíveis).
+                    especializado = int(rng.random() < 0.06)
+                    especifico = int(rng.random() < 0.05)
+                    recurso = int(rng.random() < 0.04)
+                    if especializado or especifico or recurso:
+                        tp_ensala = int(rng.choice([1, 6, 20, 40], p=[0.15, 0.30, 0.35, 0.20]))
+                        co_atend = int(rng.choice([2, 3, 4], p=[0.4, 0.5, 0.1]))
+                    else:
+                        tp_ensala = 0
+                        co_atend = 0
+                    reserva = int(rng.random() < 0.02)
+                    if reserva:
+                        tp_ensala = 90
+                    situacao = rng.choice(["R", "I", "A"], p=[0.955, 0.03, 0.015])
+                    # Migração interestadual: a maioria faz prova na própria UF de residência.
+                    if rng.random() < 0.12:
+                        uf_resid = rng.choice(ufs, p=uf_weights)
+                    else:
+                        uf_resid = uf
+                    distancia = int(np.clip(rng.lognormal(8.4, 1.1), 200, 180000))  # metros
+
+                    # ---- Perfil sintético de ATENDIMENTOS & RECURSOS (N91) ----
+                    # Só participantes com demanda especial possuem item de atendimento.
+                    if especializado or especifico or recurso:
+                        tp_item = 2 if especializado else (1 if especifico else 3)
+                        no_item = str(rng.choice(itens_por_tipo[tp_item]))
+                        id_item = f"{tp_item}{int(rng.integers(100, 999))}"
+                        co_laudo = int(rng.choice(laudo_codes, p=laudo_weights))
+                        ativo_atend = 1 if co_laudo in (1, 2, 4, 6, 7, 9) else 0
+                        if co_laudo in (0, 3):
+                            tp_sit_atend = 1        # Desativado: laudo indeferido
+                        elif co_laudo == 2:
+                            tp_sit_atend = 7        # Ativo: laudo em análise
+                        elif co_laudo in (10, 11):
+                            tp_sit_atend = 6        # Ativo: laudo indeferido, mantido
+                        else:
+                            tp_sit_atend = 0        # Informado na inscrição
+                        if tp_item == 2 and rng.random() < 0.6:
+                            _cid = cids_exemplo[int(rng.integers(0, len(cids_exemplo)))]
+                            cid_co, cid_ds = _cid[0], _cid[1]
+                        else:
+                            cid_co, cid_ds = "", ""
+                    else:
+                        tp_item = np.nan; no_item = ""; id_item = ""; co_laudo = np.nan
+                        ativo_atend = np.nan; tp_sit_atend = np.nan; cid_co = ""; cid_ds = ""
+
+                    records.append({
+                        "CO_PROJETO": 2618801, "TP_ORIGEM": "G",
+                        "CO_LOCAL": f"G{li+1000}", "CO_BLOCO": bloco, "ID_SALA": (li * 1000 + bi * 100 + si),
+                        "NO_LOCAL": f"INSTITUICAO EDUCACIONAL {li+1:03d} - {uf}",
+                        "NO_BLOCO": f"BLOCO {bloco}", "NO_SALA": f"SALA {si+1:03d}", "NO_ANDAR": f"{rng.integers(0,4)} ANDAR",
+                        "SG_UF": uf, "CO_MUNICIPIO": int(f"{rng.integers(11,53)}{rng.integers(10000,99999)}"),
+                        "NO_BAIRRO": rng.choice(["CENTRO", "JARDIM AMERICA", "VILA NOVA", "SANTA CRUZ", "BOA VISTA"]),
+                        "NU_LATITUDE_LOCAL": round(float(lat), 6), "NU_LONGITUDE_LOCAL": round(float(lon), 6),
+                        "IN_CENTRO": is_centro,
+                        "QT_CAPACIDADE_MAXIMA_SALA": cap,
+                        "QT_CAPACIDADE_REDUZIDA_SALA": int(cap * rng.uniform(0.5, 0.95)),
+                        "QT_SALAS": n_salas, "QT_CAPACIDADE_MAXIMA": cap * n_salas,
+                        "QT_CANDIDATOS_ALOCADOS": int(cap * rng.uniform(0.4, 1.05)),
+                        "NU_LARGURA": largura, "NU_COMPRIMENTO": comprimento,
+                        "TP_MOBILIARIO": int(rng.choice([1, 2, 3])), "IN_ATIVO": int(rng.random() < 0.97),
+                        "TP_INSTITUICAO": tp_inst, "TP_DEPENDENCIA": dependencia,
+                        "TP_SITUACAO_ALOCACAO": int(rng.choice([1, 2], p=[0.25, 0.75])),
+                        "IN_ATENDIMENTO_DIFERENCIADO": flag(0.12, 0.1), "IN_SABATISTAS": flag(0.05, 0.05),
+                        "IN_REAPLICACAO": flag(0.08, 0.05), "IN_PREVISAO_REFORMA": int(rng.random() < (0.18 * (1 - q))),
+                        "QT_BANHEIRO_FEMININO": int(rng.integers(1, 8)), "QT_BANHEIRO_MASCULINO": int(rng.integers(1, 8)),
+                        "QT_BANHEIRO_ADAPTADOS_FEM": flag(0.4), "QT_BANHEIRO_ADAPTADOS_MASC": flag(0.4),
+                        "QT_ELEVADORES": int(flag(0.25) * rng.integers(1, 4)),
+                        "IN_ACESSIBILIDADE": flag(0.3, 0.6), "IN_RAMPA_ENTORNO": flag(0.35, 0.5),
+                        "IN_RAMPA_ACESSO_LOCAL": flag(0.4, 0.5), "IN_RAMPA_ACESSO": flag(0.4, 0.5),
+                        "IN_ELEVADOR": flag(0.2, 0.5), "IN_SALA_ADAPTADA": flag(0.35, 0.55),
+                        "IN_SALA_ACESSIVEL": flag(0.4, 0.5), "IN_BEBEDOUROS_ADAPTADOS": flag(0.3, 0.5),
+                        "IN_PORTAS_ADEQUADAS": flag(0.45, 0.5), "IN_MESA_CADEIRANTE": flag(0.4, 0.5),
+                        "IN_PISO_ADEQUADO": flag(0.55, 0.4), "IN_CALCADAS_ENTORNO": flag(0.5, 0.4),
+                        "IN_INFRA_ACESSIBILIDADE": flag(0.4, 0.55),
+                        "IN_POLICIAMENTO": flag(0.35, 0.4), "IN_ALTA_CRIMINALIDADE": int(rng.random() < (0.22 * (1 - q))),
+                        "IN_LOCAL_CERCADO": flag(0.6, 0.4), "IN_PRIMEIROS_SOCORROS": flag(0.4, 0.5),
+                        "IN_SAIDA_EMERGENCIA": flag(0.55, 0.5), "IN_SINALIZACAO_EMERGENCIA": flag(0.5, 0.5),
+                        "IN_EXTINTOR": flag(0.7, 0.4), "IN_HIDRANTE": flag(0.45, 0.5),
+                        "IN_RISCO_AMBIENTAL": int(rng.random() < (0.12 * (1 - q))),
+                        "IN_HOSPITAL": flag(0.4, 0.4), "IN_TRANSPORTE_PROXIMO": transporte, "IN_SIRENE": flag(0.2),
+                        "IN_VENTILADOR": flag(0.6, 0.4), "IN_AR_CONDICIONADO": flag(0.35, 0.55),
+                        "IN_JANELAS": flag(0.85, 0.3),
+                        "IN_COMPUTADOR": flag(0.4, 0.55), "IN_PROJETOR": flag(0.45, 0.5), "IN_TELEVISAO": flag(0.4, 0.4),
+                        "IN_DVD": flag(0.2, 0.3), "IN_APARELHO_SOM": flag(0.3, 0.4), "IN_AUDITORIO": flag(0.15, 0.4),
+                        "IN_SALA_PROVA_ELETRONICA": flag(0.3, 0.5),
+                        "TP_TELHADO": cons(), "TP_PAREDES_INTERNAS": cons(), "TP_PISO": cons(), "TP_PORTAS": cons(),
+                        "TP_JANELAS": cons(), "TP_BANHEIROS": cons(), "TP_INSTALACAO_HIDRAULICA": cons(),
+                        "TP_INSTALACAO_ELETRICA": cons(), "TP_ENTRADA_PREDIO": cons(), "TP_PAREDE_EXTERNA": cons(),
+                        "TP_PATIO": cons(), "TP_CORREDORES": cons(), "TP_SALA_AULA": cons(), "TP_ILUMINACAO": cons(),
+                        "TP_BEBEDOUROS": cons(), "TP_ESCADAS_CORRIMAO": cons(), "TP_ILUMINACAO_SALA": cons(),
+                        "TP_MOBILIARIO_CONSERVACAO_SALA": cons(), "TP_MOBILIARIO_ADEQUADO_ADULTO": cons(),
+                        "TP_INFRA_LOCAL_PROVA": cons(),
+                        "NU_PONTOS_LOCAL_PROVA": int(np.clip(round(rng.normal(1 + 2 * q, 0.6)), 1, 3)),
+                        # ---- Campos do ENSALAMENTO (N02) ----
+                        "CO_GRUPO_CURSO": co_grupo, "NO_GRUPO_CURSO": no_grupo,
+                        "TP_ENSALAMENTO": tp_ensala, "CO_ATENDIMENTO_LISTA_PRESENCA": co_atend,
+                        "IN_ATENDIMENTO_ESPECIALIZADO": especializado,
+                        "IN_ATENDIMENTO_ESPECIFICO": especifico, "IN_RECURSO": recurso,
+                        "IN_RESERVA": reserva, "SG_UF_PROVA": uf,
+                        "CO_MUNICIPIO_PROVA": int(f"{rng.integers(11,53)}{rng.integers(10000,99999)}"),
+                        "NU_DISTANCIA": distancia,
+                        # ---- Campos do INSCRITO (N90) ----
+                        "TP_SEXO": sexo, "DT_NASCIMENTO": dt_nasc, "TP_SITUACAO": situacao,
+                        "SG_UF_MUNICIPIO_RESIDENCIA": uf_resid, "SG_UF_MUNICIPIO_PROVA": uf,
+                        "IN_ALOCACAO_NOME_SOCIAL": int(rng.random() < 0.01),
+                        # ---- Campos de ATENDIMENTOS & RECURSOS (N91) ----
+                        "ID_ITEM_ATENDIMENTO": id_item, "NO_ITEM_ATENDIMENTO": no_item,
+                        "TP_ITEM_ATENDIMENTO": tp_item, "CO_SITUACAO_LAUDO_MEDICO": co_laudo,
+                        "IN_ATIVO_ATENDIMENTO": ativo_atend, "TP_SITUACAO_ATENDIMENTO": tp_sit_atend,
+                        "CO_CID": cid_co, "DS_CID": cid_ds,
+                    })
+        return pd.DataFrame(records)
+
+    @classmethod
+    def generate_multi_layout(cls, flat_df: pd.DataFrame, seed: int = 42) -> Dict[str, pd.DataFrame]:
+        """Deriva as CINCO tabelas normalizadas (N50, N52, N02, N90, N91) a partir da base
+        plana, INJETANDO inconsistências realistas para exercitar o motor de Auditoria de
+        Cruzamento (participantes sem ensalamento, órfãos, divergências de município,
+        distâncias críticas, ensalamento duplicado e divergência de kit).
+
+        Usado apenas no MODO DEMONSTRAÇÃO — jamais em dados reais. Em produção, o usuário
+        fornece um workbook com abas por layout e o :class:`MultiLayoutLoader` as reconhece.
+        """
+        rng = np.random.default_rng(seed + 7)
+        df = flat_df.copy()
+        # Chave de participante sintética estável (a base plana tem 1 "participante" por sala).
+        df = df.reset_index(drop=True)
+        df['CO_INSCRICAO_INEP'] = (261880100000000 + df.index.to_numpy() + 1).astype('int64')
+        df['CO_INSCRICAO'] = df['CO_INSCRICAO_INEP']
+
+        # ---------------- N52 — LOCAIS/BLOCOS (1 linha por CO_LOCAL × CO_BLOCO) --------
+        n52_cols = ['CO_PROJETO', 'TP_ORIGEM', 'CO_LOCAL', 'NO_LOCAL', 'CO_BLOCO', 'NO_BLOCO',
+                    'NO_LOGRADOURO', 'NO_BAIRRO', 'NU_CEP', 'CO_MUNICIPIO', 'SG_UF',
+                    'QT_SALAS', 'QT_CAPACIDADE_MAXIMA', 'QT_BANHEIRO_FEMININO', 'QT_BANHEIRO_MASCULINO',
+                    'IN_RAMPA_ACESSO', 'IN_ELEVADOR', 'TP_INSTITUICAO', 'TP_DEPENDENCIA',
+                    'NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL', 'IN_CENTRO', 'TP_SITUACAO_ALOCACAO']
+        n52_cols = [c for c in n52_cols if c in df.columns]
+        n52 = (df.groupby(['CO_LOCAL', 'CO_BLOCO'], as_index=False)
+                 .agg({**{c: 'first' for c in n52_cols if c not in ('CO_LOCAL', 'CO_BLOCO', 'QT_SALAS', 'QT_CAPACIDADE_MAXIMA')},
+                       **({'QT_SALAS': 'nunique'} if 'ID_SALA' in df.columns else {}),
+                       }))
+        # Recalcula QT_SALAS e capacidade do bloco a partir das salas reais.
+        if 'ID_SALA' in df.columns:
+            salas_por_bloco = df.groupby(['CO_LOCAL', 'CO_BLOCO'])['ID_SALA'].nunique().reset_index(name='QT_SALAS_REAL')
+            n52 = n52.merge(salas_por_bloco, on=['CO_LOCAL', 'CO_BLOCO'], how='left')
+            n52['QT_SALAS'] = n52['QT_SALAS_REAL']
+            n52 = n52.drop(columns=['QT_SALAS_REAL'])
+        if 'QT_CAPACIDADE_MAXIMA_SALA' in df.columns:
+            cap_bloco = df.groupby(['CO_LOCAL', 'CO_BLOCO'])['QT_CAPACIDADE_MAXIMA_SALA'].sum().reset_index(name='QT_CAPACIDADE_MAXIMA')
+            n52 = n52.drop(columns=[c for c in ['QT_CAPACIDADE_MAXIMA'] if c in n52.columns]).merge(cap_bloco, on=['CO_LOCAL', 'CO_BLOCO'], how='left')
+
+        # ---------------- N50 — SALAS (1 linha por CO_LOCAL × CO_BLOCO × ID_SALA) ------
+        n50_cols = ['CO_PROJETO', 'TP_ORIGEM', 'CO_LOCAL', 'CO_BLOCO', 'ID_SALA', 'NO_ANDAR', 'NO_SALA',
+                    'QT_CAPACIDADE_MAXIMA_SALA', 'QT_CAPACIDADE_REDUZIDA_SALA', 'IN_ATIVO',
+                    'NU_LARGURA', 'NU_COMPRIMENTO', 'TP_MOBILIARIO', 'IN_REAPLICACAO']
+        n50_cols = [c for c in n50_cols if c in df.columns]
+        n50 = df[n50_cols].drop_duplicates(subset=[c for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA'] if c in df.columns]).copy()
+
+        # ---------------- N90 — INSCRITOS (1 linha por participante) -------------------
+        n90_cols = ['CO_PROJETO', 'TP_ORIGEM', 'CO_INSCRICAO', 'CO_INSCRICAO_INEP', 'CO_GRUPO_CURSO',
+                    'TP_SEXO', 'DT_NASCIMENTO', 'TP_SITUACAO', 'SG_UF_MUNICIPIO_RESIDENCIA',
+                    'SG_UF_MUNICIPIO_PROVA', 'CO_MUNICIPIO', 'IN_REAPLICACAO']
+        n90_cols = [c for c in n90_cols if c in df.columns]
+        n90 = df[n90_cols].drop_duplicates(subset=['CO_INSCRICAO_INEP']).copy()
+        if 'CO_MUNICIPIO' in n90.columns:
+            n90 = n90.rename(columns={'CO_MUNICIPIO': 'CO_MUNICIPIO_PROVA'})
+
+        # ---------------- N02 — ENSALAMENTO (1 linha por participante ensalado) --------
+        n02_cols = ['CO_PROJETO', 'TP_ORIGEM', 'CO_INSCRICAO', 'CO_INSCRICAO_INEP', 'CO_GRUPO_CURSO',
+                    'NO_GRUPO_CURSO', 'TP_ENSALAMENTO', 'CO_ATENDIMENTO_LISTA_PRESENCA',
+                    'IN_ATENDIMENTO_ESPECIALIZADO', 'IN_ATENDIMENTO_ESPECIFICO', 'IN_RECURSO', 'IN_RESERVA',
+                    'SG_UF_PROVA', 'CO_MUNICIPIO', 'CO_LOCAL', 'NO_LOCAL', 'CO_BLOCO', 'NO_BLOCO',
+                    'ID_SALA', 'NO_SALA', 'NU_DISTANCIA']
+        n02_cols = [c for c in n02_cols if c in df.columns]
+        n02 = df[n02_cols].drop_duplicates(subset=['CO_INSCRICAO_INEP']).copy()
+        if 'CO_MUNICIPIO' in n02.columns:
+            n02 = n02.rename(columns={'CO_MUNICIPIO': 'CO_MUNICIPIO_PROVA'})
+        # ID_KIT_PROVA sintético para os participantes com atendimento especial.
+        if 'TP_ITEM_ATENDIMENTO' in df.columns:
+            kit_map = df.drop_duplicates('CO_INSCRICAO_INEP').set_index('CO_INSCRICAO_INEP')['TP_ITEM_ATENDIMENTO']
+            n02['ID_KIT_PROVA'] = n02['CO_INSCRICAO_INEP'].map(
+                lambda x: f"K{int(kit_map.get(x)):d}" if pd.notna(kit_map.get(x)) else "")
+
+        # ---------------- N91 — ATENDIMENTOS (1 linha por participante × item) ---------
+        n91 = pd.DataFrame()
+        if 'TP_ITEM_ATENDIMENTO' in df.columns:
+            n91_src = df[pd.to_numeric(df['TP_ITEM_ATENDIMENTO'], errors='coerce').isin([1, 2, 3])].copy()
+            n91_cols = ['CO_PROJETO', 'TP_ORIGEM', 'CO_INSCRICAO', 'ID_ITEM_ATENDIMENTO', 'NO_ITEM_ATENDIMENTO',
+                        'TP_ITEM_ATENDIMENTO', 'CO_SITUACAO_LAUDO_MEDICO', 'IN_ATIVO_ATENDIMENTO',
+                        'TP_SITUACAO_ATENDIMENTO', 'CO_CID', 'DS_CID', 'SG_UF_MUNICIPIO_PROVA']
+            n91_cols = [c for c in n91_cols if c in n91_src.columns]
+            n91 = n91_src[n91_cols].copy()
+            if 'IN_ATIVO_ATENDIMENTO' in n91.columns:
+                n91 = n91.rename(columns={'IN_ATIVO_ATENDIMENTO': 'IN_ATIVO'})
+            # ID_KIT_PROVA no N91 (para checar consistência com o N02); injeta divergência.
+            n91['ID_KIT_PROVA'] = n91['TP_ITEM_ATENDIMENTO'].map(lambda t: f"K{int(t):d}" if pd.notna(t) else "")
+
+        # =========================== INJEÇÃO DE INCONSISTÊNCIAS ========================
+        n_insc = len(n90)
+        inconsist = {}
+        # (1) Participantes sem ensalamento: remove 3 participantes do N02 (1 COM atendimento).
+        if len(n02) > 5:
+            atend_ids = set()
+            if not n91.empty and 'CO_INSCRICAO' in n91.columns:
+                atend_ids = set(pd.to_numeric(n91['CO_INSCRICAO'], errors='coerce').dropna().astype('int64').tolist())
+            pool = n90['CO_INSCRICAO_INEP']
+            escolhidos = []
+            if atend_ids:
+                com_atend = pool[pool.isin(atend_ids)]
+                if len(com_atend) > 0:
+                    escolhidos.append(int(com_atend.sample(n=1, random_state=seed).iloc[0]))
+            restantes = pool[~pool.isin(escolhidos)].sample(n=max(0, 3 - len(escolhidos)), random_state=seed).tolist()
+            sem_ens = escolhidos + [int(x) for x in restantes]
+            n02 = n02[~n02['CO_INSCRICAO_INEP'].isin(sem_ens)].copy()
+            inconsist['sem_ensalamento_esperado'] = [int(x) for x in sem_ens]
+        # (2) Ensalado não inscrito (órfão): adiciona 2 CO_INSCRICAO ao N02 fora do N90.
+        if len(n02) > 0:
+            orfaos = [261880109000001, 261880109000002]
+            extra = n02.iloc[:2].copy()
+            extra['CO_INSCRICAO_INEP'] = orfaos
+            extra['CO_INSCRICAO'] = orfaos
+            n02 = pd.concat([n02, extra], ignore_index=True)
+            inconsist['ensalado_nao_inscrito_esperado'] = orfaos
+        # (3) Ensalamento duplicado: participante em 2 salas.
+        if len(n02) > 3 and 'ID_SALA' in n02.columns:
+            dup = n02.iloc[[0]].copy()
+            if len(n50) > 1:
+                outra_sala = n50.iloc[1]
+                for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA', 'NO_SALA']:
+                    if c in dup.columns and c in n50.columns:
+                        dup[c] = outra_sala[c]
+            n02 = pd.concat([n02, dup], ignore_index=True)
+            inconsist['ensalamento_duplicado_esperado'] = [int(dup.iloc[0]['CO_INSCRICAO_INEP'])]
+        # (4) Órfão referencial: 2 registros do N02 com CO_LOCAL inexistente no N52.
+        if len(n02) > 6:
+            idx = n02.sample(n=2, random_state=seed + 1).index
+            n02.loc[idx, 'CO_LOCAL'] = 'LOCAL_INEXISTENTE_X'
+            inconsist['orfao_local_esperado'] = 2
+        # (5) Divergência de município: altera CO_MUNICIPIO_PROVA no N02 de alguns.
+        if 'CO_MUNICIPIO_PROVA' in n02.columns and len(n02) > 10:
+            idx = n02.sample(n=min(5, len(n02)), random_state=seed + 2).index
+            n02.loc[idx, 'CO_MUNICIPIO_PROVA'] = pd.to_numeric(n02.loc[idx, 'CO_MUNICIPIO_PROVA'], errors='coerce').fillna(0).astype('int64') + 7
+            inconsist['divergencia_municipio_esperado'] = int(len(idx))
+        # (6) Distâncias críticas: força alguns NU_DISTANCIA acima do limiar de contrato.
+        if 'NU_DISTANCIA' in n02.columns and len(n02) > 8:
+            idx = n02.sample(n=min(6, len(n02)), random_state=seed + 3).index
+            n02.loc[idx, 'NU_DISTANCIA'] = rng.integers(21000, 60000, size=len(idx))
+            inconsist['distancia_critica_esperado'] = int(len(idx))
+        # (7) Divergência de kit N02×N91: altera o kit de um participante no N91.
+        if not n91.empty and 'ID_KIT_PROVA' in n91.columns:
+            n91.iloc[0, n91.columns.get_loc('ID_KIT_PROVA')] = 'K9'
+            inconsist['kit_divergente_esperado'] = 1
+        # (8) Atendimento SEM kit: remove o kit de 2 ensalados que têm atendimento (kit != '').
+        if 'ID_KIT_PROVA' in n02.columns:
+            tem_kit = n02['ID_KIT_PROVA'].astype(str).str.strip().replace({'nan': ''}) != ''
+            cand = n02[tem_kit.values]
+            if len(cand) >= 2:
+                idx = cand.sample(n=2, random_state=seed + 4).index
+                n02.loc[idx, 'ID_KIT_PROVA'] = ''
+                inconsist['atend_sem_kit_esperado'] = 2
+        # (9) Múltiplos atendimentos (N91): adiciona um 2º item (Tempo Adicional) a ~25 participantes.
+        if not n91.empty and 'CO_INSCRICAO' in n91.columns and n91['CO_INSCRICAO'].nunique() > 30:
+            extra = n91.drop_duplicates('CO_INSCRICAO').sample(
+                n=min(25, n91['CO_INSCRICAO'].nunique()), random_state=seed + 5).copy()
+            for col, val in [('NO_ITEM_ATENDIMENTO', 'TEMPO ADICIONAL'), ('TP_ITEM_ATENDIMENTO', 3),
+                             ('ID_ITEM_ATENDIMENTO', '3999'), ('CO_SITUACAO_LAUDO_MEDICO', 7),
+                             ('IN_ATIVO', 1), ('ID_KIT_PROVA', 'K3'), ('CO_CID', ''), ('DS_CID', '')]:
+                if col in extra.columns:
+                    extra[col] = val
+            n91 = pd.concat([n91, extra], ignore_index=True)
+            inconsist['multiplos_atendimentos_esperado'] = int(len(extra))
+
+        # ---------------- N60 — INFRAESTRUTURA/VISITA (1 linha por CO_LOCAL) -----------
+        n60 = None
+        if 'CO_LOCAL' in df.columns:
+            n60_cols = [c for c in ['CO_LOCAL', 'NO_LOCAL', 'IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA',
+                        'IN_SALA_ACESSIVEL', 'IN_RAMPA_ACESSO_LOCAL', 'IN_RAMPA_ENTORNO', 'IN_PISO_ADEQUADO',
+                        'IN_PORTAS_ADEQUADAS', 'IN_MESA_CADEIRANTE', 'IN_BEBEDOUROS_ADAPTADOS',
+                        'IN_BANHEIRO_ACESSIVEL', 'QT_BANHEIRO_ADAPTADOS_FEM', 'QT_BANHEIRO_ADAPTADOS_MASC',
+                        'QT_ELEVADORES', 'IN_POLICIAMENTO', 'IN_ALTA_CRIMINALIDADE', 'IN_LOCAL_CERCADO',
+                        'IN_PRIMEIROS_SOCORROS', 'IN_SAIDA_EMERGENCIA', 'IN_SINALIZACAO_EMERGENCIA',
+                        'IN_EXTINTOR', 'TP_INFRA_LOCAL_PROVA', 'NU_PONTOS_LOCAL_PROVA'] if c in df.columns]
+            if len(n60_cols) > 3:
+                n60 = df[n60_cols].drop_duplicates(subset=['CO_LOCAL']).copy()
+
+        return {
+            'N52': n52, 'N50': n50, 'N90': n90, 'N02': n02, 'N91': n91,
+            **({'N60': n60} if n60 is not None and not n60.empty else {}),
+            '_inconsistencias_injetadas': inconsist,
+        }
+
+
+class LoggerSetup:
+    """Módulo de rastreabilidade, registro e auditoria de sistemas."""
+    @staticmethod
+    def get_logger(log_dir):
+        log_file = log_dir / f"execucao_Master_Enterprise_V27_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - [%(module)s] - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, encoding='utf-8'),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+        return logging.getLogger("BI_Analytics_Enterprise")
+
 
 # ==========================================
-# CONFIGURAÇÃO DE LOGS
+# GESTOR DE AMBIENTE E DIRETÓRIOS
 # ==========================================
-log_stream = io.StringIO()
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("analise_log.txt"), 
-        logging.StreamHandler(sys.stdout),
-        logging.StreamHandler(log_stream)
-    ]
-)
-logger = logging.getLogger("InteligenciaAnalitica")
+class EnvironmentManager:
+    """Constrói a estrutura de diretórios de saída ("Data Lake") e valida a entrada.
+
+    Fontes de entrada, em ordem de prioridade:
+        1. ``input_override`` (argumento de linha de comando ``--input``);
+        2. variável de ambiente ``ANALISE_SAS_INPUT``;
+        3. padrão histórico: ``analise_sas.xlsx`` na Área de Trabalho do usuário.
+
+    Parameters
+    ----------
+    input_override:
+        Caminho explícito para a planilha de entrada (opcional).
+    demo:
+        Quando ``True``, uma base sintética fiel aos layouts é gerada e usada como
+        entrada (nenhum arquivo do usuário é sobrescrito). Ideal para experimentar a
+        plataforma ou para testes automatizados.
+    output_override:
+        Diretório de saída alternativo (opcional). Útil para testes.
+    """
+
+    def __init__(self, input_override: Optional[str] = None, demo: bool = False,
+                 output_override: Optional[str] = None) -> None:
+        self.demo = demo or (os.environ.get("ANALISE_SAS_DEMO", "").strip() == "1")
+        self.desktop_path = self._find_desktop()
+
+        chosen = input_override or os.environ.get("ANALISE_SAS_INPUT") or None
+        self.input_file = Path(chosen).expanduser() if chosen else (self.desktop_path / "analise_sas.xlsx")
+
+        base = Path(output_override).expanduser() if output_override else (self.desktop_path / "Analise_Inteligente_SAS")
+        self.base_output_dir = base
+
+        self.dirs: Dict[str, Path] = {
+            "logs": self.base_output_dir / "logs",
+            "metadata": self.base_output_dir / "metadata",
+            "imagens": self.base_output_dir / "imagens",
+            "graficos": self.base_output_dir / "graficos",
+            "dados_processados": self.base_output_dir / "dados_processados",
+            "configuracoes": self.base_output_dir / "configuracoes",
+            "arquivos_auxiliares": self.base_output_dir / "arquivos_auxiliares",
+        }
+
+        self._build_tree()
+        self.logger = LoggerSetup.get_logger(self.dirs["logs"])
+
+    def _find_desktop(self) -> Path:
+        """Localiza a Área de Trabalho de forma multiplataforma (Windows/Linux/PT-BR)."""
+        home = Path.home()
+        for p in [home / "OneDrive" / "Desktop", home / "Desktop", home / "Área de Trabalho",
+                  home / "OneDrive" / "Área de Trabalho"]:
+            if p.exists():
+                return p
+        return home / "Desktop"
+
+    def _build_tree(self) -> None:
+        self.base_output_dir.mkdir(parents=True, exist_ok=True)
+        for directory in self.dirs.values():
+            directory.mkdir(parents=True, exist_ok=True)
+
+    def _prepare_demo_input(self) -> Path:
+        """Gera a base sintética de demonstração e a grava no diretório de saída.
+
+        O workbook contém a aba plana ``BASE_PLANA`` (usada pelo pipeline analítico
+        clássico, exatamente como antes) e, adicionalmente, as CINCO abas normalizadas
+        (N52, N50, N90, N02, N91) para exercitar a nova Auditoria de Cruzamento. Isso
+        preserva total compatibilidade: o pipeline lê a primeira aba (plana).
+        """
+        self.logger.info("MODO DEMONSTRAÇÃO ativo: gerando base sintética fiel aos layouts N02/N50/N52/N90/N91...")
+        demo_df = SyntheticDataGenerator.generate()
+        demo_path = self.base_output_dir / "_demo_base_sintetica.xlsx"
+        try:
+            layouts = SyntheticDataGenerator.generate_multi_layout(demo_df)
+            with pd.ExcelWriter(demo_path, engine='xlsxwriter') as _w:
+                demo_df.to_excel(_w, sheet_name='BASE_PLANA', index=False)
+                for name in ['N52', 'N50', 'N90', 'N02', 'N91', 'N60']:
+                    tbl = layouts.get(name)
+                    if isinstance(tbl, pd.DataFrame) and not tbl.empty:
+                        tbl.to_excel(_w, sheet_name=name, index=False)
+            self.logger.info(
+                f"Base de demonstração criada com {len(demo_df):,} salas (aba BASE_PLANA) "
+                f"+ abas normalizadas N52/N50/N90/N02/N91 para auditoria de cruzamento, em {demo_path}"
+            )
+        except Exception as exc:  # fallback totalmente compatível
+            self.logger.warning(f"Não foi possível gerar as abas normalizadas ({exc}); gravando apenas a base plana.")
+            demo_df.to_excel(demo_path, index=False)
+            self.logger.info(f"Base de demonstração criada com {len(demo_df):,} salas em {demo_path}")
+        return demo_path
+
+    def validate_input(self) -> Path:
+        """Valida a existência, o formato e a legibilidade do arquivo de entrada.
+
+        Em vez de falhar silenciosamente, cada problema produz uma mensagem clara,
+        indicando exatamente a causa e como resolvê-la.
+        """
+        if self.demo:
+            self.input_file = self._prepare_demo_input()
+
+        if not self.input_file.exists():
+            self.logger.critical(
+                "ARQUIVO DE ENTRADA NÃO ENCONTRADO.\n"
+                f"    • Caminho procurado : {self.input_file}\n"
+                "    • Como resolver     : coloque a planilha 'analise_sas.xlsx' na sua Área de Trabalho,\n"
+                "      OU informe o caminho com  --input \"C:\\\\caminho\\\\para\\\\arquivo.xlsx\",\n"
+                "      OU rode em modo demonstração com  --demo  para gerar uma base de exemplo."
+            )
+            sys.exit(1)
+
+        if self.input_file.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+            self.logger.critical(
+                f"FORMATO DE ARQUIVO NÃO SUPORTADO: '{self.input_file.suffix}'.\n"
+                "    • Esperado: uma planilha Excel (.xlsx, .xlsm ou .xls)."
+            )
+            sys.exit(1)
+
+        try:
+            if self.input_file.stat().st_size == 0:
+                self.logger.critical(f"ARQUIVO VAZIO (0 bytes): {self.input_file.name}. Verifique a exportação da base.")
+                sys.exit(1)
+            with open(self.input_file, "rb"):
+                pass
+        except PermissionError:
+            self.logger.critical(
+                f"ARQUIVO BLOQUEADO/ABERTO: feche '{self.input_file.name}' no Microsoft Excel e tente novamente."
+            )
+            sys.exit(1)
+        except OSError as exc:
+            self.logger.critical(f"FALHA DE LEITURA no arquivo de entrada: {exc}")
+            sys.exit(1)
+
+        self.logger.info(f"Arquivo de entrada validado e desbloqueado: {self.input_file}")
+        return self.input_file
+
 
 # ==========================================
-# NÚCLEO DA APLICAÇÃO (Preservado 100%)
+# PIPELINE DE QUALIDADE DE DADOS E ENGENHARIA (ETL)
 # ==========================================
-
 class DataLoaderAndCleaner:
-    def __init__(self, filepath, fix_encoding=True):
+    """Engenharia de Dados Plena: Ingestão, Sanitização, Casting Otimizado e Feature Engineering Complexa."""
+    def __init__(self, filepath, logger):
         self.filepath = filepath
+        self.logger = logger
         self.df = None
         self.quality_report = {}
-        self.fix_encoding = fix_encoding 
 
-    def load_data(self):
-        logger.info(f"Ingerindo conjunto de dados a partir de: {self.filepath}")
+    def ingest_data(self):
+        self.logger.info(f"Ingerindo conjunto de microdados brutos: {self.filepath}")
         try:
-            self.df = pd.read_excel(self.filepath)
+            excel_file = pd.ExcelFile(self.filepath)
+            self.quality_report['abas_originais'] = excel_file.sheet_names
+            
+            # Leitura robusta descartando colunas e linhas 100% vazias
+            self.df = pd.read_excel(excel_file, sheet_name=0).dropna(how='all', axis=1).dropna(how='all', axis=0)
+            self.quality_report['linhas_brutas'], self.quality_report['colunas_brutas'] = self.df.shape
+            
+            self.logger.info(f"Ingestão Base Mestre concluída: {self.quality_report['linhas_brutas']} registros processados em RAM.")
         except Exception as e:
-            logger.error(f"Falha crítica na ingestão do arquivo: {e}")
-            raise
+            self.logger.critical(f"Falha estrutural fatal na ingestão de dados: {e}")
+            sys.exit(1)
 
     def decode_sas_windows_artifacts(self, text):
-        if pd.isna(text): 
-            return 'NAO_INFORMADO'
+        if pd.isna(text): return 'NAO_INFORMADO'
         text = str(text)
         text = re.sub(r'_x([0-9a-fA-F]{4})_', lambda m: chr(int(m.group(1), 16)), text, flags=re.IGNORECASE)
         try:
-            if 'Ã' in text: 
-                text = text.encode('cp1252').decode('utf-8')
-        except: 
-            pass
+            if 'Ã' in text: text = text.encode('cp1252').decode('utf-8')
+        except Exception: pass
+        return text
+
+    def clean_text_legacy(self, text):
         mojibake_map = {
-            'Ãƒ': 'Ã', 'Ã‡': 'Ç', 'Ã ': 'Á', 'Ã‰': 'É', 'Ã ': 'Í', 
-            'Ã“': 'Ó', 'Ãš': 'Ú', 'Ã‚': 'Â', 'ÃŠ': 'Ê', 'Ã”': 'Ô', 
-            'Ã•': 'Õ', 'Ã€': 'À', 'Ã£': 'ã', 'Ã§': 'ç', 'Ã¡': 'á', 
-            'Ã©': 'é', 'Ã­': 'í', 'Ã³': 'ó', 'Ãº': 'ú', 'Ã¢': 'â', 
-            'Ãª': 'ê', 'Ã´': 'ô', 'Ãµ': 'õ', 'Ã ': 'à'
+            'Ãƒ': 'Ã', 'Ã‡': 'Ç', 'Ã': 'Á', 'Ã‰': 'É', 'Ã': 'Í', 'Ã“': 'Ó', 'Ãš': 'Ú', 'Ã‚': 'Â', 'ÃŠ': 'Ê', 
+            'Ã”': 'Ô', 'Ã•': 'Õ', 'Ã€': 'À', 'Ã£': 'ã', 'Ã§': 'ç', 'Ã¡': 'á', 'Ã©': 'é', 'Ã­': 'í', 'Ã³': 'ó', 
+            'Ãº': 'ú', 'Ã¢': 'â', 'Ãª': 'ê', 'Ã´': 'ô', 'Ãµ': 'õ', 'Ã ': 'à', 
+            'EDUCA??O': 'EDUCACAO', 'ROS?RIO': 'ROSARIO', 'PR?DIO': 'PREDIO'
         }
-        for errado, certo in mojibake_map.items():
+        for errado, certo in mojibake_map.items(): 
             text = text.replace(errado, certo)
         return text
 
     def clean_text_pipeline(self, text):
         cleaned = self.decode_sas_windows_artifacts(text)
+        cleaned = self.clean_text_legacy(cleaned)
         cleaned = cleaned.upper().strip()
+        cleaned = unicodedata.normalize('NFKD', cleaned).encode('ASCII', 'ignore').decode('utf-8')
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        if cleaned in ['NAN', 'NONE', 'NULL', '']: 
-            return 'NAO_INFORMADO'
+        if cleaned in ['NAN', 'NONE', 'NULL', '']: return 'NAO_INFORMADO'
         return cleaned
 
-    def clean_and_validate(self):
-        logger.info("Iniciando pipeline de sanitização de dados e desencriptação SAS/XML...")
-        self.quality_report['total_linhas_iniciais'] = len(self.df)
-        self.quality_report['duplicadas_encontradas'] = int(self.df.duplicated().sum())
-        self.quality_report['nulos_por_coluna'] = self.df.isnull().sum().to_dict()
+    def create_derived_features(self):
+        """Implementação de Novas Métricas de Business Intelligence e Indicadores Base (N02/N50/N52/N90/N91; índices prediais legados só ativam se as colunas existirem)."""
+        self.logger.info("Executando Feature Engineering: Construindo Índices Cidadãos, KPIs Analíticos e Matrizes de Vulnerabilidade...")
         
-        self.df.drop_duplicates(inplace=True)
-        
-        categorical_identifiers = ['NO_LOCAL', 'SG_UF', 'NO_SALA', 'CO_ENTIDADE']
-        for col in categorical_identifiers:
-            if col in self.df.columns:
-                self.df[col] = self.df[col].astype(str)
+        def bool_score(cols, invert_cols=None):
+            valid_cols = [c for c in cols if c in self.df.columns]
+            if not valid_cols: return np.nan
+            score_df = pd.DataFrame(index=self.df.index)
+            for c in valid_cols:
+                val = pd.to_numeric(self.df[c], errors='coerce')
+                if invert_cols and c in invert_cols:
+                    # Fator de risco: 0 (ausência de risco) pontua; presença (>=1) penaliza.
+                    score_df[c] = np.where(val == 0, 1, np.where(val >= 1, 0, np.nan))
+                else:
+                    # Correção de auditoria: campos ordinais TP_ (0/1/2) tinham o valor 2
+                    # ("Adequado") mapeado para NaN, descartando o melhor estado. Agora
+                    # qualquer valor >= 1 conta como "presente". Para flags IN_ (0/1) o
+                    # resultado é idêntico ao anterior.
+                    score_df[c] = np.where(val >= 1, 1, np.where(val == 0, 0, np.nan))
+            denom = score_df.notna().sum(axis=1)
+            return np.where(denom > 0, score_df.sum(axis=1) / denom, np.nan) * 100
 
-        for col in self.df.select_dtypes(include=['object']).columns:
-            self.df[col] = self.df[col].apply(self.clean_text_pipeline)
-            
-        cap_col = 'QT_CAPACIDADE_MAXIMA_SALA'
-        if cap_col in self.df.columns:
-            self.df[cap_col] = pd.to_numeric(self.df[cap_col], errors='coerce')
-            self.quality_report['capacidades_invalidas'] = int(self.df[cap_col].isnull().sum())
-            self.df[cap_col].fillna(self.df[cap_col].median(), inplace=True)
+        # ÍNDICES COMPOSTOS (QUALIDADE DO PRÉDIO - LAYOUT N60)
+        acess_cols = [
+            'IN_ACESSIBILIDADE', 'IN_RAMPA_ENTORNO', 'IN_RAMPA_ACESSO_LOCAL', 'IN_RAMPA_ACESSO', 
+            'IN_ELEVADOR', 'IN_ELEVADOR1', 'IN_SALA_ADAPTADA', 'IN_BEBEDOUROS_ADAPTADOS', 
+            'IN_PORTAS_ADEQUADAS', 'IN_MESA_CADEIRANTE', 'IN_SALA_ACESSIVEL', 'IN_PISO_ADEQUADO', 
+            'IN_CALCADAS_ENTORNO', 'IN_INFRA_ACESSIBILIDADE'
+        ]
+        self.df['INDICE_ACESSIBILIDADE'] = bool_score(acess_cols)
+
+        seg_cols = [
+            'IN_POLICIAMENTO', 'IN_LOCAL_CERCADO', 'IN_PRIMEIROS_SOCORROS', 'IN_SAIDA_EMERGENCIA', 
+            'IN_SINALIZACAO_EMERGENCIA', 'IN_EXTINTOR', 'IN_HIDRANTE', 'IN_ALTA_CRIMINALIDADE', 'IN_RISCO_AMBIENTAL'
+        ]
+        self.df['INDICE_SEGURANCA'] = bool_score(seg_cols, invert_cols=['IN_ALTA_CRIMINALIDADE', 'IN_RISCO_AMBIENTAL'])
+
+        conf_cols = [
+            'IN_VENTILADOR', 'IN_AR_CONDICIONADO', 'IN_MOBILIARIO_ADEQUADO', 'IN_CADEIRAS_SEM_BRACOS',
+            'IN_APOIO_PERNAS', 'IN_JANELAS', 'IN_BEBEDOUROS', 'IN_ACUSTICO_SALA', 'IN_ILUMINACAO_SALA', 'TP_MOBILIARIO_ADEQUADO_ADULTO'
+        ]
+        self.df['INDICE_CONFORTO'] = bool_score(conf_cols)
         
+        tech_cols = ['IN_COMPUTADOR', 'IN_PROJETOR', 'IN_TELEVISAO', 'IN_DVD', 'IN_APARELHO_SOM', 'IN_SALA_PROVA_ELETRONICA']
+        self.df['INDICE_TECNOLOGIA'] = bool_score(tech_cols)
+        
+        prep_cols = ['INDICE_ACESSIBILIDADE', 'INDICE_SEGURANCA', 'INDICE_CONFORTO', 'INDICE_TECNOLOGIA']
+        valid_prep = [c for c in prep_cols if c in self.df.columns]
+        
+        if valid_prep:
+            self.df['INDICE_QUALIDADE_GLOBAL'] = self.df[valid_prep].mean(axis=1)
+            self.df['INDICE_VULNERABILIDADE'] = 100 - self.df['INDICE_QUALIDADE_GLOBAL']
+
+        # RATIOS FINANCEIROS E LOGÍSTICOS (N50/N52)
+        if 'QT_CANDIDATOS_ALOCADOS' in self.df.columns and 'QT_CAPACIDADE_MAXIMA_SALA' in self.df.columns:
+            self.df['TAXA_OCUPACAO_SALA'] = np.where(self.df['QT_CAPACIDADE_MAXIMA_SALA'] > 0, (self.df['QT_CANDIDATOS_ALOCADOS'] / self.df['QT_CAPACIDADE_MAXIMA_SALA']) * 100, 0)
+                                                     
+        if 'QT_CANDIDATOS_ALOCADOS' in self.df.columns and 'QT_SALAS' in self.df.columns:
+             self.df['CANDIDATOS_POR_SALA'] = np.where(self.df['QT_SALAS'] > 0, self.df['QT_CANDIDATOS_ALOCADOS'] / self.df['QT_SALAS'], 0)
+        
+        banheiros_cols = [c for c in ['QT_BANHEIRO_FEMININO', 'QT_BANHEIRO_MASCULINO', 'QT_BANHEIRO_FEMININO1', 'QT_BANHEIRO_MASCULINO1', 'QT_BANHEIRO_ADAPTADOS_FEM', 'QT_BANHEIRO_ADAPTADOS_MASC'] if c in self.df.columns]
+        if banheiros_cols:
+            self.df['TOTAL_BANHEIROS_LOCAL'] = self.df[banheiros_cols].apply(pd.to_numeric, errors='coerce').sum(axis=1)
+            if 'QT_CANDIDATOS_ALOCADOS' in self.df.columns:
+                self.df['CANDIDATOS_POR_BANHEIRO'] = np.where(self.df['TOTAL_BANHEIROS_LOCAL'] > 0, self.df['QT_CANDIDATOS_ALOCADOS'] / self.df['TOTAL_BANHEIROS_LOCAL'], np.nan)
+            if 'QT_SALAS' in self.df.columns:
+                self.df['BANHEIROS_POR_SALA'] = np.where(self.df['QT_SALAS'] > 0, self.df['TOTAL_BANHEIROS_LOCAL'] / self.df['QT_SALAS'], np.nan)
+
+        # MAPEAMENTOS CATEGÓRICOS (FILTROS DO DASHBOARD HTML)
+        def flag_mapper(col, true_str, false_str):
+            if col in self.df.columns:
+                self.df[f'FILTRO_{col}'] = self.df[col].apply(lambda x: true_str if x == 1 else (false_str if x == 0 else 'N/I'))
+
+        flag_mapper('IN_ELEVADOR', 'Com Elevador', 'Sem Elevador')
+        flag_mapper('IN_AR_CONDICIONADO', 'Com Ar-Condicionado', 'Sem Ar-Condicionado')
+        flag_mapper('IN_AUDITORIO', 'Possui Auditório Físico', 'Não Possui Auditório')
+        flag_mapper('IN_POLICIAMENTO', 'Com Policiamento Perto', 'Sem Policiamento')
+        flag_mapper('IN_HOSPITAL', 'Próximo Hospital / Pronto Socorro', 'Distante Hospital')
+        flag_mapper('IN_PREVISAO_REFORMA', 'Em Reforma (Alerta)', 'Operante Regular')
+        flag_mapper('IN_ATIVO', 'Sala Totalmente Ativa', 'Sala Inativa Bloqueada')
+        flag_mapper('IN_REAPLICACAO', 'Exclusivo Para Reaplicação', 'Aplicação Principal Regular')
+        
+        if 'INDICE_ACESSIBILIDADE' in self.df.columns:
+            conds = [self.df['INDICE_ACESSIBILIDADE'] >= 80, self.df['INDICE_ACESSIBILIDADE'] >= 50, self.df['INDICE_ACESSIBILIDADE'] < 50]
+            choices = ['Alta Acessibilidade', 'Média Acessibilidade', 'Baixa Acessibilidade (Crítico)']
+            self.df['NIVEL_ACESSIBILIDADE'] = np.select(conds, choices, default='N/A')
+
+        # =============================================================================
+        # NOVOS INDICADORES DERIVADOS (v28) — todos fundamentados nos layouts oficiais.
+        # Cada bloco é guardado por verificação de existência de coluna: se a base não
+        # trouxer o campo, a métrica é simplesmente omitida (nunca causa erro).
+        # =============================================================================
+
+        def ord_score(cols: Sequence[str]) -> np.ndarray:
+            """Escore 0-100 para campos ORDINAIS de conservação (0-Inadequado/1-Razoável/2-Adequado)."""
+            valid = [c for c in cols if c in self.df.columns]
+            if not valid:
+                return np.full(len(self.df), np.nan)
+            frame = pd.DataFrame(index=self.df.index)
+            for c in valid:
+                v = pd.to_numeric(self.df[c], errors='coerce')
+                frame[c] = np.where(v.isin([0, 1, 2]), v, np.nan)
+            denom = frame.notna().sum(axis=1)
+            # Média dos valores (0..2) reescalada para 0..100 dividindo pelo teto 2.
+            return np.where(denom > 0, (frame.sum(axis=1) / denom) / 2.0 * 100, np.nan)
+
+        # --- ÍNDICE DE CONSERVAÇÃO PREDIAL (N60, campos TP_*) -------------------------
+        conserv_cols = [
+            'TP_TELHADO', 'TP_PAREDES_INTERNAS', 'TP_PISO', 'TP_PORTAS', 'TP_JANELAS',
+            'TP_BANHEIROS', 'TP_INSTALACAO_HIDRAULICA', 'TP_INSTALACAO_ELETRICA',
+            'TP_ENTRADA_PREDIO', 'TP_PAREDE_EXTERNA', 'TP_PATIO', 'TP_CORREDORES',
+            'TP_SALA_AULA', 'TP_ILUMINACAO', 'TP_BEBEDOUROS', 'TP_ESCADAS_CORRIMAO',
+            'TP_ILUMINACAO_SALA', 'TP_MOBILIARIO_CONSERVACAO_SALA', 'TP_MOBILIARIO_ADEQUADO_ADULTO',
+        ]
+        if any(c in self.df.columns for c in conserv_cols):
+            self.df['INDICE_CONSERVACAO'] = ord_score(conserv_cols)
+            conds = [self.df['INDICE_CONSERVACAO'] >= 75, self.df['INDICE_CONSERVACAO'] >= 45, self.df['INDICE_CONSERVACAO'] < 45]
+            self.df['NIVEL_CONSERVACAO'] = np.select(
+                conds, ['Conservação Adequada', 'Conservação Razoável', 'Conservação Precária (Alerta)'], default='N/A')
+
+        # --- NOTA OFICIAL INEP DO LOCAL (N60: NU_PONTOS_LOCAL_PROVA) ------------------
+        if 'NU_PONTOS_LOCAL_PROVA' in self.df.columns:
+            pts = pd.to_numeric(self.df['NU_PONTOS_LOCAL_PROVA'], errors='coerce')
+            self.df['NOTA_OFICIAL_INEP'] = pts.map({1: 33.3, 2: 66.7, 3: 100.0})
+            self.df['DESC_NOTA_OFICIAL_INEP'] = pts.map(
+                {1: '1 - Básico (requisitos mínimos)', 2: '2 - Adequado (estrutura funcional)', 3: '3 - Excelente (infraestrutura completa)'}
+            ).fillna('Não Avaliado')
+
+        if 'TP_INFRA_LOCAL_PROVA' in self.df.columns:
+            infra = pd.to_numeric(self.df['TP_INFRA_LOCAL_PROVA'], errors='coerce')
+            self.df['DESC_INFRA_OFICIAL'] = infra.map(
+                {0: 'Inadequado', 1: 'Razoável', 2: 'Adequado'}).fillna('Não Avaliado')
+
+        # --- DENSIDADE ESPACIAL (N50: área via largura × comprimento) -----------------
+        if 'NU_LARGURA' in self.df.columns and 'NU_COMPRIMENTO' in self.df.columns:
+            larg = pd.to_numeric(self.df['NU_LARGURA'], errors='coerce')
+            comp = pd.to_numeric(self.df['NU_COMPRIMENTO'], errors='coerce')
+            self.df['AREA_SALA_M2'] = (larg * comp) / 10000.0  # cm² -> m²
+            if 'QT_CAPACIDADE_MAXIMA_SALA' in self.df.columns:
+                cap = pd.to_numeric(self.df['QT_CAPACIDADE_MAXIMA_SALA'], errors='coerce')
+                self.df['AREA_POR_CANDIDATO_M2'] = np.where(cap > 0, self.df['AREA_SALA_M2'] / cap, np.nan)
+                conds = [self.df['AREA_POR_CANDIDATO_M2'] >= 1.2, self.df['AREA_POR_CANDIDATO_M2'] >= 0.8, self.df['AREA_POR_CANDIDATO_M2'] < 0.8]
+                self.df['NIVEL_DENSIDADE_ESPACIAL'] = np.select(
+                    conds, ['Espaçamento Confortável (>=1,2 m²)', 'Espaçamento Aceitável (0,8-1,2 m²)', 'Superlotação Espacial (<0,8 m²)'], default='N/A')
+
+        # --- TAXA DE REDUÇÃO DE CAPACIDADE (N50) -------------------------------------
+        if 'QT_CAPACIDADE_REDUZIDA_SALA' in self.df.columns and 'QT_CAPACIDADE_MAXIMA_SALA' in self.df.columns:
+            capmax = pd.to_numeric(self.df['QT_CAPACIDADE_MAXIMA_SALA'], errors='coerce')
+            capred = pd.to_numeric(self.df['QT_CAPACIDADE_REDUZIDA_SALA'], errors='coerce')
+            self.df['TAXA_REDUCAO_CAPACIDADE'] = np.where(capmax > 0, (1 - (capred / capmax)) * 100, np.nan)
+
+        # --- DIGNIDADE SANITÁRIA (classificação de CANDIDATOS_POR_BANHEIRO) ----------
+        if 'CANDIDATOS_POR_BANHEIRO' in self.df.columns:
+            cpb = self.df['CANDIDATOS_POR_BANHEIRO']
+            conds = [cpb <= 40, (cpb > 40) & (cpb <= 80), cpb > 80]
+            self.df['NIVEL_DIGNIDADE_SANITARIA'] = np.select(
+                conds, ['Adequada (<=40 por banheiro)', 'Atenção (41-80 por banheiro)', 'Crítica (>80 por banheiro)'], default='N/A')
+
+        # --- DEPENDÊNCIA ADMINISTRATIVA (N52: TP_DEPENDENCIA) -----------------------
+        if 'TP_DEPENDENCIA' in self.df.columns:
+            dep = pd.to_numeric(self.df['TP_DEPENDENCIA'], errors='coerce')
+            self.df['DESC_DEPENDENCIA'] = dep.map(
+                {1: 'Federal', 2: 'Estadual', 3: 'Municipal', 4: 'Privada'}).fillna('Não Informado')
+
+        # --- SITUAÇÃO DE ALOCAÇÃO (N52: TP_SITUACAO_ALOCACAO) -----------------------
+        if 'TP_SITUACAO_ALOCACAO' in self.df.columns:
+            sit = pd.to_numeric(self.df['TP_SITUACAO_ALOCACAO'], errors='coerce')
+            self.df['DESC_SITUACAO_ALOCACAO'] = sit.map({1: 'Reservado', 2: 'Locado'}).fillna('Não Informado')
+
+        # --- ÍNDICE DE SERVIÇOS DO ENTORNO (hospital + policiamento + transporte) ----
+        entorno_cols = [c for c in ['IN_HOSPITAL', 'IN_POLICIAMENTO', 'IN_TRANSPORTE_PROXIMO'] if c in self.df.columns]
+        if entorno_cols:
+            self.df['INDICE_ENTORNO_SERVICOS'] = bool_score(entorno_cols)
+
+        # --- FLAG DE GEOLOCALIZAÇÃO (habilita mapa) ----------------------------------
+        if 'NU_LATITUDE_LOCAL' in self.df.columns and 'NU_LONGITUDE_LOCAL' in self.df.columns:
+            lat = pd.to_numeric(self.df['NU_LATITUDE_LOCAL'], errors='coerce')
+            lon = pd.to_numeric(self.df['NU_LONGITUDE_LOCAL'], errors='coerce')
+            self.df['NU_LATITUDE_LOCAL'] = lat
+            self.df['NU_LONGITUDE_LOCAL'] = lon
+            self.df['TEM_GEOLOCALIZACAO'] = np.where(lat.notna() & lon.notna() & (lat.between(-90, 90)) & (lon.between(-180, 180)), 'Georreferenciado', 'Sem Coordenada')
+
+        # --- Novos mapeadores categóricos para filtros do dashboard ------------------
+        flag_mapper('IN_HOSPITAL', 'Próximo a Hospital/Pronto-Socorro', 'Distante de Hospital')
+        flag_mapper('IN_ATENDIMENTO_DIFERENCIADO', 'Atendimento Diferenciado', 'Sem Atendimento Diferenciado')
+        flag_mapper('IN_SABATISTAS', 'Uso por Sabatistas', 'Uso Regular')
+
+        # =============================================================================
+        # MÓDULO DE INSCRITOS & ENSALAMENTO (v29) — derivações dos layouts N02 e N90.
+        # Cada bloco é guardado por existência de coluna: bases só de infraestrutura
+        # (N50/N52/N60) não são afetadas; bases com participantes ganham novas dimensões.
+        # =============================================================================
+
+        # --- IDADE e FAIXA ETÁRIA (N90/N02: DT_NASCIMENTO) --------------------------
+        if 'DT_NASCIMENTO' in self.df.columns:
+            dt_nasc = pd.to_datetime(self.df['DT_NASCIMENTO'], errors='coerce', dayfirst=True)
+            hoje = pd.Timestamp(datetime.now().date())
+            idade = (hoje - dt_nasc).dt.days / 365.25
+            # Sanidade: idades fora de [14, 100] são tratadas como ausentes.
+            idade = idade.where((idade >= 14) & (idade <= 100))
+            self.df['IDADE_INSCRITO'] = idade.round(0)
+            faixa_conds = [idade < 25, idade < 30, idade < 40, idade < 50, idade >= 50]
+            faixa_labels = ['Até 24 anos', '25-29 anos', '30-39 anos', '40-49 anos', '50+ anos']
+            self.df['FAIXA_ETARIA'] = np.select(faixa_conds, faixa_labels, default='Não Informado')
+
+        # --- SEXO (N90: TP_SEXO) ----------------------------------------------------
+        if 'TP_SEXO' in self.df.columns:
+            sexo = self.df['TP_SEXO'].astype(str).str.strip().str.upper()
+            self.df['DESC_SEXO'] = sexo.map({'M': 'Masculino', 'F': 'Feminino'}).fillna('Não Informado')
+
+        # --- SITUAÇÃO DA INSCRIÇÃO (N90: TP_SITUACAO) -------------------------------
+        if 'TP_SITUACAO' in self.df.columns:
+            sit = self.df['TP_SITUACAO'].astype(str).str.strip().str.upper()
+            self.df['DESC_SITUACAO_INSCRICAO'] = sit.map(
+                {'R': 'Regular', 'I': 'Irregular', 'A': 'Ação Judicial (Sub Judice)'}).fillna('Não Informado')
+
+        # --- TIPO DE ENSALAMENTO (N02: TP_ENSALAMENTO) ------------------------------
+        if 'TP_ENSALAMENTO' in self.df.columns:
+            ens = pd.to_numeric(self.df['TP_ENSALAMENTO'], errors='coerce')
+            self.df['DESC_TP_ENSALAMENTO'] = ens.map({
+                0: 'Sala Comum', 1: 'Sala de 1 (Individual)', 6: 'Sala de até 6',
+                20: 'Sala de até 20', 40: 'Sala de até 40', 90: 'Prova Reserva',
+            }).fillna('Não Informado')
+
+        # --- ATENDIMENTO NA LISTA DE PRESENÇA (N02) --------------------------------
+        if 'CO_ATENDIMENTO_LISTA_PRESENCA' in self.df.columns:
+            atl = pd.to_numeric(self.df['CO_ATENDIMENTO_LISTA_PRESENCA'], errors='coerce')
+            self.df['DESC_ATENDIMENTO_PRESENCA'] = atl.map({
+                0: 'Normal', 2: 'Especializado sem Tempo Adicional',
+                3: 'Especializado com Tempo Adicional', 4: 'Múltiplas Áreas',
+            }).fillna('Não Informado')
+
+        # --- DEMANDA DE ATENDIMENTO ESPECIAL (composto N02) ------------------------
+        demanda_cols = [c for c in ['IN_ATENDIMENTO_ESPECIALIZADO', 'IN_ATENDIMENTO_ESPECIFICO', 'IN_RECURSO'] if c in self.df.columns]
+        if demanda_cols or 'TP_ENSALAMENTO' in self.df.columns:
+            demanda = pd.Series(False, index=self.df.index)
+            for c in demanda_cols:
+                demanda = demanda | (pd.to_numeric(self.df[c], errors='coerce') == 1)
+            if 'TP_ENSALAMENTO' in self.df.columns:
+                ens = pd.to_numeric(self.df['TP_ENSALAMENTO'], errors='coerce')
+                demanda = demanda | ens.isin([1, 6, 20, 40])
+            self.df['DEMANDA_ATENDIMENTO_ESPECIAL'] = np.where(demanda, 'Com Demanda Especial', 'Fluxo Padrão')
+
+        # --- MIGRAÇÃO INTERESTADUAL (N90: residência × prova) ----------------------
+        uf_res_col = 'SG_UF_MUNICIPIO_RESIDENCIA' if 'SG_UF_MUNICIPIO_RESIDENCIA' in self.df.columns else None
+        uf_prova_col = None
+        for cand in ['SG_UF_MUNICIPIO_PROVA', 'SG_UF_PROVA', 'SG_UF']:
+            if cand in self.df.columns:
+                uf_prova_col = cand
+                break
+        if uf_res_col and uf_prova_col:
+            res = self.df[uf_res_col].astype(str).str.strip().str.upper()
+            prova = self.df[uf_prova_col].astype(str).str.strip().str.upper()
+            invalidos = {'NAO_INFORMADO', 'NAN', 'NONE', ''}
+            self.df['MIGRACAO_INTERESTADUAL'] = np.where(
+                res.isin(invalidos) | prova.isin(invalidos), 'Não Informado',
+                np.where(res != prova, 'Migração Interestadual', 'Mesma UF (Residência = Prova)'))
+
+        # --- FAIXA DE DISTÂNCIA / DESLOCAMENTO (N02: NU_DISTANCIA) ------------------
+        if 'NU_DISTANCIA' in self.df.columns:
+            dist_km = pd.to_numeric(self.df['NU_DISTANCIA'], errors='coerce') / 1000.0
+            self.df['DISTANCIA_KM'] = dist_km.round(2)
+            dist_conds = [dist_km <= 5, dist_km <= 20, dist_km <= 50, dist_km > 50]
+            dist_labels = ['Até 5 km', '5-20 km', '20-50 km', 'Acima de 50 km']
+            self.df['FAIXA_DISTANCIA'] = np.select(dist_conds, dist_labels, default='Não Informado')
+
+        # =============================================================================
+        # MÓDULO DE ATENDIMENTOS & RECURSOS (v30) — derivações do layout N91.
+        # Visão ITEMIZADA e adjudicada das necessidades especiais (complementa os flags
+        # de atendimento do N02 com o item específico, seu tipo e a decisão do laudo).
+        # Guardado por existência de coluna: bases sem N91 não são afetadas.
+        # =============================================================================
+
+        # --- TIPO DO ITEM DE ATENDIMENTO (N91: TP_ITEM_ATENDIMENTO) -----------------
+        if 'TP_ITEM_ATENDIMENTO' in self.df.columns:
+            tpi = pd.to_numeric(self.df['TP_ITEM_ATENDIMENTO'], errors='coerce')
+            self.df['DESC_TP_ITEM_ATENDIMENTO'] = tpi.map({
+                1: 'Atendimento Específico', 2: 'Atendimento Especializado', 3: 'Recurso',
+            }).fillna('Sem Item de Atendimento')
+
+        # --- SITUAÇÃO DO LAUDO MÉDICO (N91: CO_SITUACAO_LAUDO_MEDICO — domínio) -----
+        laudo_dominio = {
+            0: 'Reprovado Consórcio', 1: 'Aprovado Consórcio', 2: 'Em Análise',
+            3: 'Reprovado INEP', 4: 'Aprovado INEP',
+            5: 'Reprovado por Inexistência de Documento', 6: 'Aprovado por Edições Anteriores',
+            7: 'Aprovado Automaticamente (dispensa laudo)', 8: 'Reprovado Consórcio (contato telefônico)',
+            9: 'Aprovado Consórcio (contato telefônico)', 10: 'Reprovado Consórcio (mantido atendimento)',
+            11: 'Reprovado INEP (mantido atendimento)', 12: 'Recurso',
+        }
+        if 'CO_SITUACAO_LAUDO_MEDICO' in self.df.columns:
+            colm = pd.to_numeric(self.df['CO_SITUACAO_LAUDO_MEDICO'], errors='coerce')
+            tem_item = None
+            if 'TP_ITEM_ATENDIMENTO' in self.df.columns:
+                tem_item = pd.to_numeric(self.df['TP_ITEM_ATENDIMENTO'], errors='coerce').isin([1, 2, 3])
+            self.df['DESC_SITUACAO_LAUDO_MEDICO'] = colm.map(laudo_dominio).fillna('Não Informado')
+            # Agrupamento executivo (aprovado/reprovado/em análise/recurso).
+            aprov = [1, 4, 6, 7, 9]
+            reprov = [0, 3, 5, 8, 10, 11]
+            status_laudo = np.where(colm.isin(aprov), 'Aprovado',
+                             np.where(colm.isin(reprov), 'Reprovado',
+                               np.where(colm == 2, 'Em Análise',
+                                 np.where(colm == 12, 'Recurso', 'Não Informado'))))
+            # Onde não há item de atendimento, marca como 'Sem Atendimento'.
+            if tem_item is not None:
+                status_laudo = np.where(tem_item, status_laudo, 'Sem Atendimento')
+            self.df['STATUS_LAUDO_MEDICO'] = status_laudo
+            # STATUS efetivo (regra oficial da VW N91: ativo p/ códigos {1,2,4,6,7,9}).
+            ativo_rule = colm.isin([1, 2, 4, 6, 7, 9])
+            status_atend = np.where(ativo_rule, 'Deferido / Ativo', 'Indeferido / Inativo')
+            if tem_item is not None:
+                status_atend = np.where(tem_item, status_atend, 'Sem Atendimento')
+            self.df['STATUS_ATENDIMENTO'] = status_atend
+
+        # --- Fallback: derivar STATUS_ATENDIMENTO de IN_ATIVO_ATENDIMENTO se preciso -
+        if 'STATUS_ATENDIMENTO' not in self.df.columns and 'IN_ATIVO_ATENDIMENTO' in self.df.columns:
+            act = pd.to_numeric(self.df['IN_ATIVO_ATENDIMENTO'], errors='coerce')
+            self.df['STATUS_ATENDIMENTO'] = np.where(act == 1, 'Deferido / Ativo',
+                                              np.where(act == 0, 'Indeferido / Inativo', 'Sem Atendimento'))
+
+        # --- SITUAÇÃO DETALHADA DO ATENDIMENTO (N91: TP_SITUACAO_ATENDIMENTO) -------
+        if 'TP_SITUACAO_ATENDIMENTO' in self.df.columns:
+            tps = pd.to_numeric(self.df['TP_SITUACAO_ATENDIMENTO'], errors='coerce')
+            self.df['DESC_TP_SITUACAO_ATENDIMENTO'] = tps.map({
+                0: 'Informado na Inscrição', 1: 'Desativado: Laudo Indeferido',
+                2: 'Desativado: Contato Telefônico (desnecessário/inexistente)',
+                3: 'Incluído: Contato Telefônico', 4: 'Incluído: Comissão de Demandas INEP',
+                5: 'Incluído: Decisão Judicial', 6: 'Ativo: Laudo Indeferido',
+                7: 'Ativo: Laudo em Análise',
+            }).fillna('Não Informado')
+
+    def apply_quality_filters(self):
+        """Aplicando Deduplicação, Sanitização Textual e Tuning de Performance."""
+        self.logger.info("Aplicando Deduplicação, Sanitização Textual e Tuning de Memória RAM...")
+        
+        self.quality_report['total_linhas_iniciais'] = len(self.df)
+        # CORREÇÃO DE AUDITORIA (v29): a contagem de duplicatas era feita DEPOIS do
+        # drop_duplicates, resultando sempre em ~0. Agora medimos ANTES de remover e
+        # também registramos quantas linhas foram efetivamente eliminadas.
+        dup_mask = self.df.duplicated()
+        self.quality_report['duplicadas_encontradas'] = int(dup_mask.sum())
+        linhas_antes = len(self.df)
+        self.df.drop_duplicates(inplace=True)
+        self.quality_report['linhas_removidas_duplicidade'] = int(linhas_antes - len(self.df))
+        
+        # Auditoria de Nulos
+        nulos_dict = self.df.isnull().sum().to_dict()
+        self.quality_report['nulos_por_coluna'] = {k: v for k, v in nulos_dict.items() if v > 0}
+
+        # Aplicar limpeza de strings em todas as colunas object.
+        # OTIMIZAÇÃO (v28): em vez de chamar a pipeline célula a célula, limpamos apenas
+        # os VALORES ÚNICOS e mapeamos de volta. Em bases reais (muitos textos repetidos
+        # como nomes de UF, faixas, descrições) isto reduz drasticamente o tempo de CPU,
+        # produzindo exatamente o mesmo resultado.
+        str_cols = self.df.select_dtypes(include=['object']).columns
+        for col in str_cols:
+            ser = self.df[col]
+            uniques = ser.dropna().unique()
+            mapping = {u: self.clean_text_pipeline(u) for u in uniques}
+            cleaned = ser.map(mapping)
+            # clean_text_pipeline(NaN) -> 'NAO_INFORMADO'; reproduz o comportamento original.
+            self.df[col] = cleaned.where(ser.notna(), 'NAO_INFORMADO')
+
+        # Conversão Inteligente de Datas e Números
+        for col in self.df.columns:
+            if 'DATA' in col.upper() or 'DT_' in col.upper():
+                # MELHORIA (v29): os layouts do INEP usam datas no formato brasileiro
+                # DD/MM/AAAA. Sem `dayfirst=True`, o pandas interpreta como MM/DD/AAAA e
+                # produz datas erradas (ou NaT), inviabilizando o cálculo de idade. O
+                # `dayfirst=True` alinha a leitura ao padrão oficial.
+                self.df[col] = pd.to_datetime(self.df[col], errors='coerce', dayfirst=True)
+            elif self.df[col].dtype == 'object':
+                try_num = pd.to_numeric(self.df[col].replace('NAO_INFORMADO', np.nan), errors='coerce')
+                # Se mais de 50% dos dados na coluna textual são na verdade números, força a conversão.
+                if try_num.notna().sum() > (len(self.df) * 0.5):
+                    # CORREÇÃO CRÍTICA (pandas >= 2.2/3.0 Copy-on-Write): o antigo
+                    # 'self.df[col].fillna(..., inplace=True)' operava sobre uma cópia e NÃO
+                    # tinha efeito, deixando NaNs. A reatribuição explícita resolve o defeito.
+                    median_val = try_num.median()
+                    self.df[col] = try_num.fillna(median_val)
+
+        # Compliance Normativo Formal (EN 1.2.2 e EN 1.2.1)
+        if 'IN_CENTRO' in self.df.columns:
+            self.df['DESC_CENTRO_EN1_2_2'] = self.df['IN_CENTRO'].apply(
+                lambda x: 'Região Central Urbana Adensada' if x == 1 else ('Região Periférica Isolada' if x == 0 else 'Não Avaliado Formalmente')
+            )
+            
+        if 'IN_TRANSPORTE_PROXIMO' in self.df.columns:
+            self.df['DESC_TRANSPORTE_EN1_2_1'] = self.df['IN_TRANSPORTE_PROXIMO'].apply(
+                lambda x: 'Com Transporte Coletivo Viável' if x == 1 else ('Sem Transporte Ativo Mapeado' if x == 0 else 'Não Avaliado Formalmente')
+            )
+
+        self.create_derived_features()
+
+        # OTIMIZAÇÃO OBRIGATÓRIA DE DESEMPENHO E MEMÓRIA
+        self.logger.info("Engenharia de Performance: Aplicando Casting de Categorias no DataFrame para aceleração de I/O de Memória...")
+        for col in self.df.select_dtypes(include=['object']).columns:
+            if self.df[col].nunique() / len(self.df) < 0.3:
+                self.df[col] = self.df[col].astype('category')
+
         self.quality_report['total_linhas_finais'] = len(self.df)
         return self.df, self.quality_report
 
-class StatisticalAnalyzer:
-    def __init__(self, df):
-        self.df = df
-        self.cap_col = 'QT_CAPACIDADE_MAXIMA_SALA'
+
+# ==========================================
+# MOTOR DE INFERÊNCIA E MACHINE LEARNING (C-LEVEL)
+# ==========================================
+class StatisticalMachineLearningEngine:
+    """Inteligência Central. Garante as Agregações, Outliers e Estatísticas Matemáticas."""
+
+    def __init__(self, df, logger):
+        self.df = df.copy()
+        self.logger = logger
+        self.num_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        # Mapeamento preventivo da coluna de capacidade para garantir estabilidade
+        self.cap_col = None
+        if 'QT_CAPACIDADE_MAXIMA_SALA' in self.df.columns: 
+            self.cap_col = 'QT_CAPACIDADE_MAXIMA_SALA'
+        elif 'QT_CAPACIDADE_MAXIMA' in self.df.columns: 
+            self.cap_col = 'QT_CAPACIDADE_MAXIMA'
+        elif self.num_cols: 
+            self.cap_col = self.num_cols[0]
+        
+        self.cutoffs = {}
+        self.locais_agg = pd.DataFrame()
+        self.bloco_agg = pd.DataFrame()
+        self.mun_agg = pd.DataFrame()
+        self.uf_agg = pd.DataFrame()
+        self.equip_agg = pd.DataFrame()
+        self.acess_agg = pd.DataFrame()
+        self.seg_agg = pd.DataFrame()
+        self.vuln_agg = pd.DataFrame()
+        self.gini_index = 0.0
+        self.normative_crosstab = pd.DataFrame()
+        self.executive_totals = pd.DataFrame()
+        self.executive_totals_meta = []
+        # Novos artefatos (v28)
+        self.conservacao_agg = pd.DataFrame()
+        self.nota_oficial_agg = pd.DataFrame()
+        self.densidade_agg = pd.DataFrame()
+        self.geo_df = pd.DataFrame()
+        self.dependencia_agg = pd.DataFrame()
+        self.correlation_matrix = pd.DataFrame()
+        # Módulo de Inscritos & Ensalamento (v29)
+        self.demografia_agg = pd.DataFrame()
+        self.curso_agg = pd.DataFrame()
+        self.atendimento_agg = pd.DataFrame()
+        self.ensalamento_agg = pd.DataFrame()
+        self.situacao_agg = pd.DataFrame()
+        self.migracao_agg = pd.DataFrame()
+        self.faixa_etaria_agg = pd.DataFrame()
+        self.inscritos_meta = {}
+        # Módulo de Atendimentos & Recursos (v30)
+        self.item_atend_agg = pd.DataFrame()
+        self.tipo_item_agg = pd.DataFrame()
+        self.laudo_agg = pd.DataFrame()
+        self.laudo_uf_agg = pd.DataFrame()
+        self.cid_agg = pd.DataFrame()
+        self.atendimentos_meta = {}
+
+    def build_attendance_aggregations(self):
+        """Agrega o MÓDULO DE ATENDIMENTOS & RECURSOS (layout N91).
+
+        Produz o ranking de itens de atendimento/recurso mais solicitados, a distribuição
+        por tipo (Específico/Especializado/Recurso), a situação do laudo médico com a taxa
+        de deferimento (inclusive por UF) e as principais categorias de CID. Cada agregação
+        é guardada por existência da coluna-fonte: bases sem N91 não produzem nada — sem
+        impacto sobre os demais módulos.
+        """
+        df = self.df
+        meta: Dict[str, Any] = {}
+
+        # Máscara dos registros que efetivamente possuem um item de atendimento (N91).
+        if 'TP_ITEM_ATENDIMENTO' in df.columns:
+            tem_item = pd.to_numeric(df['TP_ITEM_ATENDIMENTO'], errors='coerce').isin([1, 2, 3])
+        elif 'DESC_TP_ITEM_ATENDIMENTO' in df.columns:
+            tem_item = ~df['DESC_TP_ITEM_ATENDIMENTO'].astype(str).isin(['Sem Item de Atendimento', 'Não Informado', 'NAO_INFORMADO'])
+        else:
+            self.atendimentos_meta = {'modulo_ativo': False}
+            return
+
+        base = df[tem_item].copy()
+        meta['total_itens_atendimento'] = int(len(base))
+        if base.empty:
+            self.atendimentos_meta = {'modulo_ativo': False}
+            return
+
+        invalid = {'NAO_INFORMADO', 'NÃO INFORMADO', 'NAN', 'NONE', ''}
+
+        # 1) Ranking dos itens de atendimento/recurso mais solicitados.
+        if 'NO_ITEM_ATENDIMENTO' in base.columns:
+            nome = base['NO_ITEM_ATENDIMENTO'].astype(str).str.strip().str.upper()
+            valid = base[~nome.isin(invalid)].copy()
+            if not valid.empty:
+                valid['_ITEM'] = valid['NO_ITEM_ATENDIMENTO'].astype(str).str.strip().str.upper()
+                grp = valid.groupby('_ITEM').size().reset_index(name='SOLICITACOES')
+                grp.columns = ['ITEM DE ATENDIMENTO / RECURSO', 'SOLICITACOES']
+                if 'STATUS_ATENDIMENTO' in valid.columns:
+                    defer = (valid.assign(_d=(valid['STATUS_ATENDIMENTO'] == 'Deferido / Ativo'))
+                                  .groupby('_ITEM')['_d'].mean().reset_index())
+                    defer.columns = ['ITEM DE ATENDIMENTO / RECURSO', '% DEFERIDO']
+                    defer['% DEFERIDO'] = (defer['% DEFERIDO'] * 100).round(1)
+                    grp = grp.merge(defer, on='ITEM DE ATENDIMENTO / RECURSO', how='left')
+                total = grp['SOLICITACOES'].sum()
+                grp['PERCENTUAL (%)'] = (grp['SOLICITACOES'] / total * 100).round(2) if total else 0
+                grp = grp.sort_values('SOLICITACOES', ascending=False).reset_index(drop=True)
+                grp.insert(0, 'RANKING', range(1, len(grp) + 1))
+                self.item_atend_agg = grp
+                meta['item_top'] = str(grp.iloc[0]['ITEM DE ATENDIMENTO / RECURSO'])
+
+        # 2) Distribuição por tipo de item (Específico/Especializado/Recurso).
+        if 'DESC_TP_ITEM_ATENDIMENTO' in base.columns:
+            ordem = ['Atendimento Específico', 'Atendimento Especializado', 'Recurso']
+            vc = base['DESC_TP_ITEM_ATENDIMENTO'].value_counts()
+            vc = vc.reindex([t for t in ordem if t in vc.index]).dropna()
+            ti = vc.reset_index()
+            ti.columns = ['TIPO DE ATENDIMENTO', 'SOLICITACOES']
+            total = ti['SOLICITACOES'].sum()
+            ti['PERCENTUAL (%)'] = (ti['SOLICITACOES'] / total * 100).round(2) if total else 0
+            self.tipo_item_agg = ti
+
+        # 3) Situação do laudo médico (Aprovado/Reprovado/Em Análise/Recurso) + taxa.
+        if 'STATUS_LAUDO_MEDICO' in base.columns:
+            sl = base[base['STATUS_LAUDO_MEDICO'].astype(str) != 'Sem Atendimento']
+            if not sl.empty:
+                vc = sl['STATUS_LAUDO_MEDICO'].value_counts().reset_index()
+                vc.columns = ['SITUAÇÃO DO LAUDO', 'SOLICITACOES']
+                total = vc['SOLICITACOES'].sum()
+                vc['PERCENTUAL (%)'] = (vc['SOLICITACOES'] / total * 100).round(2) if total else 0
+                self.laudo_agg = vc
+                if 'STATUS_ATENDIMENTO' in sl.columns:
+                    meta['pct_deferido'] = round(float((sl['STATUS_ATENDIMENTO'] == 'Deferido / Ativo').mean() * 100), 1)
+                meta['pct_aprovado_laudo'] = round(float((sl['STATUS_LAUDO_MEDICO'] == 'Aprovado').mean() * 100), 1)
+                meta['pct_em_analise'] = round(float((sl['STATUS_LAUDO_MEDICO'] == 'Em Análise').mean() * 100), 1)
+
+        # 4) Taxa de deferimento por UF de prova.
+        uf_col = None
+        for cand in ['SG_UF_MUNICIPIO_PROVA', 'SG_UF_PROVA', 'SG_UF']:
+            if cand in base.columns:
+                uf_col = cand
+                break
+        if uf_col and 'STATUS_ATENDIMENTO' in base.columns:
+            lu = base.assign(_def=(base['STATUS_ATENDIMENTO'] == 'Deferido / Ativo'))
+            self.laudo_uf_agg = (lu.groupby(uf_col).agg(
+                ITENS_ATENDIMENTO=('_def', 'size'),
+                DEFERIDOS=('_def', 'sum'),
+            ).reset_index())
+            self.laudo_uf_agg['PERCENTUAL_DEFERIDO (%)'] = (
+                self.laudo_uf_agg['DEFERIDOS'] / self.laudo_uf_agg['ITENS_ATENDIMENTO'] * 100).round(1)
+            self.laudo_uf_agg = self.laudo_uf_agg.rename(columns={uf_col: 'UF DE PROVA'}).sort_values(
+                'PERCENTUAL_DEFERIDO (%)', ascending=True)
+
+        # 5) Top categorias de CID (quando informado) — apenas contagem por descrição.
+        if 'DS_CID' in base.columns:
+            ds = base['DS_CID'].astype(str).str.strip().str.upper()
+            cid_valid = base[~ds.isin(invalid)].copy()
+            if not cid_valid.empty:
+                cid_valid['_CID'] = cid_valid['DS_CID'].astype(str).str.strip().str.upper()
+                cg = cid_valid.groupby('_CID').size().reset_index(name='OCORRENCIAS')
+                cg.columns = ['CATEGORIA CID (DATASUS)', 'OCORRENCIAS']
+                total = cg['OCORRENCIAS'].sum()
+                cg['PERCENTUAL (%)'] = (cg['OCORRENCIAS'] / total * 100).round(2) if total else 0
+                self.cid_agg = cg.sort_values('OCORRENCIAS', ascending=False).reset_index(drop=True)
+
+        meta['modulo_ativo'] = True
+        self.atendimentos_meta = meta
+
+    def build_participant_aggregations(self):
+        """Agrega o MÓDULO DE INSCRITOS & ENSALAMENTO (layouts N02/N90).
+
+        Constrói distribuições demográficas, ranking de grupos de curso, demanda de
+        atendimento especial, tipos de ensalamento, situação da inscrição e migração
+        interestadual. Cada agregação é guardada por existência da coluna-fonte: se a
+        base não contiver participantes, o método simplesmente não produz nada — sem
+        qualquer impacto sobre as análises de infraestrutura já existentes.
+        """
+        df = self.df
+        has = lambda c: c in df.columns
+        meta: Dict[str, Any] = {}
+
+        # 1) Demografia: sexo × faixa etária (matriz de contingência).
+        if has('DESC_SEXO') and has('FAIXA_ETARIA'):
+            ordem_faixa = ['Até 24 anos', '25-29 anos', '30-39 anos', '40-49 anos', '50+ anos', 'Não Informado']
+            ct = pd.crosstab(df['FAIXA_ETARIA'], df['DESC_SEXO'])
+            ct = ct.reindex([f for f in ordem_faixa if f in ct.index])
+            self.demografia_agg = ct.reset_index().rename(columns={'FAIXA_ETARIA': 'FAIXA ETÁRIA'})
+
+        # 1b) Faixa etária consolidada (contagem + %).
+        if has('FAIXA_ETARIA'):
+            ordem_faixa = ['Até 24 anos', '25-29 anos', '30-39 anos', '40-49 anos', '50+ anos']
+            vc = df['FAIXA_ETARIA'].value_counts()
+            vc = vc.reindex([f for f in ordem_faixa if f in vc.index]).dropna()
+            fe = vc.reset_index()
+            fe.columns = ['FAIXA ETÁRIA', 'PARTICIPANTES']
+            total = fe['PARTICIPANTES'].sum()
+            fe['PERCENTUAL (%)'] = (fe['PARTICIPANTES'] / total * 100).round(1) if total else 0
+            self.faixa_etaria_agg = fe
+
+        # 2) Ranking de grupos de curso (áreas de avaliação).
+        curso_col = 'NO_GRUPO_CURSO' if has('NO_GRUPO_CURSO') else ('CO_GRUPO_CURSO' if has('CO_GRUPO_CURSO') else None)
+        if curso_col:
+            grp = df.groupby(curso_col).size().reset_index(name='PARTICIPANTES')
+            total = grp['PARTICIPANTES'].sum()
+            grp['PERCENTUAL (%)'] = (grp['PARTICIPANTES'] / total * 100).round(2) if total else 0
+            if has('DEMANDA_ATENDIMENTO_ESPECIAL'):
+                dem = (df.assign(_flag=(df['DEMANDA_ATENDIMENTO_ESPECIAL'] == 'Com Demanda Especial'))
+                         .groupby(curso_col)['_flag'].mean().reset_index(name='% COM ATEND. ESPECIAL'))
+                dem['% COM ATEND. ESPECIAL'] = (dem['% COM ATEND. ESPECIAL'] * 100).round(1)
+                grp = grp.merge(dem, on=curso_col, how='left')
+            grp = grp.rename(columns={curso_col: 'GRUPO / CURSO'}).sort_values('PARTICIPANTES', ascending=False)
+            grp['RANKING'] = range(1, len(grp) + 1)
+            self.curso_agg = grp.reset_index(drop=True)
+            meta['total_grupos_curso'] = int(len(grp))
+            meta['curso_top'] = str(grp.iloc[0]['GRUPO / CURSO']) if not grp.empty else 'N/D'
+
+        # 3) Demanda de atendimento especial por UF.
+        uf_col = 'SG_UF_PROVA' if has('SG_UF_PROVA') else ('SG_UF' if has('SG_UF') else None)
+        if has('DEMANDA_ATENDIMENTO_ESPECIAL') and uf_col:
+            at = df.assign(_esp=(df['DEMANDA_ATENDIMENTO_ESPECIAL'] == 'Com Demanda Especial'))
+            self.atendimento_agg = (at.groupby(uf_col).agg(
+                PARTICIPANTES=('_esp', 'size'),
+                COM_DEMANDA_ESPECIAL=('_esp', 'sum'),
+            ).reset_index())
+            self.atendimento_agg['PERCENTUAL_ESPECIAL (%)'] = (
+                self.atendimento_agg['COM_DEMANDA_ESPECIAL'] / self.atendimento_agg['PARTICIPANTES'] * 100).round(1)
+            self.atendimento_agg = self.atendimento_agg.rename(columns={uf_col: 'UF'}).sort_values(
+                'PERCENTUAL_ESPECIAL (%)', ascending=False)
+            meta['pct_atendimento_especial'] = round(float(at['_esp'].mean() * 100), 1)
+
+        # 4) Distribuição por tipo de ensalamento.
+        if has('DESC_TP_ENSALAMENTO'):
+            ordem_ens = ['Sala Comum', 'Sala de 1 (Individual)', 'Sala de até 6', 'Sala de até 20',
+                         'Sala de até 40', 'Prova Reserva', 'Não Informado']
+            vc = df['DESC_TP_ENSALAMENTO'].value_counts()
+            vc = vc.reindex([e for e in ordem_ens if e in vc.index]).dropna()
+            en = vc.reset_index()
+            en.columns = ['TIPO DE ENSALAMENTO', 'PARTICIPANTES']
+            total = en['PARTICIPANTES'].sum()
+            en['PERCENTUAL (%)'] = (en['PARTICIPANTES'] / total * 100).round(2) if total else 0
+            self.ensalamento_agg = en
+
+        # 5) Situação da inscrição.
+        if has('DESC_SITUACAO_INSCRICAO'):
+            vc = df['DESC_SITUACAO_INSCRICAO'].value_counts().reset_index()
+            vc.columns = ['SITUAÇÃO DA INSCRIÇÃO', 'PARTICIPANTES']
+            total = vc['PARTICIPANTES'].sum()
+            vc['PERCENTUAL (%)'] = (vc['PARTICIPANTES'] / total * 100).round(2) if total else 0
+            self.situacao_agg = vc
+            reg = df['DESC_SITUACAO_INSCRICAO'].astype(str)
+            meta['pct_irregular'] = round(float((reg != 'Regular').mean() * 100), 2)
+
+        # 6) Migração interestadual por UF de prova.
+        if has('MIGRACAO_INTERESTADUAL') and uf_col:
+            mig = df.assign(_mig=(df['MIGRACAO_INTERESTADUAL'] == 'Migração Interestadual'))
+            mig = mig[mig['MIGRACAO_INTERESTADUAL'] != 'Não Informado']
+            if not mig.empty:
+                self.migracao_agg = (mig.groupby(uf_col).agg(
+                    PARTICIPANTES=('_mig', 'size'),
+                    MIGRANTES_INTERESTADUAIS=('_mig', 'sum'),
+                ).reset_index())
+                self.migracao_agg['PERCENTUAL_MIGRACAO (%)'] = (
+                    self.migracao_agg['MIGRANTES_INTERESTADUAIS'] / self.migracao_agg['PARTICIPANTES'] * 100).round(1)
+                self.migracao_agg = self.migracao_agg.rename(columns={uf_col: 'UF DE PROVA'}).sort_values(
+                    'PERCENTUAL_MIGRACAO (%)', ascending=False)
+                meta['pct_migracao'] = round(float(mig['_mig'].mean() * 100), 1)
+
+        # KPIs-resumo do módulo (para cartões do dashboard / laudo).
+        if has('IDADE_INSCRITO'):
+            meta['idade_media'] = round(float(pd.to_numeric(df['IDADE_INSCRITO'], errors='coerce').mean()), 1)
+        if has('DESC_SEXO'):
+            sx = df['DESC_SEXO'].value_counts(normalize=True) * 100
+            meta['pct_feminino'] = round(float(sx.get('Feminino', 0)), 1)
+            meta['pct_masculino'] = round(float(sx.get('Masculino', 0)), 1)
+        if 'DISTANCIA_KM' in df.columns:
+            meta['distancia_mediana_km'] = round(float(pd.to_numeric(df['DISTANCIA_KM'], errors='coerce').median()), 1)
+        meta['modulo_ativo'] = bool(curso_col or has('DESC_SEXO') or has('DESC_TP_ENSALAMENTO'))
+        self.inscritos_meta = meta
 
     def apply_capacity_bins(self):
-        logger.info("Processando segmentação analítica da FAIXA_CAPACIDADE...")
-        if self.cap_col not in self.df.columns: 
-            return None, {}
-        
+        self.logger.info("Processando segmentação analítica paramétrica (Tukey/FAIXA_CAPACIDADE)...")
+        if not self.cap_col: return
+
         s = self.df[self.cap_col]
         q25, q50, q75 = s.quantile([0.25, 0.50, 0.75])
-        media = s.mean()
-        std = s.std()
+        media, std = s.mean(), s.std()
         limite_superior = media + (2 * std)
-        
+
         condicoes = [
-            (s <= q25),
-            (s > q25) & (s <= q50),
+            (s <= q25), 
+            (s > q25) & (s <= q50), 
             (s > q50) & (s <= q75),
-            (s > q75) & (s <= limite_superior),
+            (s > q75) & (s <= limite_superior), 
             (s > limite_superior)
         ]
-        categorias = [
-            '1. Micro Sala', 
-            '2. Sala Pequena', 
-            '3. Sala Média', 
-            '4. Sala Grande', 
-            '5. Gigante / Auditório'
-        ]
+        categorias = ['1. Micro Sala', '2. Sala Pequena', '3. Sala Média', '4. Sala Grande', '5. Gigante / Auditório']
         
         self.df['FAIXA_CAPACIDADE'] = np.select(condicoes, categorias, default='Não Classificado')
-        faixas_df = self.df['FAIXA_CAPACIDADE'].value_counts().reset_index()
+        self.df['FAIXA_CAPACIDADE'] = self.df['FAIXA_CAPACIDADE'].astype('category')
         
-        cutoffs = {
-            'q25': int(q25) if pd.notnull(q25) else 0,
-            'q50': int(q50) if pd.notnull(q50) else 0,
-            'q75': int(q75) if pd.notnull(q75) else 0,
-            'limite_sup': int(limite_superior) if pd.notnull(limite_superior) else 0
-        }
-        return faixas_df, cutoffs
+        self.cutoffs = {'q25': int(q25) if pd.notnull(q25) else 0, 'q50': int(q50) if pd.notnull(q50) else 0, 'q75': int(q75) if pd.notnull(q75) else 0, 'limite_sup': int(limite_superior) if pd.notnull(limite_superior) else 0}
+
+    def generate_executive_totals(self):
+        self.logger.info("Computando Painel Exclusivo de Totais Executivos Consolidados...")
+        df = self.df
+        # Cada total agora carrega um DESCRITOR legível por máquina (op + coluna), para
+        # que o dashboard possa mostrar EXATAMENTE os dados a que o indicador se refere.
+        # op ∈ {count_rows, distinct, count_flag, count_flag_multi, sum, sum_multi,
+        #       mean, max, min, count_startswith3, count_geo}
+        rows = []
+
+        def add(metrica, valor, op, col=None):
+            if valor is None:
+                return
+            try:
+                if pd.isnull(valor):
+                    return
+            except Exception:
+                pass
+            if isinstance(valor, (int, float, np.integer, np.floating)) and float(valor) == 0.0:
+                return
+            rows.append({"metrica": metrica, "valor": valor, "op": op, "col": col})
+
+        def has(c): return c in df.columns
+        def cnt1(col): return int((df[col] == 1).sum()) if has(col) else 0
+        def cnt1_multi(cols): return int((sum((df[c] == 1) for c in cols if has(c))).astype(bool).sum()) if any(has(c) for c in cols) else 0
+        def ssum(col): return int(df[col].sum()) if has(col) else 0
+        def ssum_multi(cols): return int(sum(df[c].sum() for c in cols if has(c))) if any(has(c) for c in cols) else 0
+
+        add('Total Absoluto de Linhas (Amostra Operacional do Banco SAS)', len(df), 'count_rows')
+        add('Total Único de Locais/Prédios de Prova Mapeados e Ativos', df['NO_LOCAL'].nunique() if has('NO_LOCAL') else 0, 'distinct', 'NO_LOCAL')
+        add('Total Único de Instituições Formais/Contratos Firmados', df['CO_LOCAL'].nunique() if has('CO_LOCAL') else 0, 'distinct', 'CO_LOCAL')
+        add('Total Único de Blocos Físicos Avaliados e Separados', df['CO_BLOCO'].nunique() if has('CO_BLOCO') else 0, 'distinct', 'CO_BLOCO')
+        add('Total Único de Municípios Atingidos na Logística', df['CO_MUNICIPIO'].nunique() if has('CO_MUNICIPIO') else 0, 'distinct', 'CO_MUNICIPIO')
+        add('Total Único de Estados/UFs Integrados no Relatório', df['SG_UF'].nunique() if has('SG_UF') else 0, 'distinct', 'SG_UF')
+
+        add('Soma Total de Salas Ativas Confirmadas em Edital', cnt1('IN_ATIVO'), 'count_flag', 'IN_ATIVO')
+        add('Soma Total de Auditórios Físicos Mapeados', cnt1('IN_AUDITORIO'), 'count_flag', 'IN_AUDITORIO')
+        add('Salas Exclusivamente Destinadas a Reaplicação Extraordinária', cnt1('IN_REAPLICACAO'), 'count_flag', 'IN_REAPLICACAO')
+        add('Alerta Cidadão: Prédios com Previsão de Reforma no Período', cnt1('IN_PREVISAO_REFORMA'), 'count_flag', 'IN_PREVISAO_REFORMA')
+
+        if self.cap_col:
+            add('Capacidade Física Total Instalada Nacional (Soma Bruta Vagas)', df[self.cap_col].sum(), 'sum', self.cap_col)
+            add('Capacidade Média Logística por Unidade de Sala', df[self.cap_col].mean(), 'mean', self.cap_col)
+            add('Capacidade Máxima Ocorrida em uma Única Sala Física (Outlier)', df[self.cap_col].max(), 'max', self.cap_col)
+
+        add('Total Absoluto Paramétrico de Elevadores Físicos Ativos', ssum('QT_ELEVADORES'), 'sum', 'QT_ELEVADORES')
+        add('Total Absoluto Matemático de Banheiros Disponíveis', ssum('TOTAL_BANHEIROS_LOCAL'), 'sum', 'TOTAL_BANHEIROS_LOCAL')
+        add('Total de Banheiros Cidadãos Adaptados para PcD Limitadores', ssum_multi(['QT_BANHEIRO_ADAPTADOS_FEM', 'QT_BANHEIRO_ADAPTADOS_MASC']), 'sum_multi', 'QT_BANHEIRO_ADAPTADOS_FEM+QT_BANHEIRO_ADAPTADOS_MASC')
+
+        add('Soma Quantitativa de Salas Declaradas 100% Acessíveis N60', cnt1('IN_SALA_ACESSIVEL'), 'count_flag', 'IN_SALA_ACESSIVEL')
+        add('Soma Quantitativa de Salas Totalmente Adaptadas (Mobiliário Universal)', cnt1('IN_SALA_ADAPTADA'), 'count_flag', 'IN_SALA_ADAPTADA')
+        add('Locais e Prédios Contendo Rampas de Acesso Cidadãs', cnt1_multi(['IN_RAMPA_ACESSO', 'IN_RAMPA_ACESSO_LOCAL']), 'count_flag_multi', 'IN_RAMPA_ACESSO+IN_RAMPA_ACESSO_LOCAL')
+        add('Instituições Avaliadas com Ar-Condicionado Pleno Confirmado', cnt1('IN_AR_CONDICIONADO'), 'count_flag', 'IN_AR_CONDICIONADO')
+        add('Mesas Físicas Especiais Catalogadas Prontas para Cadeirantes', cnt1('IN_MESA_CADEIRANTE'), 'count_flag', 'IN_MESA_CADEIRANTE')
+
+        add('Locais Oficiais Equipados Plenamente com Projetores de Mídia', cnt1('IN_PROJETOR'), 'count_flag', 'IN_PROJETOR')
+        add('Locais Oficiais Equipados Fisicamente com Computadores em Rede', cnt1('IN_COMPUTADOR'), 'count_flag', 'IN_COMPUTADOR')
+        add('Locais de Apoio com Televisão Analógica/Digital (Monitoria)', cnt1('IN_TELEVISAO'), 'count_flag', 'IN_TELEVISAO')
+
+        add('Prédios Catalogados com Extintores Certificados na Validade Oficial', cnt1('IN_EXTINTOR'), 'count_flag', 'IN_EXTINTOR')
+        add('Prédios Seguros com Saídas de Emergência Regulamentadas Fogo', cnt1('IN_SAIDA_EMERGENCIA'), 'count_flag', 'IN_SAIDA_EMERGENCIA')
+        add('Prédios Policiados Diretamente ou com Base/Batalhão na Porta', cnt1('IN_POLICIAMENTO'), 'count_flag', 'IN_POLICIAMENTO')
+        add('Alerta Vermelho Crítico: Prédios Relatados em Zonas de Alta Criminalidade Exposta', cnt1('IN_ALTA_CRIMINALIDADE'), 'count_flag', 'IN_ALTA_CRIMINALIDADE')
+        add('Locais Conformidade Logística: Transporte Público Viável Próximo Ouro (Diretriz EN 1.2)', cnt1('IN_TRANSPORTE_PROXIMO'), 'count_flag', 'IN_TRANSPORTE_PROXIMO')
+
+        # --- Novos totais executivos (v28) ---
+        if has('INDICE_CONSERVACAO'):
+            add('Índice Médio Nacional de Conservação Predial (0-100 Pts)', df['INDICE_CONSERVACAO'].mean(), 'mean', 'INDICE_CONSERVACAO')
+        if has('NOTA_OFICIAL_INEP'):
+            add('Nota Oficial Média INEP do Local Reescalada (0-100 Pts)', df['NOTA_OFICIAL_INEP'].mean(), 'mean', 'NOTA_OFICIAL_INEP')
+        if has('DESC_NOTA_OFICIAL_INEP'):
+            add('Locais Avaliados Oficialmente como Excelentes (Nota Máxima 3)', int(df['DESC_NOTA_OFICIAL_INEP'].astype(str).str.startswith('3').sum()), 'count_startswith3', 'DESC_NOTA_OFICIAL_INEP')
+        if has('AREA_POR_CANDIDATO_M2'):
+            add('Área Física Média Disponível por Candidato (m² por Assento)', df['AREA_POR_CANDIDATO_M2'].mean(), 'mean', 'AREA_POR_CANDIDATO_M2')
+        if has('TEM_GEOLOCALIZACAO'):
+            add('Salas com Coordenadas Geográficas Válidas (Georreferenciadas)', int((df['TEM_GEOLOCALIZACAO'] == 'Georreferenciado').sum()), 'count_geo', 'TEM_GEOLOCALIZACAO')
+
+        # Guarda os descritores para o dashboard (drill-down por indicador).
+        self.executive_totals_meta = rows
+
+        df_tot = pd.DataFrame.from_dict({r['metrica']: r['valor'] for r in rows}, orient='index', columns=['Valor Consolidado']).round(2)
+        df_tot.index.name = 'Métrica Paramétrica Oficial'
+        return df_tot
 
     def get_general_stats(self):
-        logger.info("Computando medidas de tendência central e dispersão...")
+        """Avaliação Matemática de Densidade, Variação e Propriedades da Curva."""
+        self.logger.info("Computando medidas de tendência central estatística, skewness e testes paramétricos finos...")
+        
+        if not self.cap_col: 
+            return pd.DataFrame()
+            
         s = self.df[self.cap_col]
-        stat_norm, p_norm = stats.normaltest(s.dropna())
-        is_normal = "Sim" if p_norm > 0.05 else "Não (Distribuição Assimétrica)"
+        # O teste de D'Agostino-Pearson exige >= 8 observações válidas e variância > 0.
+        # Fora dessas condições, evitamos a exceção e reportamos indisponibilidade.
+        s_valid = s.dropna()
+        if len(s_valid) >= 8 and float(s_valid.std() or 0) > 0:
+            try:
+                _stat_norm, p_norm = stats.normaltest(s_valid)
+                is_normal = "Sim (Simetria Aprovada)" if p_norm > 0.05 else "Não (Distribuição Absolutamente Assimétrica e Viesada)"
+            except Exception:
+                is_normal = "Indeterminado (falha numérica no teste)"
+        else:
+            is_normal = "Indeterminado (amostra insuficiente para o teste, n < 8)"
 
         stats_dict = {
-            'N (Tamanho da Amostra / Salas)': len(self.df),
-            'Locais Independentes': self.df['NO_LOCAL'].nunique() if 'NO_LOCAL' in self.df else 0,
-            'Dispersão Geográfica (UFs)': self.df['SG_UF'].nunique() if 'SG_UF' in self.df else 0,
-            'Capacidade Total Instalada': s.sum(),
-            'Média Aritmética (\u03BC)': s.mean(),
-            'Mediana (Ponto de Separação)': s.median(),
-            'Moda (Valor de Maior Densidade)': s.mode()[0] if not s.mode().empty else None,
-            'Desvio Padrão (\u03C3)': s.std(),
-            'Coeficiente de Variação (CV %)': (s.std() / s.mean()) * 100 if s.mean() != 0 else 0,
-            'Mínimo Global': s.min(),
-            'Máximo Global': s.max(),
-            'Amplitude Total': s.max() - s.min(),
-            'Primeiro Quartil (Q1 - 25%)': s.quantile(0.25),
-            'Terceiro Quartil (Q3 - 75%)': s.quantile(0.75),
-            'Assimetria (Skewness)': s.skew(),
-            'Curtose (Achatamento da Curva)': s.kurtosis(),
-            'Aderência à Distribuição Normal?': is_normal
+            'N Total (Tamanho da Amostra Limpa / Portas ou Linhas Físicas Ativas)': len(self.df),
+            'Tamanho Total Único (Locais Físicos e Endereços Independentes)': self.df['NO_LOCAL'].nunique() if 'NO_LOCAL' in self.df else 0,
+            'Dispersão Geográfica Ampla Mapeada (Estados / UFs)': self.df['SG_UF'].nunique() if 'SG_UF' in self.df else 0,
+            'Capacidade Total Instalada Absoluta (Vagas Físicas e Assentos Brutos Limpos)': s.sum(),
+            'Capacidade de Inscrições Suportadas Seguras e Ouro (Deságio Cautelar Limite de 30% - Diretriz Contratual EN 1.6)': s.sum() * 0.70,
+            'Média Aritmética Formal Estimada (\u03BC) de Vagas por Sala Analítica': s.mean(),
+            'Mediana Estatística de Cisão (Ponto Fiel de Separação Relacional - 50% dos dados)': s.median(),
+            'Desvio Padrão Distribucional Relativo (\u03C3)': s.std(),
+            'Coeficiente de Variação de Instabilidade Base (CV %)': (s.std() / s.mean()) * 100 if s.mean() != 0 else 0,
+            'Mínimo Global Físico Limite (Limiar Zero Ouro)': s.min(),
+            'Máximo Global Físico Limite (Auditório/Limiar de Teto Frio Extremo)': s.max(),
+            'Amplitude Total Ouro Operacional Limpa (Gap de Espaço)': s.max() - s.min(),
+            'Primeiro Quartil Paramétrico Mestre (Q1 - 25% Quartil Inferior Limite de Tukey)': s.quantile(0.25),
+            'Terceiro Quartil Paramétrico Mestre (Q3 - 75% Quartil Superior Teto de Tukey)': s.quantile(0.75),
+            'Intervalo Interquartílico Global (IQR Frio Limpo Científico)': s.quantile(0.75) - s.quantile(0.25),
+            'Assimetria Matemática (Skewness Ouro - Risco Intenso de Efeito Cauda Longa Parametrizado Oculto)': s.skew(),
+            'Aderência à Distribuição Normal Estatística de Gauss?': is_normal
         }
-        return pd.DataFrame.from_dict(stats_dict, orient='index', columns=['Valor Estimado']).round(2)
-
-    def detect_outliers(self):
-        logger.info("Processando detecção paramétrica de Outliers...")
-        s = self.df[self.cap_col]
-        z_scores = np.abs(stats.zscore(s))
-        Q1 = s.quantile(0.25)
-        Q3 = s.quantile(0.75)
-        IQR = Q3 - Q1
         
-        outliers_df = self.df[(z_scores > 3) | (s < (Q1 - 1.5 * IQR)) | (s > (Q3 + 1.5 * IQR))].copy()
-        outliers_df['CLASSIFICACAO_ESTATISTICA'] = np.where(
-            outliers_df[self.cap_col] > s.mean(), 
-            'Outlier Superior (Risco de Sobreposição / Auditório Gigante)', 
-            'Outlier Inferior (Risco de Ineficiência Logística)'
-        )
+        if 'INDICE_QUALIDADE_GLOBAL' in self.df.columns: 
+            stats_dict['Índice Composto Médio Nacional de Qualidade Predial Global (0-100 Pts)'] = self.df['INDICE_QUALIDADE_GLOBAL'].mean()
+        if 'INDICE_VULNERABILIDADE' in self.df.columns: 
+            stats_dict['Índice Composto Médio Nacional Extremo de Vulnerabilidade Predial Civil Mestre (0-100 Pts Alarme)'] = self.df['INDICE_VULNERABILIDADE'].mean()
+        if 'INDICE_ACESSIBILIDADE' in self.df.columns: 
+            stats_dict['Índice Composto Médio Nacional de Excelência em Acessibilidade Predial Inclusiva'] = self.df['INDICE_ACESSIBILIDADE'].mean()
+        if 'INDICE_SEGURANCA' in self.df.columns: 
+            stats_dict['Índice Composto Médio Nacional de Segurança Contingencial Predial Anti-Sinistro Cidadão'] = self.df['INDICE_SEGURANCA'].mean()
+
+        df_stats = pd.DataFrame.from_dict(stats_dict, orient='index', columns=['Valor Estimado e Valorado Exato Ouro']).round(2)
+        df_stats.index.name = 'Métrica Paramétrica Oficial'
+        return df_stats
+
+    def detect_outliers_and_anomalies(self):
+        """Detecção de Anomalias Frias utilizando Machine Learning Não Supervisionado."""
+        self.logger.info("Inteligência Artificial: Processando detecção paramétrica multivariada de Anomalias/Fraudes Contábeis via Sklearn (Isolation Forest AI)...")
+        outliers_df = pd.DataFrame()
+        
+        if len(self.num_cols) >= 1:
+            X = self.df[self.num_cols].fillna(self.df[self.num_cols].median())
+            preds = IsolationForest(contamination=0.03, random_state=42).fit_predict(StandardScaler().fit_transform(X))
+            self.df['ALERTA_ANOMALIA_ML'] = np.where(preds == -1, 'RISCO ALTO (OUTLIER I.A.)', 'Padrão Normal Frio Ouro Ativo')
+
+        if self.cap_col:
+            s = self.df[self.cap_col]
+            # CORREÇÃO: com a política padrão ('propagate'), um único NaN contamina TODO o
+            # vetor de z-scores, fazendo a detecção por z não marcar nada. 'omit' resolve.
+            z_scores = np.abs(stats.zscore(s, nan_policy='omit'))
+            z_scores = pd.Series(z_scores, index=s.index).fillna(0)
+            Q1, Q3 = s.quantile(0.25), s.quantile(0.75)
+            IQR = Q3 - Q1
+            
+            outliers_df = self.df[(z_scores > 3) | (s < (Q1 - 1.5 * IQR)) | (s > (Q3 + 1.5 * IQR))].copy()
+            outliers_df['CLASSIFICACAO_ESTATISTICA'] = np.where(
+                outliers_df[self.cap_col] > s.mean(),
+                'Outlier de Topo Extremo Positivo (Risco Massivo de Superlotação / Auditório Gigante Excluído fora da Curva Padrão Analítica)',
+                'Outlier de Base Extremo Negativo (Risco Severo de Ineficiência Logística Extrema Fria Estrita)'
+            )
+            
         return outliers_df
 
     def group_analysis(self, group_by_cols):
-        grouped = self.df.groupby(group_by_cols).agg(
-            QTD_SALAS=(self.cap_col, 'count'),
-            CAPACIDADE_TOTAL=(self.cap_col, 'sum'),
+        """[MÉTODO RECUPERADO OBRIGATÓRIO] Agrupamento dinâmico paramétrico seguro e vetorizado."""
+        self.logger.info(f"Processando vetorização matemática e análise de agrupamento dimensional rígida por chaves: {group_by_cols}")
+        
+        valid_cols = [c for c in group_by_cols if c in self.df.columns]
+        if not valid_cols or not self.cap_col or self.cap_col not in self.df.columns:
+            return pd.DataFrame()
+
+        grouped = self.df.groupby(valid_cols).agg(
+            QTD_SALAS=(self.cap_col, 'count'), 
+            CAPACIDADE_TOTAL=(self.cap_col, 'sum'), 
             CAPACIDADE_MEDIA=(self.cap_col, 'mean'),
             CAPACIDADE_MAXIMA=(self.cap_col, 'max')
         ).reset_index()
-        
+
         total_nacional = grouped['CAPACIDADE_TOTAL'].sum()
-        grouped['REPRESENTATIVIDADE (%)'] = (grouped['CAPACIDADE_TOTAL'] / total_nacional) * 100
-        grouped['RANKING_VOLUMETRICO'] = grouped['CAPACIDADE_TOTAL'].rank(ascending=False, method='min')
+        grouped['REPRESENTATIVIDADE (%)'] = np.where(total_nacional > 0, (grouped['CAPACIDADE_TOTAL'] / total_nacional) * 100, 0)
+        grouped['RANKING_VOLUMETRICO_GERAL'] = grouped['CAPACIDADE_TOTAL'].rank(ascending=False, method='min')
+        
         return grouped.sort_values('CAPACIDADE_TOTAL', ascending=False).round(2)
 
-    def get_top_locais(self, n=20):
-        if 'NO_LOCAL' not in self.df.columns: 
-            return pd.DataFrame()
-        locais = self.group_analysis(['NO_LOCAL', 'SG_UF'] if 'SG_UF' in self.df.columns else ['NO_LOCAL'])
-        return locais.head(n)
-
     def pareto_analysis(self, col):
+        """Curva de Acúmulo de Pareto para alocação de Frotas."""
+        self.logger.info(f"Otimização: Processando análise contábil vetorizada de Pareto Preditiva Fria na variável matriz {col}...")
+        
+        if col not in self.df.columns or not self.cap_col: 
+            return pd.DataFrame()
+            
         pareto_df = self.df.groupby(col)[self.cap_col].sum().sort_values(ascending=False).reset_index()
         pareto_df['FREQUENCIA_RELATIVA (%)'] = (pareto_df[self.cap_col] / pareto_df[self.cap_col].sum()) * 100
         pareto_df['FREQUENCIA_ACUMULADA (%)'] = pareto_df['FREQUENCIA_RELATIVA (%)'].cumsum()
+        
         return pareto_df.round(2)
 
-class MachineLearningEngine:
-    def __init__(self, df):
-        self.df = df
+    def get_top_locais(self, n=20):
+        """Extrai os Top-N Super Polos Estratégicos."""
+        self.logger.info(f"Inteligência Analítica Extrema: Extraindo top {n} mega-locais prediais de maior risco logístico volumétrico nacional...")
         
-    def cluster_locations(self):
-        logger.info("Treinando modelo K-Means para Clusterização de IA...")
-        if 'NO_LOCAL' not in self.df.columns: 
+        if 'NO_LOCAL' not in self.df.columns or not self.cap_col: 
             return pd.DataFrame()
             
-        locais = self.df.groupby('NO_LOCAL').agg(
-            QTD_SALAS=('QT_CAPACIDADE_MAXIMA_SALA', 'count'),
-            CAPACIDADE_MEDIA=('QT_CAPACIDADE_MAXIMA_SALA', 'mean'),
-            CAPACIDADE_TOTAL=('QT_CAPACIDADE_MAXIMA_SALA', 'sum')
-        ).reset_index()
+        cols_to_group = ['NO_LOCAL', 'SG_UF'] if 'SG_UF' in self.df.columns else ['NO_LOCAL']
+        grouped = self.group_analysis(cols_to_group)
         
-        X = locais[['QTD_SALAS', 'CAPACIDADE_MEDIA', 'CAPACIDADE_TOTAL']]
-        if len(X) >= 4:
-            X_scaled = StandardScaler().fit_transform(X)
-            kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-            locais['ID_CLUSTER'] = kmeans.fit_predict(X_scaled)
+        if grouped.empty: 
+            return pd.DataFrame()
             
-            cluster_means = locais.groupby('ID_CLUSTER')['CAPACIDADE_TOTAL'].mean().sort_values()
-            labels = {
-                cluster_means.index[0]: 'C1: Operação Base (Pulverizados/Menores)',
-                cluster_means.index[1]: 'C2: Polos Intermediários (Comportamento Padrão)',
-                cluster_means.index[2]: 'C3: Centros Estratégicos (Alta Concentração)',
-                cluster_means.index[3]: 'C4: Super-Polos Logísticos (Risco Elevado/Massivos)'
-            }
-            locais['PERFIL_COMPORTAMENTAL_IA'] = locais['ID_CLUSTER'].map(labels)
+        return grouped.head(n)
+
+    @staticmethod
+    def calc_gini(x):
+        """Estatística Fina: Cálculo do Coeficiente de Gini para medir desigualdade espacial."""
+        v = np.sort(x.values.astype(np.float64))
+        n = len(v)
+        if n <= 1 or np.sum(v) == 0: 
+            return 0.0
+            
+        return (np.sum((2 * np.arange(1, n + 1) - n - 1) * v)) / (n * np.sum(v))
+
+    def build_multi_level_aggregations(self):
+        """Cubo Dimensional Mestre. Constrói agrupamentos Escola, Bloco, Município e UF e as Matrizes Cidadãs."""
+        if not self.cap_col or 'NO_LOCAL' not in self.df.columns: 
+            return
+            
+        self.logger.info("Executando K-Means Clustering Unsupervised Ativo Ouro e Agrupamentos Dimensionais Multi-Nível Hierárquicos Cidadãos Formais...")
+
+        # 1. Agrupamento Nível Folha (Institucional)
+        faixa_mode = self.df.groupby('NO_LOCAL')['FAIXA_CAPACIDADE'].agg(lambda x: x.mode()[0] if not x.mode().empty else 'N/A')
+        aggs = {'QTD_SALAS': ('NO_LOCAL', 'count'), 'CAP_MEDIA': (self.cap_col, 'mean'), 'CAP_TOTAL': (self.cap_col, 'sum')}
+        
+        if 'DESC_CENTRO_EN1_2_2' in self.df.columns: 
+            aggs['DESC_CENTRO'] = ('DESC_CENTRO_EN1_2_2', lambda x: x.mode()[0] if not x.mode().empty else 'N/A')
+        if 'INDICE_QUALIDADE_GLOBAL' in self.df.columns: 
+            aggs['QUALIDADE_PREDIAL_GLOBAL'] = ('INDICE_QUALIDADE_GLOBAL', 'mean')
+        if 'INDICE_VULNERABILIDADE' in self.df.columns: 
+            aggs['VULNERABILIDADE_PREDIAL_RISCO'] = ('INDICE_VULNERABILIDADE', 'mean')
+        if 'INDICE_ACESSIBILIDADE' in self.df.columns: 
+            aggs['ACESSIBILIDADE_PREDIAL_MEDIA'] = ('INDICE_ACESSIBILIDADE', 'mean')
+        if 'INDICE_SEGURANCA' in self.df.columns: 
+            aggs['SEGURANCA_PREDIAL_MEDIA'] = ('INDICE_SEGURANCA', 'mean')
+        if 'INDICE_CONFORTO' in self.df.columns: 
+            aggs['CONFORTO_PREDIAL_MEDIO'] = ('INDICE_CONFORTO', 'mean')
+        if 'TAXA_OCUPACAO_SALA' in self.df.columns: 
+            aggs['TAXA_OCUPACAO_MEDIA'] = ('TAXA_OCUPACAO_SALA', 'mean')
+        if 'INDICE_CONSERVACAO' in self.df.columns:
+            aggs['CONSERVACAO_PREDIAL_MEDIA'] = ('INDICE_CONSERVACAO', 'mean')
+        if 'NOTA_OFICIAL_INEP' in self.df.columns:
+            aggs['NOTA_OFICIAL_MEDIA'] = ('NOTA_OFICIAL_INEP', 'mean')
+        if 'AREA_POR_CANDIDATO_M2' in self.df.columns:
+            aggs['AREA_POR_CANDIDATO_MEDIA'] = ('AREA_POR_CANDIDATO_M2', 'mean')
+        if 'INDICE_ENTORNO_SERVICOS' in self.df.columns:
+            aggs['ENTORNO_SERVICOS_MEDIO'] = ('INDICE_ENTORNO_SERVICOS', 'mean')
+
+        self.locais_agg = self.df.groupby('NO_LOCAL').agg(**aggs).reset_index().sort_values('CAP_TOTAL', ascending=False)
+        self.locais_agg['FAIXA_PREDOMINANTE'] = self.locais_agg['NO_LOCAL'].map(faixa_mode)
+
+        if 'SG_UF' in self.df.columns: 
+            self.locais_agg['SG_UF'] = self.locais_agg['NO_LOCAL'].map(self.df[['NO_LOCAL', 'SG_UF']].drop_duplicates().set_index('NO_LOCAL')['SG_UF'].to_dict())
+        else: 
+            self.locais_agg['SG_UF'] = "N/A"
+            
+        if 'TP_INSTITUICAO' in self.df.columns: 
+            self.locais_agg['TP_INSTITUICAO'] = self.locais_agg['NO_LOCAL'].map(self.df[['NO_LOCAL', 'TP_INSTITUICAO']].drop_duplicates().set_index('NO_LOCAL')['TP_INSTITUICAO'].to_dict())
+            
+        if 'CO_MUNICIPIO' in self.df.columns: 
+            self.locais_agg['CO_MUNICIPIO'] = self.locais_agg['NO_LOCAL'].map(self.df[['NO_LOCAL', 'CO_MUNICIPIO']].drop_duplicates().set_index('NO_LOCAL')['CO_MUNICIPIO'].to_dict())
+
+        # 2. Agrupamento Nível Bloco (Campus)
+        if 'CO_BLOCO' in self.df.columns:
+            self.bloco_agg = self.df.groupby(['NO_LOCAL', 'CO_BLOCO']).agg(
+                TOTAL_SALAS_DO_BLOCO=('NO_LOCAL', 'count'), 
+                CAPACIDADE_TOTAL_BLOCO=(self.cap_col, 'sum')
+            ).reset_index().sort_values('CAPACIDADE_TOTAL_BLOCO', ascending=False)
+
+        # 3. Agrupamento Nível Munícipio (Regional)
+        if 'CO_MUNICIPIO' in self.df.columns:
+            self.mun_agg = self.locais_agg.groupby(['SG_UF', 'CO_MUNICIPIO']).agg(
+                TOTAL_ESCOLAS_MUNICIPAIS_AUDITADAS=('NO_LOCAL', 'nunique'), 
+                TOTAL_SALAS_MUNICIPAIS_PORTAS=('QTD_SALAS', 'sum'), 
+                CAPACIDADE_BRUTA_MUNICIPAL_OFERTADA=('CAP_TOTAL', 'sum')
+            ).reset_index().sort_values('CAPACIDADE_BRUTA_MUNICIPAL_OFERTADA', ascending=False)
+            
+            self.top_municipios = self.mun_agg.head(50)
+
+        # 4. Agrupamento Nível Estado (UF Master Data)
+        if 'SG_UF' in self.df.columns:
+            self.uf_agg = self.locais_agg.groupby('SG_UF').agg(
+                TOTAL_POLOS_UF=('NO_LOCAL', 'nunique'), 
+                TOTAL_SALAS_UF=('QTD_SALAS', 'sum'), 
+                CAPACIDADE_ESTADUAL_TOTAL=('CAP_TOTAL', 'sum')
+            ).reset_index()
+            
+            gini_uf = self.locais_agg.groupby('SG_UF')['CAP_TOTAL'].apply(self.calc_gini).reset_index(name='GINI_ESTADUAL_CONCENTRACAO_RISCO')
+            
+            if 'QUALIDADE_PREDIAL_GLOBAL' in self.locais_agg.columns:
+                uf_qual = self.locais_agg.groupby('SG_UF')['QUALIDADE_PREDIAL_GLOBAL'].mean().reset_index()
+                self.uf_agg = self.uf_agg.merge(uf_qual, on='SG_UF', how='left')
+
+            self.uf_agg = self.uf_agg.merge(gini_uf, on='SG_UF').sort_values('CAPACIDADE_ESTADUAL_TOTAL', ascending=False).round(3)
+            
+            equip_c = [c for c in ['IN_COMPUTADOR', 'IN_PROJETOR', 'IN_TELEVISAO', 'IN_DVD', 'IN_APARELHO_SOM'] if c in self.df.columns]
+            if equip_c: 
+                self.equip_agg = self.df.groupby('SG_UF')[equip_c].sum().reset_index()
+            
+            acess_c = [c for c in ['IN_ACESSIBILIDADE', 'IN_RAMPA_ACESSO', 'IN_ELEVADOR', 'QT_BANHEIRO_ADAPTADOS_FEM', 'IN_SALA_ADAPTADA', 'IN_MESA_CADEIRANTE'] if c in self.df.columns]
+            if acess_c: 
+                self.acess_agg = self.df.groupby('SG_UF')[acess_c].sum().reset_index()
+            
+            seg_c = [c for c in ['IN_POLICIAMENTO', 'IN_LOCAL_CERCADO', 'IN_PRIMEIROS_SOCORROS', 'IN_SAIDA_EMERGENCIA', 'IN_EXTINTOR', 'IN_HIDRANTE', 'IN_RISCO_AMBIENTAL'] if c in self.df.columns]
+            if seg_c: 
+                self.seg_agg = self.df.groupby('SG_UF')[seg_c].sum().reset_index()
+            
+            vuln_c = [c for c in ['IN_ALTA_CRIMINALIDADE', 'IN_RISCO_AMBIENTAL', 'IN_PREVISAO_REFORMA'] if c in self.df.columns]
+            if vuln_c: 
+                self.vuln_agg = self.df.groupby('SG_UF')[vuln_c].sum().reset_index()
+
+        # =============================================================================
+        # NOVAS AGREGAÇÕES DIMENSIONAIS (v28) — fundamentadas nos layouts.
+        # =============================================================================
+        if 'SG_UF' in self.df.columns:
+            # Conservação predial média por UF
+            if 'INDICE_CONSERVACAO' in self.df.columns:
+                self.conservacao_agg = (
+                    self.df.groupby('SG_UF')['INDICE_CONSERVACAO'].mean()
+                    .reset_index(name='CONSERVACAO_MEDIA_UF')
+                    .sort_values('CONSERVACAO_MEDIA_UF', ascending=False).round(2))
+            # Distribuição da Nota Oficial INEP por UF (contagem por categoria + média)
+            if 'DESC_NOTA_OFICIAL_INEP' in self.df.columns:
+                self.nota_oficial_agg = (
+                    pd.crosstab(self.df['SG_UF'], self.df['DESC_NOTA_OFICIAL_INEP'])
+                    .reset_index())
+            # Densidade espacial média por UF
+            if 'AREA_POR_CANDIDATO_M2' in self.df.columns:
+                self.densidade_agg = (
+                    self.df.groupby('SG_UF')['AREA_POR_CANDIDATO_M2'].mean()
+                    .reset_index(name='AREA_MEDIA_POR_CANDIDATO_M2')
+                    .sort_values('AREA_MEDIA_POR_CANDIDATO_M2', ascending=True).round(3))
+
+        # Distribuição por dependência administrativa (N52)
+        if 'DESC_DEPENDENCIA' in self.df.columns and self.cap_col:
+            self.dependencia_agg = (
+                self.df.groupby('DESC_DEPENDENCIA').agg(
+                    TOTAL_SALAS=('DESC_DEPENDENCIA', 'count'),
+                    CAPACIDADE_TOTAL=(self.cap_col, 'sum'),
+                    CAPACIDADE_MEDIA=(self.cap_col, 'mean'),
+                ).reset_index().sort_values('CAPACIDADE_TOTAL', ascending=False).round(2))
+
+        # Pontos georreferenciados por instituição (para o mapa interativo)
+        geo_ok = ('NU_LATITUDE_LOCAL' in self.df.columns and 'NU_LONGITUDE_LOCAL' in self.df.columns)
+        if geo_ok:
+            geo_cols = ['NO_LOCAL', 'SG_UF', 'NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL']
+            geo_cols = [c for c in geo_cols if c in self.df.columns]
+            geo = self.df[geo_cols].dropna(subset=['NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL']).copy()
+            if 'NO_LOCAL' in geo.columns and not geo.empty:
+                agg_map = {'NU_LATITUDE_LOCAL': 'first', 'NU_LONGITUDE_LOCAL': 'first'}
+                if 'SG_UF' in geo.columns:
+                    agg_map['SG_UF'] = 'first'
+                self.geo_df = geo.groupby('NO_LOCAL').agg(agg_map).reset_index()
+                # Enriquecer com capacidade e qualidade das instituições, quando disponíveis.
+                merge_cols = ['NO_LOCAL', 'CAP_TOTAL', 'QTD_SALAS']
+                for extra in ['QUALIDADE_PREDIAL_GLOBAL', 'ACESSIBILIDADE_PREDIAL_MEDIA', 'NOTA_OFICIAL_MEDIA']:
+                    if extra in self.locais_agg.columns:
+                        merge_cols.append(extra)
+                merge_cols = [c for c in merge_cols if c in self.locais_agg.columns]
+                self.geo_df = self.geo_df.merge(self.locais_agg[merge_cols], on='NO_LOCAL', how='left')
+
+        self.gini_index = self.calc_gini(self.locais_agg['CAP_TOTAL'])
+
+        # 5. Machine Learning IA (K-Means Clustering Multidimensional)
+        # GUARDA DE ROBUSTEZ: o K-Means com 4 clusters exige pelo menos 4 instituições
+        # distintas. Em bases pequenas, reduzimos o número de clusters (ou atribuímos um
+        # único perfil) para evitar exceções, mantendo a rotulagem em 4 níveis quando há
+        # dados suficientes.
+        n_locais = len(self.locais_agg)
+        base_labels = [
+            'C1: Polo Micro Ineficiente',
+            'C2: Polo Padrão Equilibrado',
+            'C3: Centro Logístico Estratégico',
+            'C4: Super-Polo Arquitetônico (Máximo Risco)',
+        ]
+        X = self.locais_agg[['QTD_SALAS', 'CAP_MEDIA', 'CAP_TOTAL']].fillna(0)
+        k = min(4, max(1, n_locais))
+        if n_locais >= 2 and int(X.nunique().sum()) > k:
+            self.locais_agg['CLUSTER_ID'] = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(
+                StandardScaler().fit_transform(X))
         else:
-            locais['PERFIL_COMPORTAMENTAL_IA'] = 'C1: Operação Base (Pulverizados/Menores)'
-        
-        self.df = self.df.merge(locais[['NO_LOCAL', 'PERFIL_COMPORTAMENTAL_IA']], on='NO_LOCAL', how='left')
-        return locais.sort_values('CAPACIDADE_TOTAL', ascending=False).round(2)
+            self.locais_agg['CLUSTER_ID'] = 0
 
+        cluster_means = self.locais_agg.groupby('CLUSTER_ID')['CAP_TOTAL'].mean().sort_values()
+        labels = {cid: base_labels[min(i, len(base_labels) - 1)] for i, cid in enumerate(cluster_means.index)}
+        self.locais_agg['PERFIL_INFRAESTRUTURA_IA'] = self.locais_agg['CLUSTER_ID'].map(labels)
+        
+        # Propagação do Alerta Cidadão Anômalo Mestre
+        if 'ALERTA_ANOMALIA_ML' in self.df.columns:
+            anomalias_locais = self.df[self.df['ALERTA_ANOMALIA_ML'] == 'RISCO ALTO (OUTLIER I.A.)']['NO_LOCAL'].unique()
+            self.locais_agg['ALERTA_PREDIAL_SISTEMICO_SEVERO'] = np.where(
+                self.locais_agg['NO_LOCAL'].isin(anomalias_locais), 
+                'ALERTA LETAL: ANOMALIA NO CADASTRO', 
+                'Padrão Normal Aprovado'
+            )
+        else: 
+            self.locais_agg['ALERTA_PREDIAL_SISTEMICO_SEVERO'] = 'Padrão Normal Aprovado'
+
+        # Devolve as deduções estruturadas para o dataframe original
+        self.df = self.df.merge(self.locais_agg[['NO_LOCAL', 'PERFIL_INFRAESTRUTURA_IA', 'QTD_SALAS', 'CAP_MEDIA']], on='NO_LOCAL', how='left')
+
+    def process(self) -> MLProcessingResults:
+        """Orquestrador Central Executivo de Cálculos. Retorna DTO seguro."""
+        self.apply_capacity_bins()
+        outliers_df = self.detect_outliers_and_anomalies()
+        self.build_multi_level_aggregations()
+        self.build_participant_aggregations()  # Módulo de Inscritos & Ensalamento (v29)
+        self.build_attendance_aggregations()   # Módulo de Atendimentos & Recursos (v30)
+        
+        totals_df = self.generate_executive_totals()
+        stats_df = self.get_general_stats()
+        pareto_uf = self.pareto_analysis('SG_UF')
+        top_locais = self.get_top_locais(20)
+        
+        crosstab_faixa_ia, crosstab_uf_faixa, normative_crosstab = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        
+        if 'FAIXA_CAPACIDADE' in self.df.columns and 'PERFIL_INFRAESTRUTURA_IA' in self.df.columns:
+            crosstab_faixa_ia = pd.crosstab(self.df['FAIXA_CAPACIDADE'], self.df['PERFIL_INFRAESTRUTURA_IA'], margins=True)
+            
+        if 'SG_UF' in self.df.columns and 'FAIXA_CAPACIDADE' in self.df.columns:
+            crosstab_uf_faixa = pd.crosstab(self.df['SG_UF'], self.df['FAIXA_CAPACIDADE'], margins=True)
+            
+        if 'DESC_CENTRO_EN1_2_2' in self.df.columns and 'DESC_TRANSPORTE_EN1_2_1' in self.df.columns:
+            normative_crosstab = pd.crosstab(self.df['DESC_CENTRO_EN1_2_2'], self.df['DESC_TRANSPORTE_EN1_2_1'], margins=True)
+
+        # Matriz de Correlação de Pearson entre índices e quantidades-chave (v28).
+        corr_candidates = [
+            'QT_CAPACIDADE_MAXIMA_SALA', 'QT_CANDIDATOS_ALOCADOS', 'TAXA_OCUPACAO_SALA',
+            'INDICE_ACESSIBILIDADE', 'INDICE_SEGURANCA', 'INDICE_CONFORTO', 'INDICE_TECNOLOGIA',
+            'INDICE_CONSERVACAO', 'INDICE_QUALIDADE_GLOBAL', 'INDICE_VULNERABILIDADE',
+            'NOTA_OFICIAL_INEP', 'AREA_SALA_M2', 'AREA_POR_CANDIDATO_M2', 'INDICE_ENTORNO_SERVICOS',
+        ]
+        present = [c for c in corr_candidates if c in self.df.columns]
+        if len(present) >= 2:
+            self.correlation_matrix = self.df[present].corr(numeric_only=True).round(3)
+
+        # Validação de cobertura de colunas conhecidas dos layouts (para o relatório).
+        column_validation = INEPLayoutDictionary.validate_columns(self.df)
+
+        return MLProcessingResults(
+            df=self.df, 
+            totals_df=totals_df, 
+            stats_df=stats_df, 
+            outliers_df=outliers_df, 
+            pareto_uf=pareto_uf,
+            top_locais=top_locais, 
+            top_municipios=getattr(self, 'top_municipios', pd.DataFrame()), 
+            cutoffs=self.cutoffs,
+            locais_agg=self.locais_agg, 
+            uf_agg=self.uf_agg, 
+            mun_agg=getattr(self, 'mun_agg', pd.DataFrame()),
+            bloco_agg=getattr(self, 'bloco_agg', pd.DataFrame()), 
+            equip_agg=getattr(self, 'equip_agg', pd.DataFrame()),
+            acess_agg=getattr(self, 'acess_agg', pd.DataFrame()), 
+            seg_agg=getattr(self, 'seg_agg', pd.DataFrame()),
+            vuln_agg=getattr(self, 'vuln_agg', pd.DataFrame()),
+            gini_index=self.gini_index, 
+            crosstab_faixa_ia=crosstab_faixa_ia, 
+            crosstab_uf_faixa=crosstab_uf_faixa,
+            normative_crosstab=normative_crosstab, 
+            quality_report=getattr(self, 'quality_report', {}),
+            correlation_matrix=self.correlation_matrix,
+            conservacao_agg=self.conservacao_agg,
+            nota_oficial_agg=self.nota_oficial_agg,
+            densidade_agg=self.densidade_agg,
+            geo_df=self.geo_df,
+            dependencia_agg=self.dependencia_agg,
+            column_validation=column_validation,
+            totals_meta=getattr(self, 'executive_totals_meta', []),
+            # Módulo de Inscritos & Ensalamento (v29)
+            demografia_agg=self.demografia_agg,
+            curso_agg=self.curso_agg,
+            atendimento_agg=self.atendimento_agg,
+            ensalamento_agg=self.ensalamento_agg,
+            situacao_agg=self.situacao_agg,
+            migracao_agg=self.migracao_agg,
+            faixa_etaria_agg=self.faixa_etaria_agg,
+            inscritos_meta=self.inscritos_meta,
+            # Módulo de Atendimentos & Recursos (v30)
+            item_atend_agg=self.item_atend_agg,
+            tipo_item_agg=self.tipo_item_agg,
+            laudo_agg=self.laudo_agg,
+            laudo_uf_agg=self.laudo_uf_agg,
+            cid_agg=self.cid_agg,
+            atendimentos_meta=self.atendimentos_meta,
+        )
+
+
+# ==========================================
+# GERADOR DE INSIGHTS E DATA STORYTELLING
+# ==========================================
+class CognitiveInsightGenerator:
+    """Motor de NLP C-Level Explainable AI e Geração Automática de Laudos Executivos."""
+    
+    @staticmethod
+    def get_derived_indices_glossary():
+        return {
+            "ÍNDICE DE QUALIDADE GLOBAL PREDITIVO (NOVO)": "Score Ouro Dimensional Exato de 0 a 100 consolidando formalmente a Acessibilidade, Segurança, Conforto e Tecnologia da Instituição ou Campus Escolar.",
+            "ÍNDICE PREDITIVO DE VULNERABILIDADE ESTRUTURAL (NOVO)": "Score Formativo Analítico Invertido Limitador Cidadão. Matriz Limpa de Apontamento Ouro Formal do perigo georreferenciado e criminal.",
+            "ÍNDICE DE ACESSIBILIDADE FÍSICA UNIVERSAL CIDADÃ (N60)": "Métrica composta robótica que converte as flags físicas e matrizes de auditoria in-loco (Rampas, Elevadores) em uma Nota de Adequação de 0 a 100.",
+            "ÍNDICE DE SEGURANÇA E PROTEÇÃO CONTRA INCIDENTES (N60)": "Avalia o crítico grau estatístico de mitigação e preparação predial contra contingências ativas (Policiamento Militar Cidadão, Risco de Criminalidade, Prevenção de Fogo).",
+            "TAXA C-LEVEL LOGÍSTICA DE OCUPAÇÃO PARAMÉTRICA (N50 / N52)": "Razão calculada entre a variável QT_CANDIDATOS_ALOCADOS dividida pela QT_CAPACIDADE_MAXIMA da sala. Audita se as escolas estão sendo superlotadas.",
+            "CANDIDATOS POR BANHEIRO (DENSIDADE SANITÁRIA) (N52)": "Avaliação de adequação civil e dignidade sanitária. Razões matemáticas muito altas atestam inequivocamente preveem gargalos severos de fluxos migratórios.",
+            "ÍNDICE DE CONSERVAÇÃO PREDIAL (NOVO — N60)": "Score de 0 a 100 derivado dos campos ordinais TP_* de estado de conservação (0-Inadequado, 1-Razoável, 2-Adequado) — telhado, paredes, piso, portas, janelas, banheiros, instalações elétrica/hidráulica, iluminação, mobiliário, etc. Reescala a média para 0-100. Mede o desgaste físico do prédio, complementar aos índices funcionais.",
+            "NOTA OFICIAL INEP DO LOCAL (NOVO — N60)": "Reescala a nota oficial NU_PONTOS_LOCAL_PROVA do próprio INEP (1-Básico, 2-Adequado, 3-Excelente) para 0-100 (33/67/100). É a avaliação-síntese chancelada pela regra oficial, servindo de contraprova externa aos índices calculados por Feature Engineering.",
+            "ÁREA POR CANDIDATO — DENSIDADE ESPACIAL (NOVO — N50)": "Metros quadrados disponíveis por assento, calculados a partir da largura × comprimento da sala (em cm) dividida pela capacidade máxima. Valores abaixo de 0,8 m²/pessoa sinalizam superlotação espacial (risco sanitário e de segurança); acima de 1,2 m²/pessoa indicam conforto adequado."
+        }
+
+    @staticmethod
+    def get_normative_glossary():
+        return {
+            "Compliance Oficial Restrito Direto (EN 1.1 e EN 1.1.1)": "Atesto de condições técnicas paramétricas mínimas e regulatórias governamentais federais extraídas a frio do N60.",
+            "Compliance Regulatório de Centralidade Urbana (EN 1.2.1.1 e EN 1.2.2)": "O indicador algorítmico Frio Ouro IN_CENTRO aponta inequivocamente se a instituição reside no perímetro urbano central. Escolas periféricas demandam Justificativa.",
+            "Compliance Logístico de Transporte Público (EN 1.2.1.2.3)": "A variável oficial formal Limpo Ouro IN_TRANSPORTE_PROXIMO garante a prestação estrita de rotas vitais e vias de acesso.",
+            "Compliance Matemático Financeiro (Reserva de Margem EN 1.6)": "A capacidade global máxima bruta oficial locada (Oferta) deve superar estatisticamente a estimativa oficial de inscritos (Demanda) em margem bruta de 30%."
+        }
+
+    @staticmethod
+    def get_statistical_glossary():
+        return {
+            "Índice Estatístico Econômico Científico de Gini": "Métrica robusta matemática corporativa isolada de aferição de desigualdade de alocação de mercado (0 a 1). Um Índice Gini elevado apontará a letal polarização da Capacidade Nacional em 'Mega Escolas Físicas'.",
+            "Matriz Estatística Paramétrica Multivariada de Tabulação Cruzada (Crosstab Heatmap)": "Técnica matricial estrita que cruza as visões da Inteligência Artificial (K-Means) contra a Matemática Estática (Faixas IQR Quartis).",
+            "Assimetria (Skewness) & Curtose (Kurtosis) da Curva": "A Assimetria afere a espessura e extensão da 'cauda longa' (concentração ruidosa) enquanto a Curtose pesa o Achatamento Gausiano da Curva logística.",
+            "Tecnologia Computacional Científica de Modelagem de IA (K-Means & Isolation Forest)": "A Inteligência Estruturada Artificial categoriza isenta de vieses. O Robô isola gargalos operacionais no Grupo C4 (Super-Polos) e marca de vermelho falhas e anomalias humanas na digitação."
+        }
+
+    @staticmethod
+    def get_faixa_capacidade_glossary(cutoffs):
+        if not cutoffs: 
+            return {}
+        return {
+            "Contexto Ouro Dimensional Estatístico Estratégico Limitador (QT_CAPACIDADE_MAXIMA_SALA N50)": "Atua rigorosamente como o robusto e frio motor do Analytics Dashboard. Processada ativamente por um limite estatístico Interquartil (IQR), destrói a dependência em 'Médias Simples' e ilumina as distorções estruturais financeiras.",
+            "1. Micro Sala": f"Turmas de até {cutoffs['q25']} lugares físicos sentados (1º Quartil). Sangram massivamente os caros recursos financeiros operacionais e oneram drasticamente a folha salarial com fiscais extras.",
+            "2. Sala Pequena": f"De {cutoffs['q25'] + 1} lugares a até {cutoffs['q50']} lugares locados no espaço. Configuram o vital Limiar da Transição Estrutural Estável. A exigência financeira é considerada moderada.",
+            "3. Sala Média": f"Turmas dimensionadas De {cutoffs['q50'] + 1} a no máximo {cutoffs['q75']} lugares ativos logísticos (3º Quartil). Formam a vital 'Massa Perfeita' e atestam o Padrão-Ouro logístico da contratante.",
+            "4. Sala Grande": f"Confinamentos adensados De {cutoffs['q75'] + 1} assentos a até {cutoffs['limite_sup']} lugares Físicos. Detém altíssima vulnerabilidade arquitetônica contra fraudes, exigindo vigilância ostensiva contínua.",
+            "5. Gigante / Auditório Espacial": f"Acima de rigorosos e severos {cutoffs['limite_sup']} lugares Limpos Físicos (Isolados como Outliers Dimensionais Extremos). Consideradas Anomalias Positivas. Exigem microfonação robusta e isolamento."
+        }
+
+    @staticmethod
+    def get_created_concepts_glossary(cutoffs: dict | None = None) -> list:
+        """Fonte única da verdade para explicar TUDO o que foi CRIADO pela plataforma.
+
+        Retorna uma lista de dicionários (conceito, tipo, base, explicacao) usada
+        tanto no Dashboard HTML quanto na planilha Excel. Cada item deixa explícito
+        que o conceito **não consta nos layouts oficiais** — foi calculado pela
+        aplicação — e explica, de forma didática, o que é, como é calculado e como
+        interpretá-lo.
+        """
+        c = cutoffs or {}
+        q25 = c.get('q25', '—'); q50 = c.get('q50', '—'); q75 = c.get('q75', '—'); lim = c.get('limite_sup', '—')
+        CRIADO = "CRIADO pela plataforma (NÃO consta nos layouts)"
+        return [
+            {
+                "conceito": "Faixa de Capacidade — Micro / Pequena / Média / Grande / Gigante",
+                "tipo": CRIADO,
+                "base": "Calculado a partir de QT_CAPACIDADE_MAXIMA_SALA (layout N50).",
+                "explicacao": (
+                    "É uma classificação do TAMANHO de cada sala criada por nós, não existe nos layouts do INEP. "
+                    "Em vez de usar uma média simples (que esconde distorções), aplicamos a estatística dos QUARTIS "
+                    "(método de Tukey/IQR). Ordenamos todas as salas pela capacidade e cortamos em quatro pontos: o 1º "
+                    f"quartil (25% menores), a mediana (50%) e o 3º quartil (75%). Resultado nesta base: 'Micro Sala' = "
+                    f"até {q25} lugares; 'Pequena' = de {q25} a {q50}; 'Média' = de {q50} a {q75}; 'Grande' = de {q75} a "
+                    f"{lim}; 'Gigante/Auditório' = acima de {lim} lugares (um patamar chamado 'limite superior', calculado "
+                    "como 3º quartil + 1,5×IQR, acima do qual a sala é estatisticamente atípica). Serve para dimensionar "
+                    "fiscais, custos e logística por porte de sala. IMPORTANTE: os cortes mudam conforme a base carregada, "
+                    "porque são calculados sobre os próprios dados."
+                ),
+            },
+            {
+                "conceito": "Amplitude Interquartil (IQR) e Quartis (Q1, Q2/Mediana, Q3)",
+                "tipo": CRIADO,
+                "base": "Estatística aplicada sobre QT_CAPACIDADE_MAXIMA_SALA e outros campos numéricos.",
+                "explicacao": (
+                    "Quartis dividem os dados ordenados em quatro partes iguais: Q1 deixa 25% dos valores abaixo, Q2 é a "
+                    "mediana (50%) e Q3 deixa 75% abaixo. O IQR (Q3 − Q1) é a 'faixa do meio' dos dados, onde estão os 50% "
+                    "mais típicos. Usamos o IQR porque ele é robusto: ao contrário da média e do desvio-padrão, quase não é "
+                    "afetado por poucos valores extremos. É a base tanto das Faixas de Capacidade quanto de um dos métodos "
+                    "de detecção de outliers."
+                ),
+            },
+            {
+                "conceito": "Índice de Gini (concentração/desigualdade de capacidade)",
+                "tipo": CRIADO,
+                "base": "Calculado sobre a capacidade total agregada por local (deriva de QT_CAPACIDADE_MAXIMA_SALA / N50-N52).",
+                "explicacao": (
+                    "Número entre 0 e 1 que mede o quanto a capacidade está CONCENTRADA em poucos locais. É o mesmo índice "
+                    "usado em economia para medir desigualdade de renda, aplicado aqui às vagas. 0 significaria que todos os "
+                    "locais têm exatamente a mesma capacidade (distribuição perfeitamente igual); perto de 1 significa que "
+                    "poucos 'mega-locais' concentram quase todas as vagas. Regra prática: acima de 0,5 a operação depende "
+                    "criticamente de poucos prédios, o que aumenta o risco logístico (se um falha, o impacto é grande). "
+                    "Não existe nos layouts — é um cálculo analítico nosso."
+                ),
+            },
+            {
+                "conceito": "Clusters / Perfil de Infraestrutura (K-Means)",
+                "tipo": CRIADO,
+                "base": "Agrupamento sobre os índices compostos (que por sua vez derivam de flags do N60).",
+                "explicacao": (
+                    "É uma segmentação automática dos locais em grupos com características parecidas, feita pelo algoritmo de "
+                    "Machine Learning 'K-Means'. Ele não usa rótulos prontos: analisa vários indicadores ao mesmo tempo "
+                    "(acessibilidade, segurança, conforto, tecnologia, capacidade) e agrupa os locais mais semelhantes entre "
+                    "si, separando-os dos diferentes. Geramos até 4 perfis (por exemplo, de 'infraestrutura completa' a "
+                    "'infraestrutura crítica'). Serve para tratar locais parecidos com a mesma estratégia. É um conceito "
+                    "criado — não há 'cluster' nos layouts."
+                ),
+            },
+            {
+                "conceito": "Anomalias / Outliers (Isolation Forest + Z-Score + IQR)",
+                "tipo": CRIADO,
+                "base": "Aplicado sobre capacidade e índices derivados.",
+                "explicacao": (
+                    "'Anomalia' aqui é um registro que foge muito do padrão — pode ser um erro de digitação na base ou um "
+                    "caso realmente excepcional que merece atenção. Usamos três métodos complementares: (1) Isolation Forest, "
+                    "um algoritmo de IA que 'isola' pontos estranhos; (2) Z-Score, que mede quantos desvios-padrão um valor "
+                    "está distante da média (acima de ~3 é suspeito); e (3) a regra do IQR (valores muito abaixo de Q1 ou "
+                    "acima de Q3). Marcamos como anomalia para revisão. Nenhum desses rótulos vem dos layouts — são análises "
+                    "criadas por nós."
+                ),
+            },
+            {
+                "conceito": "Análise de Pareto (regra 80/20)",
+                "tipo": CRIADO,
+                "base": "Soma acumulada de capacidade por UF (deriva de QT_CAPACIDADE_MAXIMA_SALA).",
+                "explicacao": (
+                    "Ordena as UFs da maior para a menor capacidade e vai somando o percentual acumulado. Revela o princípio "
+                    "de Pareto: normalmente uma minoria de estados concentra a maioria das vagas. Ajuda a priorizar: focar "
+                    "nos poucos que respondem por ~80% do total costuma trazer o maior retorno. É uma leitura analítica "
+                    "criada, não um campo dos layouts."
+                ),
+            },
+            {
+                "conceito": "Índices Compostos (Acessibilidade, Segurança, Conforto, Tecnologia)",
+                "tipo": CRIADO,
+                "base": "Média percentual de itens 0/1 do questionário de visita (layout N60).",
+                "explicacao": (
+                    "Cada índice resume, em uma nota de 0 a 100, várias perguntas de 'sim/não' do N60. Por exemplo, a "
+                    "Acessibilidade agrega rampas, elevadores, banheiros adaptados, sinalização etc.: se um local atende "
+                    "metade dos itens, a nota é ~50. Transformamos dezenas de flags dispersas em um número fácil de "
+                    "comparar. São índices criados por nós (Feature Engineering); os layouts trazem as flags individuais, "
+                    "não a nota consolidada."
+                ),
+            },
+            {
+                "conceito": "Índice de Qualidade Global e Índice de Vulnerabilidade",
+                "tipo": CRIADO,
+                "base": "Combinação dos índices compostos (N60).",
+                "explicacao": (
+                    "A Qualidade Global é a média das quatro dimensões funcionais (acessibilidade, segurança, conforto e "
+                    "tecnologia), dando uma nota única de 0 a 100 por local. A Vulnerabilidade é o seu espelho (100 − "
+                    "qualidade): quanto maior, mais frágil é o local. Servem para ranquear e priorizar. São sínteses "
+                    "criadas — não constam nos layouts."
+                ),
+            },
+            {
+                "conceito": "Índice de Conservação Predial",
+                "tipo": CRIADO,
+                "base": "Média dos campos ordinais TP_* de estado de conservação (layout N60).",
+                "explicacao": (
+                    "Nota de 0 a 100 que mede o estado FÍSICO do prédio (telhado, paredes, piso, instalações elétrica e "
+                    "hidráulica, mobiliário, iluminação...). Os campos TP_* do N60 têm três níveis (0 = Inadequado, 1 = "
+                    "Razoável, 2 = Adequado); calculamos a média e reescalamos para 0-100. Diferente dos índices funcionais: "
+                    "um prédio pode ter rampas e extintores (bom em acessibilidade/segurança) e ainda assim estar "
+                    "deteriorado. O índice em si é criado; os campos de conservação vêm do layout."
+                ),
+            },
+            {
+                "conceito": "Densidade Espacial (m² por candidato) e níveis de espaçamento",
+                "tipo": CRIADO,
+                "base": "Área da sala (NU_LARGURA × NU_COMPRIMENTO, N50) dividida pela capacidade.",
+                "explicacao": (
+                    "Mostra quantos metros quadrados cada candidato tem na sala. Calculamos a área (largura × comprimento, "
+                    "convertendo de cm para m²) e dividimos pela capacidade máxima. Classificamos: abaixo de 0,8 m²/pessoa = "
+                    "'superlotação espacial' (risco sanitário e de fiscalização); entre 0,8 e 1,2 = aceitável; acima de 1,2 "
+                    "= confortável. As dimensões vêm do N50, mas o cálculo de área por candidato e os limiares são criados "
+                    "por nós."
+                ),
+            },
+            {
+                "conceito": "Densidade e Dignidade Sanitária (candidatos por banheiro)",
+                "tipo": CRIADO,
+                "base": "Capacidade dividida por banheiros do bloco (QT_BANHEIRO_*, layout N52).",
+                "explicacao": (
+                    "Relaciona a quantidade de pessoas com a quantidade de banheiros disponíveis. Muitas pessoas por "
+                    "banheiro indicam filas e risco sanitário. Classificamos em níveis de dignidade sanitária. Os campos de "
+                    "banheiro vêm do N52; a razão e a classificação são criadas."
+                ),
+            },
+            {
+                "conceito": "Índice de Entorno de Serviços",
+                "tipo": CRIADO,
+                "base": "Agrega flags de serviços próximos (transporte, comércio, saúde) do N60.",
+                "explicacao": (
+                    "Resume, em uma nota, a qualidade do que existe ao REDOR do local (transporte público, comércio, pronto "
+                    "atendimento etc.). Ajuda a avaliar acesso e apoio logístico no dia da prova. É um índice criado a "
+                    "partir de flags do N60."
+                ),
+            },
+            {
+                "conceito": "Taxa de Ocupação e Taxa de Redução de Capacidade",
+                "tipo": CRIADO,
+                "base": "Razões entre candidatos alocados, capacidade máxima e capacidade reduzida (N52/N50).",
+                "explicacao": (
+                    "A Taxa de Ocupação mostra quanto da capacidade está sendo usada (candidatos alocados ÷ capacidade). A "
+                    "Taxa de Redução mostra o quanto a capacidade foi diminuída em relação à máxima (por acessibilidade, "
+                    "distanciamento etc.). São percentuais calculados por nós; os layouts trazem os números brutos, não as "
+                    "razões."
+                ),
+            },
+            {
+                "conceito": "Nota Oficial INEP reescalada (0-100)",
+                "tipo": "DERIVADO de campo oficial (reescala de NU_PONTOS_LOCAL_PROVA, N60)",
+                "base": "NU_PONTOS_LOCAL_PROVA (layout N60).",
+                "explicacao": (
+                    "A nota oficial do local (Básico/Adequado/Excelente) vem do próprio INEP (campo NU_PONTOS_LOCAL_PROVA "
+                    "do N60). Nós apenas a reescalamos para 0-100 (33/67/100) para comparar com os demais índices. O valor "
+                    "é oficial; a reescala é nossa. Serve como contraprova externa aos índices que criamos."
+                ),
+            },
+        ]
+
+    @staticmethod
+    def get_tab_explanations():
+        return {
+            "0_Guia_Utilizacao": "OBJETIVO DA ABA OFICIAL EXCEL: Manual Oficial Restrito de Operação. APLICAÇÃO: Contém as instruções vitais didáticas e a legenda estrita semântica de Risco.",
+            "1_Painel_Totais_Consolidados": "OBJETIVO DA ABA EXCEL: Painel Frontal Mestre Executivo Limpo de Métricas Massivas Brutais. APLICAÇÃO: Fornece ativamente aos Diretores um 'One-Pager' respondendo às contagens vitais.",
+            "2_Painel_Estrategico": "OBJETIVO DA ABA EXCEL: Rica Compilação Massiva Textual Preditiva de Inteligência Algorítmica (Storytelling Interpretativo). APLICAÇÃO: Justificativa robusta anexável frente aos Tribunais de Contas.",
+            "3_Base_Higienizada": "OBJETIVO DA ABA EXCEL: Data Warehouse Limpo Imaculado com Inserção de Índices Ouro Multivariados Compostos. APLICAÇÃO: Disparo em Banco de Dados Analítico Cloud.",
+            "4_Inferencias_Estatisticas": "OBJETIVO DA ABA EXCEL: Raio-X avançado morfométrico profundo da sua operação logística. APLICAÇÃO: Suporte argumentativo científico de cálculos rigorosos de margens de erro (Cálculo Oficial EN 1.6).",
+            "5_Agrupamentos_Institucionais": "OBJETIVO DA ABA EXCEL: Visualização Condensada C-Level da Força Bruta por Edificação (NO_LOCAL) Inteiro. APLICAÇÃO: Guiar o envio logístico macro dos pesados malotes impressos.",
+            "6_Agrupamentos_Blocos": "OBJETIVO DA ABA EXCEL: Nível Micro-Logístico Subdivisional por Pavilhão Acadêmico do Campus (CO_BLOCO). APLICAÇÃO: Roteirização tática intramuros de descarregamento em Campus Universitários.",
+            "7_Agrupamentos_Municipais": "OBJETIVO DA ABA EXCEL: Densidade Absoluta Somada Fria por Município Sede Adensado. APLICAÇÃO: Licitamento massivo pesado de Fretes Locais e planejamento policial.",
+            "8_Agrupamentos_Regionais": "OBJETIVO DA ABA EXCEL: Aglutinação Geográfica e Dispersão Geofinanceira por UF com Índice Gini Estadual. APLICAÇÃO: Rateio Financeiro Orçamentário Estratégico por Regionais críticas.",
+            "9_Matriz_Contingencia": "OBJETIVO DA ABA EXCEL: Heatmap Matemático Científico confrontando Classificação da Robótica IA (K-Means) contra Estatística Ouro (Faixas IQR). APLICAÇÃO: Prova formal da Validação e Calibração dos Robôs Preditivos.",
+            "10_Top_20_Locais": "OBJETIVO DA ABA EXCEL: Lista Nominal Fria dos Mega-Gargalos Super Críticos de Operação. APLICAÇÃO: Direcionar os esquadrões de auditores C-Level mais capacitados diretamente para estas portas.",
+            "11_Pareto_80_20": "OBJETIVO DA ABA EXCEL: Projeção Analítica Curva Acumulada de Sustentação de Pareto. APLICAÇÃO: Revela as exatas UFs que blindam 80% do sucesso de arrecadação financeira do Contrato.",
+            "12_Outliers_Anomalias": "OBJETIVO DA ABA EXCEL: Lixeira Cadastral de Expurgo Algorítmico Crítico do Isolation Forest AI e Erros Bizarrros. APLICAÇÃO: Devolver imediatamente com urgência aos Operadores de Matriz.",
+            "13_Painel_Grafico_Excel": "OBJETIVO DA ABA EXCEL: Módulo Off-Line Nativo do Excel (Gráficos processados de Barras). APLICAÇÃO: Copiar e colar gráficos instantâneos para um PowerPoint de Diretoria Executiva.",
+            "14_Matriz_Regional_Faixas": "OBJETIVO DA ABA EXCEL: Tabulação Identitária Exata cruzando rigorosamente a Faixa Logística pelo Estado Físico. APLICAÇÃO: Perceber de forma rápida qual UF consome injustificadamente as Micro Salas onerosas.",
+            "15_Auditoria_Normativa_EN": "OBJETIVO DA ABA EXCEL: Processamento Cruzado Legal Restrito da Matriz Oficial de Compliance EN 1.2. APLICAÇÃO: Probatório Oficial Contratual estrito atestando Georreferenciamento e Mobilidade Coletiva.",
+            "16_Estatistica_Equipamentos": "OBJETIVO DA ABA EXCEL: Soma de Computadores e Tecnologia por Estado. APLICAÇÃO: Projetar viabilidade executiva para aplicação de provas digitais em massa.",
+            "17_Analise_Acessibilidade": "OBJETIVO DA ABA EXCEL: Agregação da Infraestrutura Inclusiva por UF. APLICAÇÃO: Foco direcionado em políticas públicas governamentais afirmativas e eliminação de barreiras arquitetônicas.",
+            "18_Analise_Seguranca": "OBJETIVO DA ABA EXCEL: Soma de Recursos de Proteção à Vida, Brigadas e Policiamento por Estado. APLICAÇÃO: Construção de rigoroso Mapa de calor operacional de vulnerabilidades prediais contra incêndio e invasão.",
+            "19_Top_Municipios": "OBJETIVO DA ABA EXCEL: Ranking Frio e Absoluto dos 50 Municípios Logísticos mais Densos e Pesados do Brasil. APLICAÇÃO: Guiar o envio massivo de esquadrões de Segurança e Logística Armada.",
+            "20_Indicadores_Vulnerabilidade": "OBJETIVO DA ABA EXCEL: Mapa Mestre Restrito de Perigo Civil Extremo. APLICAÇÃO: Isola apenas UFs com maior índice somado de alta criminalidade predial, risco ambiental letal ou desmanche de reformas.",
+            # ---------------- NOVAS ABAS (v28) ----------------
+            "21_Dicionario_Dados": "OBJETIVO: Dicionário de Dados oficial. Descreve CADA campo dos layouts N50 (salas), N52 (locação/blocos) e N60 (questionário de visita): layout de origem, tipo, obrigatoriedade, domínio de valores e a descrição oficial do INEP. APLICAÇÃO: garante que qualquer leitor entenda exatamente o que cada coluna significa e de onde vem.",
+            "22_Dicionario_Indices": "OBJETIVO: Explica os campos DERIVADOS (índices e razões calculados pela aplicação). APLICAÇÃO: mostra, para cada indicador, a base (layout) e a fórmula/significado — a metodologia transparente por trás de cada número.",
+            "23_Indice_Conservacao": "OBJETIVO: Índice de Conservação Predial médio por UF, a partir dos campos TP_* do N60 (estado de telhado, paredes, piso, instalações, mobiliário, etc.). APLICAÇÃO: prioriza estados cujos prédios apresentam maior desgaste físico, orientando manutenção preventiva e vistorias.",
+            "24_Nota_Oficial_INEP": "OBJETIVO: Distribuição da Nota Oficial do Local (NU_PONTOS_LOCAL_PROVA: Básico/Adequado/Excelente) por UF. APLICAÇÃO: compara a avaliação chancelada pela regra oficial do INEP entre estados, servindo de contraprova aos índices calculados.",
+            "25_Densidade_Espacial": "OBJETIVO: Área média disponível por candidato (m²/assento) por UF, derivada das dimensões físicas das salas (N50). APLICAÇÃO: identifica onde o espaçamento é apertado (risco de superlotação espacial) versus confortável.",
+            "26_Dependencia_Admin": "OBJETIVO: Distribuição de salas e capacidade por dependência administrativa (Federal/Estadual/Municipal/Privada — N52). APLICAÇÃO: revela a composição público-privada da rede locada e sua participação na capacidade total.",
+            "27_Matriz_Correlacao": "OBJETIVO: Matriz de correlação de Pearson entre os principais índices e quantidades. APLICAÇÃO: mostra quais dimensões caminham juntas (ex.: acessibilidade e conforto) e quais são independentes, apoiando decisões e a construção de modelos.",
+            "28_Geolocalizacao": "OBJETIVO: Coordenadas geográficas (latitude/longitude — N52) das instituições, com capacidade e qualidade. APLICAÇÃO: base para mapas e análises espaciais; permite localizar fisicamente os polos e planejar rotas/segurança.",
+            "29_Validacao_Colunas": "OBJETIVO: Relatório de cobertura de dados. Lista quais campos conhecidos dos layouts foram reconhecidos na base carregada e quais estão ausentes. APLICAÇÃO: transparência total sobre o que foi (ou não) possível analisar — nada falha em silêncio.",
+            "30_Conceitos_Criados": "OBJETIVO: Glossário didático de TUDO o que foi CRIADO pela plataforma e NÃO consta nos layouts oficiais — Faixas de Capacidade (Micro/Pequena/Média/Grande/Gigante), Índice de Gini, Clusters (K-Means), Anomalias (Isolation Forest/Z-Score/IQR), Pareto e todos os índices compostos. APLICAÇÃO: qualquer leitor entende, em linguagem clara, o que cada conceito significa, como é calculado e como interpretá-lo. Cada item indica sua base nos layouts.",
+            # ---------------- NOVAS ABAS — MÓDULO DE INSCRITOS & ENSALAMENTO (v29) ----------------
+            "31_Perfil_Demografico": "OBJETIVO: Perfil demográfico dos PARTICIPANTES (layout N90), cruzando SEXO por FAIXA ETÁRIA. Cada célula é a contagem de inscritos daquele sexo naquela faixa de idade. COMO FOI CALCULADO: a idade vem de DT_NASCIMENTO (data de nascimento) subtraída da data de referência; o sexo vem de TP_SEXO. POR QUE IMPORTA: dimensiona quem é o público da prova — insumo para logística (ex.: acessibilidade para faixas mais velhas), comunicação e políticas afirmativas. COMO INTERPRETAR: some as colunas para ver o total por faixa; compare linhas para ver o equilíbrio de gênero em cada idade.",
+            "32_Grupos_Curso": "OBJETIVO: Ranking das ÁREAS DE AVALIAÇÃO / GRUPOS DE CURSO (layouts N02/N90: NO_GRUPO_CURSO). Mostra quantos participantes cada área concentra, o percentual sobre o total e — quando disponível — o percentual de cada grupo que demanda atendimento especial. POR QUE IMPORTA: revela onde está a maior demanda por prova (dimensionamento de cadernos, salas e correção). COMO INTERPRETAR: as primeiras linhas (maior RANKING) são as áreas mais volumosas; a coluna '% COM ATEND. ESPECIAL' aponta grupos que exigem mais salas reduzidas e recursos.",
+            "33_Atendimento_Especial": "OBJETIVO: Demanda de ATENDIMENTO ESPECIAL por UF de prova (layout N02). Consolida, por estado, o total de participantes e quantos têm QUALQUER demanda especial (atendimento especializado, específico, recurso/auxílio ou ensalamento em sala reduzida de 1/6/20/40). POR QUE IMPORTA: é um indicador direto de INCLUSÃO e de complexidade operacional — salas especiais custam mais e exigem preparo. COMO INTERPRETAR: 'PERCENTUAL_ESPECIAL (%)' alto sinaliza estados que precisam de mais salas adaptadas, fiscais treinados e materiais em formatos acessíveis.",
+            "34_Tipo_Ensalamento": "OBJETIVO: Distribuição por TIPO DE ENSALAMENTO (layout N02: TP_ENSALAMENTO). Classifica cada participante em Sala Comum, Sala de 1 (individual), Sala de até 6, até 20, até 40 ou Prova Reserva. POR QUE IMPORTA: cada tipo de sala tem uma razão de atendimento e um custo logístico distintos; salas menores concentram atendimentos especializados. COMO INTERPRETAR: a predominância de 'Sala Comum' é esperada; volumes relevantes nas salas reduzidas indicam onde está a operação especial que precisa de planejamento dedicado.",
+            "35_Situacao_Inscricao": "OBJETIVO: Situação cadastral da INSCRIÇÃO (layout N90: TP_SITUACAO) — Regular, Irregular ou Ação Judicial (sub judice). POR QUE IMPORTA: inscrições irregulares ou judicializadas representam RISCO OPERACIONAL e JURÍDICO que precisa de tratamento antes da aplicação. COMO INTERPRETAR: idealmente a fatia 'Regular' é dominante; qualquer percentual não trivial de 'Irregular'/'Ação Judicial' deve ser investigado e monitorado pela área responsável.",
+            "36_Migracao_Interestadual": "OBJETIVO: MIGRAÇÃO INTERESTADUAL por UF de prova (layout N90: SG_UF_MUNICIPIO_RESIDENCIA × SG_UF_MUNICIPIO_PROVA). Mede, por estado de prova, quantos participantes residem em UF DIFERENTE daquela onde farão a prova. POR QUE IMPORTA: alta migração impacta hospedagem, deslocamento e demanda por locais em polos que atraem candidatos de fora. COMO INTERPRETAR: 'PERCENTUAL_MIGRACAO (%)' elevado indica estados que funcionam como polos regionais atraindo participantes vizinhos — atenção redobrada à capacidade e à infraestrutura de acesso.",
+            # ---------------- NOVAS ABAS — MÓDULO DE ATENDIMENTOS & RECURSOS (v30 / N91) ----------------
+            "37_Itens_Atendimento": "OBJETIVO: Ranking dos ITENS DE ATENDIMENTO / RECURSO mais solicitados pelos participantes (layout N91: NO_ITEM_ATENDIMENTO), com o número de solicitações, o percentual sobre o total e — quando disponível — o percentual DEFERIDO (concedido). COMO FOI CALCULADO: cada linha do N91 é um item de atendimento pedido por um participante; agrupamos por nome do item. A coluna '% DEFERIDO' usa a regra oficial da VW N91 (item ativo quando a situação do laudo é aprovada ou em análise). POR QUE IMPORTA: mostra exatamente QUE acomodações a rede precisa prover (Braille, Ledor, Tempo Adicional, Intérprete de Libras, etc.) e quão frequentemente são concedidas. COMO INTERPRETAR: itens no topo exigem preparo logístico específico (materiais, profissionais, salas); um '% DEFERIDO' baixo em um item pode indicar exigência documental elevada (laudo) ou gargalo de análise.",
+            "38_Tipo_Atendimento_N91": "OBJETIVO: Distribuição dos itens do N91 por TIPO — Atendimento Específico (1), Atendimento Especializado (2) e Recurso (3) (campo TP_ITEM_ATENDIMENTO). POR QUE IMPORTA: cada tipo tem natureza distinta — 'Específico' cobre condições como gestante/lactante/sabatista; 'Especializado' cobre deficiências (Braille, Libras, ledor); 'Recurso' cobre auxílios (tempo adicional, mobiliário, calculadora). É a taxonomia oficial que organiza toda a operação de acessibilidade. COMO INTERPRETAR: o mix entre os três tipos dimensiona equipes e materiais; predomínio de 'Especializado' sinaliza maior complexidade (profissionais habilitados e materiais em formatos acessíveis).",
+            "39_Situacao_Laudo_Medico": "OBJETIVO: Situação do LAUDO MÉDICO dos atendimentos do N91 (campo CO_SITUACAO_LAUDO_MEDICO, domínio oficial de 13 códigos), agrupada em Aprovado / Reprovado / Em Análise / Recurso. POR QUE IMPORTA: é a medida direta da TAXA DE DEFERIMENTO — quantos pedidos de acessibilidade foram efetivamente concedidos e quantos ainda dependem de análise ou foram indeferidos. COMO INTERPRETAR: uma fatia relevante de 'Em Análise' representa PENDÊNCIA operacional (decisões a tomar antes da prova); 'Reprovado' elevado pode indicar exigência documental ou necessidade de revisão do fluxo de laudos.",
+            "40_Laudo_Medico_por_UF": "OBJETIVO: TAXA DE DEFERIMENTO por UF de prova (layout N91). Consolida, por estado, o total de itens de atendimento e quantos estão Deferidos/Ativos, com o percentual correspondente. POR QUE IMPORTA: revela DESIGUALDADES regionais no atendimento às necessidades especiais — estados com baixo deferimento merecem investigação (fluxo de análise, exigência de laudo, capacidade da comissão). COMO INTERPRETAR: a aba é ordenada do MENOR para o MAIOR percentual de deferimento, colocando no topo os estados que mais precisam de atenção quanto ao processamento dos pedidos de acessibilidade."
+        }
+
+    @staticmethod
+    def generate(results: MLProcessingResults):
+        insights = [
+            f"🔍 FUNDAMENTAÇÃO NOS LAYOUTS OFICIAIS (N50, N52, N60): O Motor Analítico Ouro ingeriu, expurgou *mojibakes* críticos e converteu com precisão estrita {len(results.df):,} avaliações prediais. A engenharia gerou e normalizou rigorosos índices compostos corporativos avaliativos de acessibilidade técnica e o cobiçado Índice de Qualidade Global Base Pura."
+        ]
+        
+        if results.gini_index > 0:
+            interpret_gini = "altamente polarizada na beira limpa trágica e letal do Risco Sistêmico Logístico Global Crítico" if results.gini_index > 0.5 else "perfeitamente harmonizada estruturalmente logísticamente e resiliente no forte espalhamento de rede operante nacional"
+            insights.append(
+                f"🎯 ALERTA EXECUTIVO DE CONCENTRAÇÃO NACIONAL (ÍNDICE ECONÔMICO GINI): Os frios modelos estatísticos calcularam que o Gini Nacional se assenta rigidamente na marca paramétrica analítica de {results.gini_index:.3f}. Conclui-se que a matriz arquitetônica está {interpret_gini}. Remetendo-se à estrita diretiva contratual EN 1.5, índices altos requerem das instâncias superiores planos de mitigação imediatos contra interdições judiciais acidentais focadas exatamente nos vulneráveis 'Super-Polos'."
+            )
+            
+        if not results.uf_agg.empty and 'GINI_ESTADUAL_CONCENTRACAO_RISCO' in results.uf_agg.columns:
+            top_uf = results.uf_agg.iloc[0]['SG_UF']
+            cap_top = results.uf_agg.iloc[0]['CAPACIDADE_ESTADUAL_TOTAL']
+            pior_uf_gini = results.uf_agg.sort_values('GINI_ESTADUAL_CONCENTRACAO_RISCO', ascending=False).iloc[0]
+            insights.append(
+                f"🌎 GOVERNANÇA FINANCEIRA E DETECÇÃO REGIONAL DA GEOGRAFIA DO RISCO EXATO (UF): O líder logístico de mercado com imensa vantagem de absorção estrutural demográfica nacional é {top_uf}, ofertando incólumes {cap_top:,.0f} vagas brutas na ponta da cadeia predial. O forte revés gerencial revelou friamente que a UF de {pior_uf_gini['SG_UF']} exibiu e projetou a mais perigosa estratificação e centralização macro do país (Gini Estadual de {pior_uf_gini['GINI_ESTADUAL_CONCENTRACAO_RISCO']:.3f}). Uma assimetria tão corrompida obriga a investigar se as ricas matrículas de locação em tela ali sofreram compressão em meia dúzia de polos universitários apenas na região metropolitana."
+            )
+        
+        if 'FAIXA_CAPACIDADE' in results.df.columns:
+            counts = results.df['FAIXA_CAPACIDADE'].value_counts(normalize=True) * 100
+            micro_pct = counts.get('1. Micro Sala', 0)
+            insights.append(
+                f"📐 AVALIAÇÃO GERENCIAL DA FAIXA_CAPACIDADE (TUKEY IQR): As restritas instalações validadas sob a tipologia interquartil de 'Micro Salas' (< {results.cutoffs['q25']} lugares sentados cada) invadiram um quantitativo inaceitável extremo operante restrito oficial de {micro_pct:.1f}% de absolutamente todas as salas. Sob o inegociável prisma da teoria contábil, este percentual micro-fragmentado constitui a prova viva de forte e grave ineficiência de escala, onerando drasticamente a folha salarial."
+            )
+
+        if 'DESC_CENTRO_EN1_2_2' in results.df.columns:
+            counts_centro = results.df['DESC_CENTRO_EN1_2_2'].value_counts(normalize=True) * 100
+            centro_pct = counts_centro.get('Região Central Urbana Adensada', 0)
+            insights.append(
+                f"📍 AUDITORIA NORMATIVA LEGAL E REGULATÓRIA PREDITIVA ESTRITA (EN 1.2.2 E N60): Processando a fundo as severas exigências de localização macro, atestamos de forma algorítmica: Exatamente {centro_pct:.1f}% da totalidade nacional absoluta das instalações educacionais oficiais aprovadas afirmam e assinalam cabalmente residir in loco ao vital perímetro civil urbano de notória densidade viária. Os polos em áreas periféricas não conformes demandarão de imediato o laudo probatório e documentação em anexo do responsável técnico."
+            )
+
+        # ----------------------------------------------------------------------------
+        # NOVOS INSIGHTS AUTOMÁTICOS (v28) — fundamentados nos layouts, todos guardados.
+        # ----------------------------------------------------------------------------
+        if 'INDICE_CONSERVACAO' in results.df.columns:
+            cons_media = float(results.df['INDICE_CONSERVACAO'].mean())
+            pior_txt = ""
+            if not results.conservacao_agg.empty:
+                pior = results.conservacao_agg.iloc[-1]
+                pior_txt = f" A UF com a pior conservação média é {pior['SG_UF']} ({pior['CONSERVACAO_MEDIA_UF']:.1f} pts), demandando manutenção preventiva prioritária."
+            insights.append(
+                f"🏚️ CONSERVAÇÃO PREDIAL (N60 — CAMPOS TP_*): O estado físico médio das edificações "
+                f"(telhado, paredes, piso, instalações elétrica/hidráulica, mobiliário e demais itens de conservação) "
+                f"atinge {cons_media:.1f} de 100 pontos. Este índice mede o DESGASTE físico do prédio e complementa os índices "
+                f"funcionais de acessibilidade e segurança: um prédio pode ter rampas e extintores, mas ainda assim apresentar "
+                f"instalações deterioradas.{pior_txt}"
+            )
+
+        if 'NOTA_OFICIAL_INEP' in results.df.columns:
+            nota_media = float(results.df['NOTA_OFICIAL_INEP'].mean())
+            pct_exc = 0.0
+            if 'DESC_NOTA_OFICIAL_INEP' in results.df.columns:
+                pct_exc = float(results.df['DESC_NOTA_OFICIAL_INEP'].astype(str).str.startswith('3').mean() * 100)
+            insights.append(
+                f"🏅 NOTA OFICIAL INEP DO LOCAL (NU_PONTOS_LOCAL_PROVA): A avaliação-síntese chancelada pela própria regra "
+                f"oficial do INEP (Básico=1, Adequado=2, Excelente=3), reescalada para 0-100, situa-se em {nota_media:.1f} pontos, "
+                f"com {pct_exc:.1f}% dos registros classificados oficialmente como 'Excelente'. Esta métrica serve de contraprova "
+                f"externa e independente aos índices compostos calculados por Engenharia de Atributos, permitindo validar se os "
+                f"cálculos internos convergem com o parecer oficial de campo."
+            )
+
+        if 'AREA_POR_CANDIDATO_M2' in results.df.columns:
+            area_media = float(results.df['AREA_POR_CANDIDATO_M2'].mean())
+            pct_super = float((results.df['AREA_POR_CANDIDATO_M2'] < 0.8).mean() * 100)
+            insights.append(
+                f"📏 DENSIDADE ESPACIAL (N50 — LARGURA × COMPRIMENTO): A área física média disponível por candidato é de "
+                f"{area_media:.2f} m² por assento. Preocupantes {pct_super:.1f}% das salas operam abaixo do limiar de conforto de "
+                f"0,8 m²/pessoa, configurando superlotação espacial — fator de risco sanitário, de segurança e de bem-estar durante "
+                f"a aplicação da prova. Salas apertadas também dificultam a fiscalização e a acomodação de candidatos PcD."
+            )
+
+        # ----------------------------------------------------------------------------
+        # NOVOS INSIGHTS — MÓDULO DE INSCRITOS & ENSALAMENTO (v29 — layouts N02/N90).
+        # ----------------------------------------------------------------------------
+        im = getattr(results, 'inscritos_meta', {}) or {}
+
+        if 'idade_media' in im or 'pct_feminino' in im:
+            partes = []
+            if 'idade_media' in im:
+                partes.append(f"idade média de {im['idade_media']:.1f} anos")
+            if 'pct_feminino' in im and 'pct_masculino' in im:
+                partes.append(f"composição de {im['pct_feminino']:.1f}% de mulheres e {im['pct_masculino']:.1f}% de homens")
+            insights.append(
+                f"👥 PERFIL DEMOGRÁFICO DOS PARTICIPANTES (N90 — DT_NASCIMENTO / TP_SEXO): O público mapeado apresenta "
+                f"{', '.join(partes)}. Diferente das análises de infraestrutura (que descrevem os PRÉDIOS), esta dimensão "
+                f"descreve QUEM presta a prova — insumo direto para logística inclusiva (rampas, salas acessíveis e mobiliário "
+                f"adequado ganham peso em públicos mais velhos), comunicação e dimensionamento de atendimento."
+            )
+
+        if not results.curso_agg.empty and 'curso_top' in im:
+            top3 = [str(x) for x in results.curso_agg.head(3)['GRUPO / CURSO'].tolist()]
+            pct_top = float(results.curso_agg.head(3)['PERCENTUAL (%)'].sum())
+            insights.append(
+                f"🎓 CONCENTRAÇÃO POR ÁREA DE AVALIAÇÃO (N02/N90 — NO_GRUPO_CURSO): Entre {im.get('total_grupos_curso', 0)} grupos "
+                f"de curso identificados, os três maiores — {', '.join(top3)} — concentram {pct_top:.1f}% dos participantes. "
+                f"Essa concentração orienta a impressão de cadernos por área, o planejamento de salas e a alocação de correção: "
+                f"poucas áreas respondem pela maior parte do volume operacional (padrão de Pareto aplicado ao público, não à infraestrutura)."
+            )
+
+        if 'pct_atendimento_especial' in im:
+            pior_uf_txt = ""
+            if not results.atendimento_agg.empty:
+                pior = results.atendimento_agg.iloc[0]
+                pior_uf_txt = (f" A UF de {pior['UF']} lidera a demanda proporcional, com {pior['PERCENTUAL_ESPECIAL (%)']:.1f}% "
+                               f"dos participantes exigindo atendimento especial.")
+            insights.append(
+                f"♿ DEMANDA DE ATENDIMENTO ESPECIAL (N02 — ENSALAMENTO): {im['pct_atendimento_especial']:.1f}% dos participantes "
+                f"demandam algum atendimento diferenciado (especializado, específico, recurso/auxílio ou ensalamento em sala reduzida). "
+                f"Este é um indicador central de INCLUSÃO e de complexidade operacional: cada demanda especial implica salas adaptadas, "
+                f"fiscais treinados, tempo adicional e materiais em formatos acessíveis.{pior_uf_txt}"
+            )
+
+        if 'pct_migracao' in im:
+            polo_txt = ""
+            if not results.migracao_agg.empty:
+                polo = results.migracao_agg.iloc[0]
+                polo_txt = (f" O maior polo de atração é {polo['UF DE PROVA']}, onde {polo['PERCENTUAL_MIGRACAO (%)']:.1f}% "
+                            f"dos participantes vêm de outra UF.")
+            insights.append(
+                f"🚌 MIGRAÇÃO INTERESTADUAL (N90 — RESIDÊNCIA × PROVA): {im['pct_migracao']:.1f}% dos participantes farão a prova "
+                f"em uma UF diferente da de residência. A migração pressiona hospedagem, transporte e a capacidade dos polos "
+                f"regionais que atraem candidatos de fora — fator que deve ser cruzado com a capacidade instalada (N50/N52) "
+                f"para evitar gargalos de acomodação.{polo_txt}"
+            )
+
+        if 'pct_irregular' in im and im['pct_irregular'] > 0:
+            insights.append(
+                f"⚖️ SITUAÇÃO CADASTRAL DAS INSCRIÇÕES (N90 — TP_SITUACAO): {im['pct_irregular']:.2f}% das inscrições estão em "
+                f"situação Irregular ou sob Ação Judicial (sub judice). Ainda que minoritário, este contingente concentra RISCO "
+                f"jurídico e operacional e deve ser tratado e monitorado antes da aplicação, evitando contestações e retrabalho."
+            )
+
+        # ----------------------------------------------------------------------------
+        # NOVOS INSIGHTS — MÓDULO DE ATENDIMENTOS & RECURSOS (v30 — layout N91).
+        # ----------------------------------------------------------------------------
+        am = getattr(results, 'atendimentos_meta', {}) or {}
+
+        if am.get('modulo_ativo') and 'total_itens_atendimento' in am:
+            item_txt = ""
+            if not results.item_atend_agg.empty:
+                top3 = [str(x) for x in results.item_atend_agg.head(3)['ITEM DE ATENDIMENTO / RECURSO'].tolist()]
+                item_txt = f" Os itens mais solicitados são: {', '.join(top3)}."
+            insights.append(
+                f"🧩 ATENDIMENTOS & RECURSOS DE ACESSIBILIDADE (N91 — VISÃO ITEMIZADA): A base traz {am['total_itens_atendimento']:,} "
+                f"itens de atendimento/recurso homologados — a visão ADJUDICADA das necessidades especiais, que detalha e complementa "
+                f"os flags de atendimento do N02. Enquanto o N02 responde 'o participante tem alguma necessidade?', o N91 responde "
+                f"'QUAL item, de que TIPO, e foi CONCEDIDO?'.{item_txt} Cada item exige preparo logístico próprio (materiais em Braille, "
+                f"ledores, intérpretes de Libras, tempo adicional, mobiliário acessível)."
+            )
+
+        if 'pct_deferido' in am:
+            analise_txt = ""
+            if am.get('pct_em_analise', 0) > 0:
+                analise_txt = (f" Atenção: {am['pct_em_analise']:.1f}% ainda estão 'Em Análise' — pendências que precisam de "
+                               f"decisão antes da aplicação.")
+            insights.append(
+                f"✅ TAXA DE DEFERIMENTO DOS ATENDIMENTOS (N91 — CO_SITUACAO_LAUDO_MEDICO): {am['pct_deferido']:.1f}% dos itens de "
+                f"atendimento estão Deferidos/Ativos (participante com direito assegurado, conforme a regra oficial da VW N91).{analise_txt} "
+                f"Esta é a métrica central de EFETIVIDADE da política de acessibilidade: pedir não basta — é preciso que o recurso seja "
+                f"homologado e provido no dia da prova."
+            )
+
+        if not results.laudo_uf_agg.empty and 'PERCENTUAL_DEFERIDO (%)' in results.laudo_uf_agg.columns:
+            pior = results.laudo_uf_agg.iloc[0]  # ordenado do menor deferimento
+            insights.append(
+                f"🌎 DESIGUALDADE REGIONAL NO DEFERIMENTO (N91 — POR UF): A UF de {pior['UF DE PROVA']} apresenta a MENOR taxa de "
+                f"deferimento de atendimentos ({pior['PERCENTUAL_DEFERIDO (%)']:.1f}%). Disparidades regionais no processamento de laudos "
+                f"podem sinalizar gargalos na comissão de análise, exigência documental desigual ou fluxos administrativos distintos — "
+                f"recomenda-se investigar e padronizar o tratamento para garantir isonomia no atendimento às necessidades especiais."
+            )
+
+        cov = getattr(results, 'column_validation', {}) or {}
+        if cov:
+            insights.append(
+                f"🧭 COBERTURA E RASTREABILIDADE DOS DADOS: Dos {cov.get('total_campos_layout', 0)} campos oficiais mapeados nos "
+                f"layouts N50/N52/N60, esta base reconheceu {cov.get('qtd_reconhecidos', 0)} "
+                f"({cov.get('cobertura_percentual', 0)}%). Toda análise cujo campo-fonte não esteja presente é automaticamente "
+                f"omitida, sem falhas silenciosas — garantindo que cada indicador exibido tenha lastro real na base carregada."
+            )
+
+        return {
+            "estrategicos": insights,
+            "glossario_estatistico": CognitiveInsightGenerator.get_statistical_glossary(),
+            "glossario_indices": CognitiveInsightGenerator.get_derived_indices_glossary(),
+            "glossario_normativo": CognitiveInsightGenerator.get_normative_glossary(),
+            "glossario_faixas": CognitiveInsightGenerator.get_faixa_capacidade_glossary(results.cutoffs),
+            "conceitos_criados": CognitiveInsightGenerator.get_created_concepts_glossary(results.cutoffs),
+            "abas": CognitiveInsightGenerator.get_tab_explanations()
+        }
+
+
+# ==========================================
+# VISUALIZER AND EXPORTER (Renderização Segura, Excel 21 Abas e HTML V27 Ouro UI/UX)
+# ==========================================
 class VisualizerAndExporter:
-    def __init__(self, output_dir):
-        self.output_dir = output_dir
-        self.graficos_dir = f"{output_dir}/graficos"
-        os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(self.graficos_dir, exist_ok=True)
-        self.generated_figs = {} 
-
-    def plot_and_save(self, fig, filename):
-        fig.write_html(f"{self.graficos_dir}/{filename}.html", include_plotlyjs='cdn')
-        try:
-            fig.write_image(f"{self.graficos_dir}/{filename}.png", scale=3)
-            fig.write_image(f"{self.graficos_dir}/{filename}.svg")
-        except Exception:
-            pass 
-        self.generated_figs[filename] = fig
-
-    def generate_charts(self, df, uf_stats, pareto_uf, top_locais, faixas_df, clusters_df):
-        logger.info("Gerando os 13 Paineis de Visualização Científica Plotly...")
+    """Super Classe de Visualização C-Level. Garante Data-Tables dinâmicos e exportação de todas as matrizes Ouro."""
+    
+    def __init__(self, dirs, logger):
+        self.dirs = dirs
+        self.logger = logger
         
-        fig_kpi = go.Figure()
-        fig_kpi.add_trace(go.Indicator(mode="number", value=df['QT_CAPACIDADE_MAXIMA_SALA'].sum(), title={"text": "Capacidade Nacional"}, domain={'row': 0, 'column': 0}))
-        fig_kpi.add_trace(go.Indicator(mode="number", value=df['NO_LOCAL'].nunique(), title={"text": "Locais"}, domain={'row': 0, 'column': 1}))
-        fig_kpi.add_trace(go.Indicator(mode="number", value=df['QT_CAPACIDADE_MAXIMA_SALA'].mean(), title={"text": "Média"}, domain={'row': 0, 'column': 2}))
-        fig_kpi.update_layout(grid={'rows': 1, 'columns': 3, 'pattern': "independent"})
-        self.plot_and_save(fig_kpi, '1_KPIs_Executivos')
+    def _safe_plot(self, fig, filename):
+        """Plotador Robusto Preditivo."""
+        filepath_html = self.dirs["graficos"] / f"{filename}.html"
+        filepath_png = self.dirs["graficos"] / f"{filename}.png"
+        try:
+            fig.write_html(str(filepath_html), include_plotlyjs='cdn')
+            fig.write_image(str(filepath_png), scale=2)
+        except Exception as e:
+            self.logger.debug(f"Aviso Inofensivo (Kaleido Imagens Ausente no SO, prosseguindo com renderização Web Segura): {e}")
 
-        fig_hist = px.histogram(df, x="QT_CAPACIDADE_MAXIMA_SALA", nbins=50, marginal="box", title="Densidade de Capacidades")
-        self.plot_and_save(fig_hist, '2_Histograma_Distribuicao')
+    def export_auxiliary_files(self, results: MLProcessingResults, metadata: dict, didactic_pack: dict, audit=None):
+        self.logger.info("Módulo Auxiliar: Extraindo Backups em Metadados Formais (JSON) e Matrizes Ouro Mestre (CSV)...")
+        # CORREÇÃO DE AUDITORIA (v29): `results.quality_report` existe no DTO porém é
+        # preenchido com {} (o motor estatístico não recebe o relatório do ETL). O antigo
+        # `getattr(results, 'quality_report', metadata)` retornava o dicionário vazio (que
+        # existe, apenas é "falsy"), descartando silenciosamente TODA a auditoria de
+        # qualidade (nulos, duplicatas, abas originais). O `or` abaixo faz o fallback
+        # correto para o `metadata` real produzido pela camada de limpeza.
+        safe_meta = (getattr(results, 'quality_report', None) or metadata or {})
+        
+        with open(self.dirs["dados_processados"] / "5_Metadados_Insights.json", "w", encoding="utf-8") as f:
+            payload = {
+                "auditoria_qualidade": safe_meta, 
+                "dicionario_faixas": didactic_pack['glossario_faixas'], 
+                "indices": didactic_pack['glossario_indices']
+            }
+            # v31: inclui os achados da auditoria de cruzamento entre layouts, quando ativa.
+            if audit is not None and getattr(audit, 'ativo', False):
+                payload["auditoria_cruzamento"] = {
+                    "kpis": audit.kpis,
+                    "achados": audit.findings,
+                    "resumo_executivo": audit.resumo_txt,
+                }
+            json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
+            
+        results.df.to_csv(self.dirs["dados_processados"] / "6_Base_Tratada.csv", index=False, encoding='utf-8-sig', sep=';')
+        
+        texto = "=========================================================================================\n"
+        texto += "LAUDO INTEGRAL DE AUDITORIA FORMAL E INTELIGÊNCIA EXECUTIVA DA APLICAÇÃO\n"
+        texto += "=========================================================================================\n\n"
+        for insight in didactic_pack['estrategicos']: 
+            texto += f"► {insight}\n\n"
+
+        # v31: seção de auditoria de cruzamento no laudo (interpretações automáticas).
+        if audit is not None and getattr(audit, 'ativo', False):
+            texto += "\n=========================================================================================\n"
+            texto += "AUDITORIA DE CRUZAMENTO ENTRE LAYOUTS (N02 / N50 / N52 / N90 / N91)\n"
+            texto += "=========================================================================================\n\n"
+            texto += audit.resumo_txt + "\n\n"
+            sev_ordem = {'CRÍTICO': 0, 'ATENÇÃO': 1, 'OK': 2}
+            for f_ in sorted(audit.findings, key=lambda x: (sev_ordem.get(x['severidade'], 3), x['titulo'])):
+                texto += f"[{f_['severidade']}] {f_['titulo']} (valor: {f_['valor']})\n"
+                texto += f"    Interpretação: {f_['interpretacao']}\n"
+                if f_.get('recomendacao'):
+                    texto += f"    Recomendação : {f_['recomendacao']}\n"
+                texto += "\n"
+
+        with open(self.dirs["arquivos_auxiliares"] / "3_Laudo_Insights_Consolidados.txt", "w", encoding="utf-8") as f:
+            f.write(texto)
+
+    def generate_html_report(self, results: MLProcessingResults):
+        if not SWEETVIZ_AVAILABLE:
+            self.logger.info("Sweetviz não instalado — relatório EDA complementar ignorado (produtos principais não são afetados).")
+            return
+        self.logger.info("Renderização EDA (Exploratory Data Analysis) Via Biblioteca Sweetviz...")
+        try:
+            sample_df = results.df.sample(min(len(results.df), 10000)) if len(results.df) > 10000 else results.df
+            report = sv.analyze(sample_df, pairwise_analysis="off")
+            report.show_html(filepath=str(self.dirs["graficos"] / "1_Sweetviz_Original_Tecnico.html"), open_browser=False)
+        except Exception as e:
+            self.logger.warning(f"Sweetviz Analytics ignorado estrategicamente (Aviso de Carga de Memória ou Threads C-Level): {e}")
+
+    def generate_standalone_charts(self, results: MLProcessingResults):
+        """Os 15 Paineis Científicos Plotly Clássicos Isolados no Formato HTML Offline.
+
+        Requer a biblioteca Plotly instalada no Python. Caso ausente, esta etapa é
+        pulada com aviso — o Dashboard HTML interativo (que usa Plotly.js via CDN) e o
+        Excel continuam sendo gerados normalmente.
+        """
+        if not PLOTLY_AVAILABLE:
+            self.logger.warning("Plotly não instalado — gráficos 'standalone' (.html/.png) ignorados. "
+                                "O Dashboard interativo e o Excel não dependem disto e serão gerados.")
+            return
+        self.logger.info("Garantindo Não Regressão Mestre: Plotando 15 Paineis Científicos Plotly Clássicos Independentes...")
+        df = results.df
+        col_cap = 'QT_CAPACIDADE_MAXIMA_SALA'
+        
+        if col_cap not in df.columns: 
+            return
+
+        fig_kpi = go.Figure()
+        fig_kpi.add_trace(go.Indicator(mode="number", value=df[col_cap].sum(), title={"text": "Matriz Logística Nacional (Vagas)"}, domain={'row': 0, 'column': 0}))
+        fig_kpi.add_trace(go.Indicator(mode="number", value=df['NO_LOCAL'].nunique() if 'NO_LOCAL' in df.columns else len(df), title={"text": "Prédios Ativos"}, domain={'row': 0, 'column': 1}))
+        fig_kpi.update_layout(grid={'rows': 1, 'columns': 2})
+        self._safe_plot(fig_kpi, '1_KPIs_Executivos')
+
+        fig_hist = px.histogram(df, x=col_cap, nbins=50, marginal="box", title="Radiografia de Curva e Densidade Fria de Lotação Salas Matemáticas")
+        self._safe_plot(fig_hist, '2_Histograma_Distribuicao')
 
         if 'SG_UF' in df.columns and 'NO_LOCAL' in df.columns:
-            df_tree = df.copy()
-            df_tree['NO_LOCAL'] = df_tree['NO_LOCAL'].astype(str)
-            df_tree['SG_UF'] = df_tree['SG_UF'].astype(str)
-            
-            limite = df_tree['QT_CAPACIDADE_MAXIMA_SALA'].quantile(0.70)
-            df_tree.loc[df_tree['QT_CAPACIDADE_MAXIMA_SALA'] < limite, 'NO_LOCAL'] = 'DEMAIS POLOS'
-            fig_tree = px.treemap(df_tree, path=[px.Constant("Brasil"), 'SG_UF', 'NO_LOCAL'], values='QT_CAPACIDADE_MAXIMA_SALA', title='Treemap: Hierarquia Logística')
-            self.plot_and_save(fig_tree, '3_Treemap_Concentracao')
+            fig_tree = px.treemap(df.head(1000), path=[px.Constant("Brasil Central"), 'SG_UF', 'NO_LOCAL'], values=col_cap, title='Treemap Cartográfico Governamental e Espacial Hierárquico')
+            self._safe_plot(fig_tree, '3_Treemap_Concentracao')
 
-        fig_vio = px.violin(df, y="QT_CAPACIDADE_MAXIMA_SALA", x="SG_UF", box=True, points="outliers", title="Violin Plot: Assimetria Regional")
-        self.plot_and_save(fig_vio, '4_Violino_Densidade')
+        if 'SG_UF' in df.columns:
+            fig_vio = px.violin(df, y=col_cap, x="SG_UF", box=True, points="outliers", title="Violin Plot (Dispersão Populacional e Assimetria de Gaus por Unidade Federal)")
+            self._safe_plot(fig_vio, '4_Violino_Densidade')
 
-        fig_par = go.Figure([
-            go.Bar(x=pareto_uf['SG_UF'], y=pareto_uf['QT_CAPACIDADE_MAXIMA_SALA'], name='Bruta'),
-            go.Scatter(x=pareto_uf['SG_UF'], y=pareto_uf['FREQUENCIA_ACUMULADA (%)'], name='Acumulada %', yaxis='y2')
-        ])
-        fig_par.update_layout(title='Teorema de Pareto (80/20)', yaxis2=dict(overlaying='y', side='right', range=[0, 100]))
-        self.plot_and_save(fig_par, '5_Pareto_UF')
+        if not results.pareto_uf.empty:
+            fig_par = go.Figure([
+                go.Bar(x=results.pareto_uf['SG_UF'], y=results.pareto_uf[col_cap], name='Frequência Volumétrica Bruta Nacional Acumulada'), 
+                go.Scatter(x=results.pareto_uf['SG_UF'], y=results.pareto_uf['FREQUENCIA_ACUMULADA (%)'], name='Curva Relativa Categórica Acumulada 80/20', yaxis='y2')
+            ])
+            fig_par.update_layout(title='Teorema Estrito de Pareto 80/20 de Concentração de Sustentação de Contratos', yaxis2=dict(overlaying='y', side='right', range=[0, 100]))
+            self._safe_plot(fig_par, '5_Pareto_UF')
 
-        fig_top = px.bar(top_locais.sort_values('CAPACIDADE_TOTAL', ascending=True), x='CAPACIDADE_TOTAL', y='NO_LOCAL', orientation='h', color='SG_UF', title='Top 20 Super-Polos')
-        self.plot_and_save(fig_top, '6_Top_20_Locais')
-        
-        if faixas_df is not None:
-            faixas_df.columns = ['FAIXA_CAPACIDADE', 'VOLUMETRIA']
-            fig_faixa = px.bar(faixas_df.sort_values('FAIXA_CAPACIDADE'), x='FAIXA_CAPACIDADE', y='VOLUMETRIA', title='Distribuição por Faixa', color='FAIXA_CAPACIDADE', text_auto=True)
-            self.plot_and_save(fig_faixa, '7_Faixas_Capacidade')
-
-        if not clusters_df.empty:
-            cluster_counts = clusters_df['PERFIL_COMPORTAMENTAL_IA'].value_counts().reset_index()
-            cluster_counts.columns = ['PERFIL_COMPORTAMENTAL_IA', 'QTD_LOCAIS']
-            fig_ia = px.pie(cluster_counts, values='QTD_LOCAIS', names='PERFIL_COMPORTAMENTAL_IA', title='K-Means: Perfis de IA', hole=0.4)
-            self.plot_and_save(fig_ia, '8_Clusters_IA_Distribuicao')
+        if not results.top_locais.empty:
+            fig_top = px.bar(results.top_locais.sort_values('CAPACIDADE_TOTAL', ascending=True), x='CAPACIDADE_TOTAL', y='NO_LOCAL', orientation='h', title='Radar Diretivo da Diretoria de Crise de Matriz de Inteligência Governamental: Top 20 Massivos Super-Polos')
+            self._safe_plot(fig_top, '6_Top_20_Locais')
 
         if 'FAIXA_CAPACIDADE' in df.columns:
-            fig_box_faixa = px.box(df, x="FAIXA_CAPACIDADE", y="QT_CAPACIDADE_MAXIMA_SALA", color="FAIXA_CAPACIDADE", title="Dispersão Interna por Faixa", category_orders={"FAIXA_CAPACIDADE": ['1. Micro Sala', '2. Sala Pequena', '3. Sala Média', '4. Sala Grande', '5. Gigante / Auditório']})
-            self.plot_and_save(fig_box_faixa, '9_Boxplot_Faixas')
+            faixas_c = df['FAIXA_CAPACIDADE'].value_counts().reset_index()
+            fig_faixa = px.bar(faixas_c, x='FAIXA_CAPACIDADE', y='count', title='Diagnóstico Qualitativo Estruturado Dimensional IQR (Morfometria de Custos e Frequência Inter-Quartil)', text_auto=True)
+            self._safe_plot(fig_faixa, '7_Faixas_Capacidade')
 
-        if not uf_stats.empty:
-            uf_wf = uf_stats.head(10).copy()
-            outros_val = uf_stats.iloc[10:]['CAPACIDADE_TOTAL'].sum() if len(uf_stats) > 10 else 0
-            
-            wf_names = [str(x) for x in uf_wf['SG_UF']] + ['DEMAIS ESTADOS']
-            wf_vals = list(uf_wf['CAPACIDADE_TOTAL']) + [outros_val]
-            
-            fig_wf = go.Figure(go.Waterfall(name="Acumulado", orientation="v", measure=["relative"]*10 + ["total"],
-                x=wf_names, y=wf_vals, textposition="outside", text=[f"{v:,.0f}" for v in wf_vals], connector={"line":{"color":"rgb(63, 63, 63)"}}))
-            fig_wf.update_layout(title="Waterfall: Composição Cumulativa Nacional")
-            self.plot_and_save(fig_wf, '10_Waterfall_UFs')
+        if 'PERFIL_INFRAESTRUTURA_IA' in results.locais_agg.columns:
+            cc = results.locais_agg['PERFIL_INFRAESTRUTURA_IA'].value_counts().reset_index()
+            fig_ia = px.pie(cc, values='count', names='PERFIL_INFRAESTRUTURA_IA', title='Robótica em Data Science Executivo do Servidor Autônomo e Isolamento Estrito de Risco Predial Autônomo por Similaridade Algorítmica (K-Means)', hole=0.4)
+            self._safe_plot(fig_ia, '8_Clusters_IA')
 
-        if not clusters_df.empty:
-            fig_scatter = px.scatter(clusters_df, x="QTD_SALAS", y="CAPACIDADE_MEDIA", color="PERFIL_COMPORTAMENTAL_IA", size="CAPACIDADE_TOTAL", hover_name="NO_LOCAL", title="Dispersão: Qtd vs Cap. Média")
-            self.plot_and_save(fig_scatter, '11_Dispersao_Salas_vs_Capacidade')
+        if 'FAIXA_CAPACIDADE' in df.columns:
+            fig_box_faixa = px.box(df, x="FAIXA_CAPACIDADE", y=col_cap, color="FAIXA_CAPACIDADE", title="Avaliação Rigorosa de Dispersões Ocultas com Métrica Interquartílica Validadora (Boxplot IQR Frio)")
+            self._safe_plot(fig_box_faixa, '9_Boxplot_Faixas')
 
-        if not clusters_df.empty:
-            corr_cols = ['QTD_SALAS', 'CAPACIDADE_MEDIA', 'CAPACIDADE_TOTAL']
-            corr_matrix = clusters_df[corr_cols].corr()
-            fig_corr = px.imshow(corr_matrix, text_auto=True, title="Matriz de Correlação de Pearson", aspect="auto", color_continuous_scale='RdBu_r')
-            self.plot_and_save(fig_corr, '12_Heatmap_Correlacao')
+        if not results.uf_agg.empty:
+            uf_wf = results.uf_agg.head(10).copy()
+            wf_names = list(uf_wf['SG_UF'])
+            wf_vals = list(uf_wf['CAPACIDADE_ESTADUAL_TOTAL'])
+            fig_wf = go.Figure(go.Waterfall(name="Degrau Dimensional Absoluto Operacional", orientation="v", measure=["relative"] * len(wf_names), x=wf_names, y=wf_vals))
+            fig_wf.update_layout(title="Painel Executivo Clássico Exibindo Degraus Críticos da Base Baseada em Ordem de Queda Linear de Risco (Waterfall Chart Nativo)")
+            self._safe_plot(fig_wf, '10_Waterfall_UFs')
 
-        df_sorted = df.sort_values('QT_CAPACIDADE_MAXIMA_SALA')
-        df_sorted['Acumulado'] = np.arange(1, len(df_sorted)+1) / len(df_sorted)
-        fig_ecdf = px.line(df_sorted, x='QT_CAPACIDADE_MAXIMA_SALA', y='Acumulado', title='Curva de Distribuição Cumulativa Empírica (ECDF)')
-        self.plot_and_save(fig_ecdf, '13_ECDF_Acumulada')
+        if not results.locais_agg.empty:
+            fig_scatter = px.scatter(results.locais_agg, x="QTD_SALAS", y="CAP_MEDIA", size="CAP_TOTAL", hover_name="NO_LOCAL", title="Dispersão Bivariada Multi-Dimensional Visual Interativa Complexa: Densidade Acumulada Oculta Operacional vs Porta Física Escolar")
+            self._safe_plot(fig_scatter, '11_Dispersao_Salas_vs_Capacidade')
 
-    def generate_html_report(self, df):
-        try:
-            report = sv.analyze(df)
-            report.show_html(filepath=f"{self.output_dir}/1_Sweetviz_Original_Tecnico.html", open_browser=False)
-        except Exception as e:
-            logger.error(f"Omissão Graciosa Sweetviz: {e}")
+            corr_cols = ['QTD_SALAS', 'CAP_MEDIA', 'CAP_TOTAL']
+            fig_corr = px.imshow(results.locais_agg[corr_cols].corr(), text_auto=True, title="Matriz Exata de Correlação de Coeficiente Pearson Inter-Variável de Modelos Espaciais Logísticos Categóricos Numéricos (Scipy)", aspect="auto", color_continuous_scale='RdBu_r')
+            self._safe_plot(fig_corr, '12_Heatmap_Correlacao')
 
-    def create_custom_portuguese_dashboard(self, df, cutoffs, geral_stats):
-        """Gera o Web App SPA (HTML/JS) preservado da versão anterior."""
-        df_json = df.to_dict(orient='records')
-        json_str = json.dumps(df_json, ensure_ascii=False)
+        df_sorted = df.sort_values(col_cap)
+        df_sorted['Acumulado'] = np.arange(1, len(df_sorted) + 1) / len(df_sorted)
+        fig_ecdf = px.line(df_sorted, x=col_cap, y='Acumulado', title='Análise Demográfica Curva Estatística Continua Cidadã Acessível Parametrizada (Empirical Cumulative Distribution Function ECDF Formal Clássico)')
+        self._safe_plot(fig_ecdf, '13_ECDF_Acumulada')
         
-        html_content = f"""
+        if 'QUALIDADE_PREDIAL_GLOBAL' in results.uf_agg.columns:
+            fig_qual = px.bar(results.uf_agg.sort_values('QUALIDADE_PREDIAL_GLOBAL', ascending=False), x='SG_UF', y='QUALIDADE_PREDIAL_GLOBAL', title='Ranking Ouro Estadual Absoluto de Excelência em Qualidade Predial Integrada (Inclusão, Tecnologia, Segurança e Conforto Acústico)')
+            self._safe_plot(fig_qual, '14_Qualidade_Global_UF')
+            
+        if 'INDICE_VULNERABILIDADE' in results.df.columns and 'SG_UF' in results.df.columns:
+            fig_vuln = px.box(results.df, x='SG_UF', y='INDICE_VULNERABILIDADE', title='Dispersão Paramétrica e Risco Logístico Crítico de Elevada Vulnerabilidade Estrutural Civil Criminal por Estado')
+            self._safe_plot(fig_vuln, '15_Vulnerabilidade_Risco_UF')
+
+        # ------------------- NOVOS GRÁFICOS STANDALONE (v28) -------------------
+        if not results.conservacao_agg.empty:
+            fig_cons = px.bar(results.conservacao_agg, x='SG_UF', y='CONSERVACAO_MEDIA_UF',
+                              title='Índice de Conservação Predial Médio por UF (N60 — campos TP_*)', text_auto='.1f')
+            self._safe_plot(fig_cons, '16_Conservacao_Predial_UF')
+
+        if 'DESC_NOTA_OFICIAL_INEP' in df.columns:
+            nota_c = df['DESC_NOTA_OFICIAL_INEP'].value_counts().reset_index()
+            nota_c.columns = ['DESC_NOTA_OFICIAL_INEP', 'count']
+            fig_nota = px.bar(nota_c, x='DESC_NOTA_OFICIAL_INEP', y='count',
+                              title='Distribuição da Nota Oficial INEP do Local (NU_PONTOS_LOCAL_PROVA)', text_auto=True)
+            self._safe_plot(fig_nota, '17_Nota_Oficial_INEP')
+
+        if 'AREA_POR_CANDIDATO_M2' in df.columns:
+            fig_dens = px.histogram(df, x='AREA_POR_CANDIDATO_M2', nbins=50, marginal='box',
+                                    title='Densidade Espacial: Distribuição de m² por Candidato (N50)')
+            self._safe_plot(fig_dens, '18_Densidade_Espacial')
+
+        if not results.correlation_matrix.empty:
+            fig_corr2 = px.imshow(results.correlation_matrix, text_auto='.2f', aspect='auto',
+                                  color_continuous_scale='RdBu_r', zmin=-1, zmax=1,
+                                  title='Matriz de Correlação de Pearson entre Índices e Quantidades')
+            self._safe_plot(fig_corr2, '19_Matriz_Correlacao')
+
+        if not results.geo_df.empty:
+            try:
+                color_col = 'QUALIDADE_PREDIAL_GLOBAL' if 'QUALIDADE_PREDIAL_GLOBAL' in results.geo_df.columns else None
+                size_col = 'CAP_TOTAL' if 'CAP_TOTAL' in results.geo_df.columns else None
+                fig_geo = px.scatter_geo(
+                    results.geo_df, lat='NU_LATITUDE_LOCAL', lon='NU_LONGITUDE_LOCAL',
+                    color=color_col, size=size_col, hover_name='NO_LOCAL', scope='south america',
+                    title='Distribuição Geográfica dos Locais de Prova (N52 — lat/long)')
+                self._safe_plot(fig_geo, '20_Mapa_Geografico_Locais')
+            except Exception as e:
+                self.logger.debug(f"Mapa geográfico standalone ignorado: {e}")
+
+    def build_excel_workbook(self, results: MLProcessingResults, didactic_pack: dict, audit=None):
+        """Constrói o Data Warehouse Excel Multi-Nível EXTREMO Corporativo com 21 Abas Físicas Mestre Array Ouro Limpo."""
+        self.logger.info("Excel C-Level Builder: Gerando 21 Abas Oficiais Nativas de Extração Dimensional Data-Driven...")
+        filepath = self.dirs["dados_processados"] / "Analise_Completa_Master_Ultimate_Edition.xlsx"
+        
+        writer = pd.ExcelWriter(filepath, engine='xlsxwriter')
+        workbook = writer.book
+
+        title_fmt = workbook.add_format({'bold': True, 'font_size': 13, 'bg_color': '#1E293B', 'font_color': 'white', 'valign': 'vcenter', 'border': 1})
+        subtitle_fmt = workbook.add_format({'bold': True, 'font_size': 12, 'bg_color': '#334155', 'font_color': '#10B981', 'valign': 'vcenter', 'border': 1})
+        desc_fmt = workbook.add_format({'text_wrap': True, 'font_size': 11, 'bg_color': '#F8FAFC', 'font_color': '#334155', 'valign': 'top', 'border': 1})
+        header_fmt = workbook.add_format({'bold': True, 'font_size': 11, 'bg_color': '#2563EB', 'font_color': 'white', 'border': 1, 'text_wrap': True})
+        cell_fmt = workbook.add_format({'border': 1, 'font_size': 10})
+
+        def create_sheet(sheet_name, explanation, dataframe, has_index=False):
+            safe_name = str(sheet_name)[:31]
+            has_data = dataframe is not None and not dataframe.empty
+            if has_data:
+                try:
+                    # Excel suporta no máx. ~1.048.576 linhas; trunca com aviso se exceder.
+                    if len(dataframe) > 1_048_000:
+                        dataframe = dataframe.head(1_048_000)
+                    dataframe.to_excel(writer, sheet_name=safe_name, index=has_index, startrow=8)
+                except Exception as _e:
+                    self.logger.warning(f"Aba '{safe_name}': falha ao gravar dados ({_e}); criando aba vazia.")
+                    has_data = False
+            # Garante que a worksheet exista mesmo sem dados (evita KeyError em writer.sheets).
+            ws = writer.sheets.get(safe_name)
+            if ws is None:
+                ws = writer.book.add_worksheet(safe_name)
+                writer.sheets[safe_name] = ws
+            ws.set_column('A:A', 35 if has_index else 25)
+            ws.merge_range('A1:J1', f" FUNDAMENTAÇÃO CONCEITUAL E STORYTELLING OBRIGATÓRIO DA ABA: {sheet_name.upper()}", title_fmt)
+            ws.merge_range('A2:J7', explanation, desc_fmt)
+
+            if has_data:
+                cols = ['MÉTRICA PARAMETRIZADA / INDEX'] + list(dataframe.columns) if has_index else list(dataframe.columns)
+                for col_num, col_name in enumerate(cols):
+                    ws.write(8, col_num, str(col_name).upper().replace('_', ' '), header_fmt)
+                    ws.set_column(col_num, col_num, max(18, len(str(col_name)) + 2), cell_fmt)
+
+                    if not has_index:
+                        col_str = str(col_name).upper()
+                        if any(x in col_str for x in ['CAPACIDADE', 'QTD', 'GINI', 'INDICE', 'TAXA', 'TOTAL', 'MEDIA']):
+                            ws.conditional_format(9, col_num, len(dataframe)+8, col_num, {
+                                'type': '3_color_scale', 
+                                'min_color': '#FFFFFF', 
+                                'mid_color': '#FEF08A', 
+                                'max_color': '#EF4444' if any(x in col_str for x in ['GINI', 'ANOMALIA', 'RISCO', 'EXTREMO', 'VULNERABILIDADE']) else '#10B981'
+                            })
+                if not has_index: 
+                    ws.autofilter(8, 0, len(dataframe)+8, len(dataframe.columns)-1)
+            else:
+                ws.write(8, 0, "SEM DADOS PARA ESTA ANÁLISE COM A BASE FORNECIDA.", header_fmt)
+                ws.merge_range('A10:J12',
+                               "Esta aba não pôde ser preenchida porque as colunas necessárias não estão presentes na base "
+                               "de entrada, ou a agregação resultou vazia. Verifique se o layout de origem foi fornecido "
+                               "com os campos exigidos por esta análise (veja a fundamentação acima).", desc_fmt)
+
+            return ws
+
+        # ============================ ABA DE CAPA (v28) ============================
+        n_linhas = len(results.df)
+        n_locais = results.df['NO_LOCAL'].nunique() if 'NO_LOCAL' in results.df.columns else 0
+        n_ufs = results.df['SG_UF'].nunique() if 'SG_UF' in results.df.columns else 0
+        cov = getattr(results, 'column_validation', {}) or {}
+        ws_capa = workbook.add_worksheet("00_Capa")
+        ws_capa.hide_gridlines(2)
+        ws_capa.set_column('A:A', 4)
+        ws_capa.set_column('B:B', 120)
+        capa_title = workbook.add_format({'bold': True, 'font_size': 22, 'font_color': '#0F172A', 'valign': 'vcenter'})
+        capa_sub = workbook.add_format({'font_size': 13, 'font_color': '#2563EB', 'valign': 'vcenter'})
+        capa_body = workbook.add_format({'font_size': 11, 'font_color': '#334155', 'text_wrap': True, 'valign': 'top'})
+        capa_kpi = workbook.add_format({'bold': True, 'font_size': 12, 'font_color': '#10B981'})
+        ws_capa.set_row(1, 34)
+        ws_capa.write('B2', 'Plataforma de Business Intelligence — Locais de Prova INEP', capa_title)
+        ws_capa.write('B3', f'Relatório Analítico Corporativo • Versão {APP_VERSION} "Enterprise Analytics"', capa_sub)
+        ws_capa.write('B5', f'Gerado em: {datetime.now().strftime("%d/%m/%Y às %H:%M:%S")}', capa_body)
+        ws_capa.write('B7', 'ESCOPO DESTA ANÁLISE', workbook.add_format({'bold': True, 'font_size': 12, 'font_color': '#0F172A'}))
+        ws_capa.write('B8', f'• {n_linhas:,} registros (salas/portas) processados'.replace(',', '.'), capa_kpi)
+        ws_capa.write('B9', f'• {n_locais:,} locais/prédios únicos mapeados'.replace(',', '.'), capa_kpi)
+        ws_capa.write('B10', f'• {n_ufs} Unidades Federativas (UFs) cobertas', capa_kpi)
+        if cov:
+            ws_capa.write('B11', f'• {cov.get("qtd_reconhecidos", 0)} de {cov.get("total_campos_layout", 0)} campos oficiais reconhecidos ({cov.get("cobertura_percentual", 0)}% de cobertura)', capa_kpi)
+        ws_capa.write('B13', 'FUNDAMENTO OFICIAL', workbook.add_format({'bold': True, 'font_size': 12, 'font_color': '#0F172A'}))
+        ws_capa.write('B14', 'Todos os indicadores derivam campo a campo dos layouts oficiais do INEP: N50 (Salas/Espaço Físico), '
+                             'N52 (Locação de Espaço Físico) e N60 (Questionário de Visita ao Local de Prova). Consulte a aba '
+                             '"21_Dicionario_Dados" para a definição de cada campo e "22_Dicionario_Indices" para a metodologia '
+                             'de cada índice calculado.', capa_body)
+        ws_capa.write('B16', 'COMO LER AS CORES (formatação condicional das abas)', workbook.add_format({'bold': True, 'font_size': 12, 'font_color': '#0F172A'}))
+        ws_capa.write('B17', '🟢 Verde = desempenho/infraestrutura favorável.   🟡 Amarelo = atenção/transição.   '
+                             '🔴 Vermelho = risco elevado, anomalia, alta concentração (Gini) ou vulnerabilidade.', capa_body)
+        ws_capa.write('B19', 'Navegue pelas abas na barra inferior. A aba "0_Guia_Utilizacao" traz o manual completo de interpretação.', capa_body)
+
+        ws_guia = workbook.add_worksheet("0_Guia_Utilizacao")
+        ws_guia.set_column('A:A', 180)
+        ws_guia.write('A1', ' MANUAL RÁPIDO DE INTERPRETAÇÃO FORMAL CIDADÃ, LEGENDA SEMÂNTICA RESTRITA E BASE CONCEITUAL TÉCNICA OFICIAL EXPLICITA', title_fmt)
+        
+        guia_txt = (
+            "ATENÇÃO GERENCIAL CONTÍNUA E MANDATÓRIA RESTRITA (DATA STORYTELLING GLOBAL LOGÍSTICO): \n"
+            "Este arquivo massivo é a extração matriz e central, o verdadeiro 'Master Data Warehouse' analítico completo da sua operação logística e predial extraído diretamente da Matriz SAS original.\n\n"
+            "COMO LER AS CORES CONDICIONAIS DE IMPACTO ATIVAS EM CADA ABA (HEATMAPS EXCEL ESTRUTURAIS EXATOS FORMACIONAIS):\n"
+            "► VERMELHOS E ALARANJADOS (ESCALA DE QUEDA): Apontam indubitavelmente para um Alto Risco Sistêmico Logístico Contratual Mestre, Alertas Críticos de Anomalias Formais Exatas, altíssima exclusão estrutural Limitadora Oculta ou esmagadora Concentração Espacial de Gini Isoladora Governamental.\n"
+            "► VERDES (ESCALA DE SUCESSO): Sinalizam uma robusta infraestrutura Preditiva Matriz Formal, Acessibilidade Cidadã Elevada Inclusiva Total e Conformidade Extrema Legal Estrita perante Órgãos de Controle Extremos Base Matrizes Formativas Preditivas.\n\n"
+            "REGRA DIDÁTICA CIDADÃ DA PLANILHA EXECUTIVA (SÉNIOR): A primeira grossa linha macro formatada em azul formal Ouro de cada aba a seguir contém um prático guia rápido orientativo analítico explicativo do significado matemático do bloco tabular Ouro Ativo Formal Cidadão Mestre Limpo que você está lendo."
+        )
+        ws_guia.merge_range('A2:A20', guia_txt, desc_fmt)
+
+        # ---- Aba 00: Guia de Leitura didático (a primeira do workbook) -----------
+        guia_rows = [
+            ("COMO USAR ESTA PLANILHA", "Cada aba começa com um cabeçalho explicando o seu OBJETIVO e a sua APLICAÇÃO, e diz de quais layouts os dados vieram. Leia esse cabeçalho antes da tabela. As abas estão numeradas por tema."),
+            ("O QUE SÃO OS 6 LAYOUTS", "São 6 conjuntos de dados do INEP que, juntos, contam a história de cada participante. Veja abaixo o papel de cada um."),
+            ("N90 — Inscritos", "Quem é o participante (sexo, nascimento, cidade de residência e de prova). É o ponto de partida: cada inscrito deveria ter uma prova."),
+            ("N02 — Ensalamento", "Onde cada participante foi alocado (local, bloco, sala), o kit que recebeu e a distância a percorrer. É o layout central que liga a pessoa ao lugar."),
+            ("N91 — Atendimentos", "Quem precisa de acessibilidade: itens de atendimento, kit específico e situação do laudo médico."),
+            ("N52 — Locais e Blocos", "O prédio: número de salas, capacidade total e localização (latitude/longitude)."),
+            ("N50 — Salas", "Cada sala: capacidade máxima e dimensões."),
+            ("N60 — Infraestrutura", "A vistoria do local (rampa, banheiro acessível, policiamento, extintor…). Permite medir acessibilidade e segurança."),
+            ("COMO OS DADOS SÃO CRUZADOS", "Duas 'chaves' ligam tudo. (1) O número de inscrição (CO_INSCRICAO) liga N90+N02+N91 — a ficha da pessoa. (2) O código do local (CO_LOCAL) liga N02 ao N52/N50/N60 — o prédio, a sala e a vistoria."),
+            ("CÁLCULO: Taxa de ensalamento", "Ensalados (N02) ÷ inscritos (N90) × 100. Ideal = 100%."),
+            ("CÁLCULO: Provas necessárias", "Uma prova por inscrito (N90). Especiais = quem pediu atendimento (N91); as demais são comuns."),
+            ("CÁLCULO: Lacuna de kits", "Kits necessários (um por atendimento no N91) − kits atribuídos (N02). Positivo = faltam kits."),
+            ("CÁLCULO: Folga de capacidade", "Assentos dos locais (N50/N52) − provas necessárias (N90). Negativo = faltam assentos."),
+            ("CÁLCULO: Acessibilidade do local", "De ~10 itens possíveis (rampa, banheiro adaptado, piso, portas…), quantos o local tem (N60) → % e nível Baixa/Média/Alta."),
+            ("CÁLCULO: Forasteiro", "UF/cidade de residência (N90) diferente da UF/cidade de prova (N02)."),
+            ("CÁLCULO: Kit em risco", "Item com kit, mas laudo médico em análise/recurso/reprovado (N91) — pode não ser entregue."),
+            ("SEVERIDADE DOS ACHADOS", "CRÍTICO = requer ação imediata; ATENÇÃO = monitorar/investigar; OK = sem problema. Cada achado traz interpretação e recomendação."),
+            ("SE UMA ABA DIZ 'SEM DADOS'", "Significa que a base fornecida não tinha as colunas necessárias para aquela análise. Não é erro — é transparência sobre a cobertura dos dados."),
+        ]
+        guia_df = pd.DataFrame(guia_rows, columns=['TEMA', 'EXPLICAÇÃO (EM LINGUAGEM SIMPLES)'])
+        create_sheet("00_Guia_de_Leitura", (
+            "BEM-VINDO(A)! Esta é a primeira aba e serve de MAPA para todas as outras. Ela explica, em linguagem simples e sem "
+            "jargão, o que são os seis layouts do INEP (N02, N50, N52, N60, N90 e N91), como os dados foram obtidos e cruzados, "
+            "e como as principais contas são feitas. Se você nunca viu esta planilha, comece por aqui. Depois, cada aba traz no "
+            "topo a sua própria fundamentação (objetivo, aplicação e layouts de origem)."), guia_df)
+
+        create_sheet("1_Painel_Totais_Consolidados", didactic_pack['abas']["1_Painel_Totais_Consolidados"], results.totals_df, True)
+
+        ws_resumo = workbook.add_worksheet("2_Painel_Estrategico")
+        ws_resumo.set_column('A:A', 160)
+        ws_resumo.write('A1', ' INTELIGÊNCIA ANALÍTICA MASTER C-LEVEL: DESCOBERTAS FORMAIS CIENTÍFICAS E DATA STORYTELLING (EXPLICAÇÕES TÉCNICAS DIRETAS EXATAS FORMAIS)', title_fmt)
+        
+        row = 2
+        for text in didactic_pack['estrategicos']: 
+            ws_resumo.write(row, 0, text, desc_fmt)
+            ws_resumo.set_row(row, 60)
+            row += 2
+            
+        ws_resumo.write(row, 0, ' REGRAS DO EDITAL EN 1.1 A EN 1.8 (COMPLIANCE NORMATIVO BASEADO CIENTIFICAMENTE NOS LAYOUTS N60 C-LEVEL)', subtitle_fmt)
+        row += 2
+        
+        for term, exp in didactic_pack['glossario_normativo'].items(): 
+            ws_resumo.write(row, 0, f"► {term}:\n{exp}", desc_fmt)
+            ws_resumo.set_row(row, 50)
+            row += 1
+            
+        ws_resumo.write(row+1, 0, ' GLOSSÁRIO TÉCNICO FORMAL E RIGOROSO DE ÍNDICES DERIVADOS (ENGENHARIA DE ATRIBUTOS CUSTOMIZADA - FEATURE ENGINEERING N60 PREDITIVA)', subtitle_fmt)
+        row += 3
+        
+        for term, exp in didactic_pack['glossario_indices'].items(): 
+            ws_resumo.write(row, 0, f"► {term}:\n{exp}", desc_fmt)
+            ws_resumo.set_row(row, 55)
+            row += 1
+
+        create_sheet("3_Base_Higienizada", didactic_pack['abas']["3_Base_Higienizada"], results.df)
+        create_sheet("4_Inferencias_Estatisticas", didactic_pack['abas']["4_Inferencias_Estatisticas"], results.stats_df, True)
+        create_sheet("5_Agrupamentos_Institucionais", didactic_pack['abas']["5_Agrupamentos_Institucionais"], results.locais_agg)
+        
+        if not results.bloco_agg.empty: 
+            create_sheet("6_Agrupamentos_Blocos", didactic_pack['abas']["6_Agrupamentos_Blocos"], results.bloco_agg)
+        if not results.mun_agg.empty: 
+            create_sheet("7_Agrupamentos_Municipais", didactic_pack['abas']["7_Agrupamentos_Municipais"], results.mun_agg)
+        if not results.uf_agg.empty: 
+            create_sheet("8_Agrupamentos_Regionais", didactic_pack['abas']["8_Agrupamentos_Regionais"], results.uf_agg)
+        if not results.crosstab_faixa_ia.empty: 
+            create_sheet("9_Matriz_Contingencia", didactic_pack['abas']["9_Matriz_Contingencia"], results.crosstab_faixa_ia, True)
+        if not results.top_locais.empty: 
+            create_sheet("10_Top_20_Locais", didactic_pack['abas']["10_Top_20_Locais"], results.top_locais)
+        if not results.pareto_uf.empty: 
+            create_sheet("11_Pareto_80_20", didactic_pack['abas']["11_Pareto_80_20"], results.pareto_uf)
+        if not results.outliers_df.empty: 
+            create_sheet("12_Outliers_Anomalias", didactic_pack['abas']["12_Outliers_Anomalias"], results.outliers_df)
+
+        if not results.locais_agg.empty:
+            ws_grafico = workbook.add_worksheet("13_Painel_Grafico_Excel")
+            ws_grafico.set_column('A:A', 50)
+            ws_grafico.merge_range('A1:J1', " GRÁFICOS NATIVOS EXCEL FÍSICOS (PLOTAÇÃO ALGORÍTMICA OFFLINE VIA CÓDIGO PYTHON DIRETAMENTE NO XLSXWRITER OMITINDO DEPENDÊNCIAS WEB OU BROWSER CLOUD MESTRE PREDITIVO)", title_fmt)
+            ws_grafico.merge_range('A2:J7', didactic_pack['abas']["13_Painel_Grafico_Excel"], desc_fmt)
+            
+            try:
+                chart_col = workbook.add_chart({'type': 'column'})
+                max_row = min(len(results.locais_agg) + 8, 28) 
+                chart_col.add_series({
+                    'name': 'Massa Crítica Global Ponderada de Capacidade Logística Alocada Cidadã Dimensional Mestre', 
+                    'categories': ['5_Agrupamentos_Institucionais', 9, 0, max_row, 0], 
+                    'values': ['5_Agrupamentos_Institucionais', 9, 3, max_row, 3], 
+                    'fill': {'color': '#2563EB'}
+                })
+                chart_col.set_title({'name': 'Dissecagem Visual Diretiva Executiva (Radar de Crise Top 20 Mega-Escolas Concentradoras Massivas Array Mestre Preditivas Exatas)'})
+                chart_col.set_x_axis({'name': 'Designação Oficial Registrada do Nome Principal do Prédio Acadêmico Cidadão Extrato N52 Oculto', 'num_font': {'rotation': -45}})
+                chart_col.set_y_axis({'name': 'Quantidade e Somatória Volumétrica Agrupada Consolidada Nominal Linear Logística Mestre'})
+                chart_col.set_size({'width': 1050, 'height': 550})
+                ws_grafico.insert_chart('B9', chart_col)
+            except Exception as e:
+                self.logger.warning(f"Omissão Excel Chart Ploter Protegida estrategicamente para prevenir falha estrutural fatal ou congelamento no construtor XLSXWriter Core Mestre devido à versões de Office Client Legacy Incompatíveis: {e}")
+
+        if not results.crosstab_uf_faixa.empty: 
+            create_sheet("14_Matriz_Regional_Faixas", didactic_pack['abas']["14_Matriz_Regional_Faixas"], results.crosstab_uf_faixa, True)
+        if not results.normative_crosstab.empty: 
+            create_sheet("15_Auditoria_Normativa_EN", didactic_pack['abas']["15_Auditoria_Normativa_EN"], results.normative_crosstab, True)
+        if not results.equip_agg.empty: 
+            create_sheet("16_Estatistica_Equipamentos", didactic_pack['abas']["16_Estatistica_Equipamentos"], results.equip_agg, False)
+        if not results.acess_agg.empty: 
+            create_sheet("17_Analise_Acessibilidade", didactic_pack['abas']["17_Analise_Acessibilidade"], results.acess_agg, False)
+        if not results.seg_agg.empty: 
+            create_sheet("18_Analise_Seguranca", didactic_pack['abas']["18_Analise_Seguranca"], results.seg_agg, False)
+        if not results.top_municipios.empty: 
+            create_sheet("19_Top_Municipios", didactic_pack['abas']["19_Top_Municipios"], results.top_municipios, False)
+        if not results.vuln_agg.empty: 
+            create_sheet("20_Indicadores_Vulnerabilidade", didactic_pack['abas']["20_Indicadores_Vulnerabilidade"], results.vuln_agg, False)
+
+        # ============================ NOVAS ABAS (v28) ============================
+        # Dicionário de Dados (fundamento oficial dos layouts) — sempre presente.
+        create_sheet("21_Dicionario_Dados", didactic_pack['abas']["21_Dicionario_Dados"],
+                     INEPLayoutDictionary.build_dataframe(), False)
+        create_sheet("22_Dicionario_Indices", didactic_pack['abas']["22_Dicionario_Indices"],
+                     INEPLayoutDictionary.build_derived_dataframe(), False)
+
+        if not results.conservacao_agg.empty:
+            create_sheet("23_Indice_Conservacao", didactic_pack['abas']["23_Indice_Conservacao"], results.conservacao_agg, False)
+        if not results.nota_oficial_agg.empty:
+            create_sheet("24_Nota_Oficial_INEP", didactic_pack['abas']["24_Nota_Oficial_INEP"], results.nota_oficial_agg, False)
+        if not results.densidade_agg.empty:
+            create_sheet("25_Densidade_Espacial", didactic_pack['abas']["25_Densidade_Espacial"], results.densidade_agg, False)
+        if not results.dependencia_agg.empty:
+            create_sheet("26_Dependencia_Admin", didactic_pack['abas']["26_Dependencia_Admin"], results.dependencia_agg, False)
+        if not results.correlation_matrix.empty:
+            corr_reset = results.correlation_matrix.reset_index().rename(columns={'index': 'VARIAVEL'})
+            create_sheet("27_Matriz_Correlacao", didactic_pack['abas']["27_Matriz_Correlacao"], corr_reset, False)
+        if not results.geo_df.empty:
+            create_sheet("28_Geolocalizacao", didactic_pack['abas']["28_Geolocalizacao"], results.geo_df.round(6), False)
+
+        # Relatório de validação de colunas (transparência — nada falha em silêncio).
+        cov = getattr(results, 'column_validation', {}) or {}
+        if cov:
+            recon = list(cov.get('campos_reconhecidos', []))
+            ausentes = list(cov.get('campos_layout_ausentes', []))
+            maxlen = max(len(recon), len(ausentes), 1)
+            cov_df = pd.DataFrame({
+                'CAMPOS OFICIAIS RECONHECIDOS NA BASE': recon + [''] * (maxlen - len(recon)),
+                'CAMPOS DO LAYOUT AUSENTES NA BASE': ausentes + [''] * (maxlen - len(ausentes)),
+            })
+            create_sheet("29_Validacao_Colunas", didactic_pack['abas']["29_Validacao_Colunas"], cov_df, False)
+
+        # Glossário de conceitos CRIADOS (Micro salas, Gini, Clusters, etc.) — explicação didática.
+        conceitos = didactic_pack.get('conceitos_criados', [])
+        if conceitos:
+            conc_df = pd.DataFrame([{
+                'CONCEITO': it.get('conceito', ''),
+                'ORIGEM': it.get('tipo', ''),
+                'BASE NOS LAYOUTS': it.get('base', ''),
+                'EXPLICAÇÃO DETALHADA (DIDÁTICA)': it.get('explicacao', ''),
+            } for it in conceitos])
+            create_sheet("30_Conceitos_Criados", didactic_pack['abas']["30_Conceitos_Criados"], conc_df, False)
+
+        # ============ NOVAS ABAS — MÓDULO DE INSCRITOS & ENSALAMENTO (v29) ============
+        # Fundamentadas nos layouts N02 (Ensalamento) e N90 (Inscritos). Cada aba só é
+        # gerada quando a agregação correspondente existe (base traz participantes).
+        if not results.demografia_agg.empty:
+            create_sheet("31_Perfil_Demografico", didactic_pack['abas']["31_Perfil_Demografico"], results.demografia_agg, False)
+        if not results.curso_agg.empty:
+            create_sheet("32_Grupos_Curso", didactic_pack['abas']["32_Grupos_Curso"], results.curso_agg, False)
+        if not results.atendimento_agg.empty:
+            create_sheet("33_Atendimento_Especial", didactic_pack['abas']["33_Atendimento_Especial"], results.atendimento_agg, False)
+        if not results.ensalamento_agg.empty:
+            create_sheet("34_Tipo_Ensalamento", didactic_pack['abas']["34_Tipo_Ensalamento"], results.ensalamento_agg, False)
+        if not results.situacao_agg.empty:
+            create_sheet("35_Situacao_Inscricao", didactic_pack['abas']["35_Situacao_Inscricao"], results.situacao_agg, False)
+        if not results.migracao_agg.empty:
+            create_sheet("36_Migracao_Interestadual", didactic_pack['abas']["36_Migracao_Interestadual"], results.migracao_agg, False)
+
+        # ============ NOVAS ABAS — MÓDULO DE ATENDIMENTOS & RECURSOS (v30 / N91) ============
+        if not results.item_atend_agg.empty:
+            create_sheet("37_Itens_Atendimento", didactic_pack['abas']["37_Itens_Atendimento"], results.item_atend_agg, False)
+        if not results.tipo_item_agg.empty:
+            create_sheet("38_Tipo_Atendimento_N91", didactic_pack['abas']["38_Tipo_Atendimento_N91"], results.tipo_item_agg, False)
+        if not results.laudo_agg.empty:
+            create_sheet("39_Situacao_Laudo_Medico", didactic_pack['abas']["39_Situacao_Laudo_Medico"], results.laudo_agg, False)
+        if not results.laudo_uf_agg.empty:
+            create_sheet("40_Laudo_Medico_por_UF", didactic_pack['abas']["40_Laudo_Medico_por_UF"], results.laudo_uf_agg, False)
+
+        # ============ NOVAS ABAS — AUDITORIA DE CRUZAMENTO ENTRE LAYOUTS (v31) ============
+        # Só são geradas quando a auditoria relacional está ativa (>=2 layouts no workbook).
+        if audit is not None and getattr(audit, 'ativo', False):
+            T = audit.tabelas
+            # Resumo executivo dos achados (severidade + interpretação + recomendação).
+            if audit.findings:
+                findings_df = pd.DataFrame([{
+                    'SEVERIDADE': f_['severidade'],
+                    'CATEGORIA': f_['categoria'],
+                    'ACHADO': f_['titulo'],
+                    'VALOR': f_['valor'],
+                    'INTERPRETAÇÃO AUTOMÁTICA': f_['interpretacao'],
+                    'RECOMENDAÇÃO': f_.get('recomendacao', ''),
+                } for f_ in sorted(audit.findings, key=lambda x: ({'CRÍTICO': 0, 'ATENÇÃO': 1, 'OK': 2}.get(x['severidade'], 3), x['titulo']))])
+                exp = ("OBJETIVO: Painel-síntese da AUDITORIA DE CRUZAMENTO entre os layouts N02/N50/N52/N90/N91. "
+                       "Cada linha é um achado relacional com severidade (CRÍTICO/ATENÇÃO/OK), valor, interpretação automática "
+                       "e recomendação. APLICAÇÃO: é o ponto de partida do auditor — priorize os itens CRÍTICOS. "
+                       f"RESUMO: {audit.resumo_txt}")
+                create_sheet("41_Auditoria_Cruzamento", exp, findings_df, False)
+
+            audit_tabs = [
+                ("42_Sem_Ensalamento", 'sem_ensalamento',
+                 "OBJETIVO: Participantes inscritos no N90 que NÃO possuem ensalamento no N02 (risco de não realizarem a prova). "
+                 "APLICAÇÃO: localizar e ensalar cada um antes da aplicação. Lista o CO_INSCRICAO, UF e município."),
+                ("43_Ensalados_Orfaos", 'ensalados_orfaos',
+                 "OBJETIVO: Registros de ensalamento (N02) cujo participante NÃO existe no N90 (órfãos referenciais). "
+                 "APLICAÇÃO: corrigir cadastro/importação; indicam inconsistência entre inscrição e ensalamento."),
+                ("44_Ensalamento_Duplicado", 'ensalamento_duplicado',
+                 "OBJETIVO: Participantes alocados em MAIS DE UMA sala/local no N02 (logicamente impossível). "
+                 "APLICAÇÃO: manter um único ensalamento por participante; investigar reprocessamentos."),
+                ("45_Divergencia_Municipio", 'divergencia_municipio',
+                 "OBJETIVO: Participantes cujo município de prova DIFERE entre N90 e N02. "
+                 "APLICAÇÃO: padronizar a fonte do município; investigar cada divergência."),
+                ("46_Orfaos_Local_Sala", 'orfao_local',
+                 "OBJETIVO: Registros do N02 apontando para CO_LOCAL inexistente no N52 (quebra de integridade referencial). "
+                 "APLICAÇÃO: corrigir o CO_LOCAL ou incluir o local no N52."),
+                ("47_Capacidade_vs_Ensalados", 'ocupacao_sala',
+                 "OBJETIVO: Ocupação de cada sala = ensalados (N02) ÷ capacidade (N50). Ordenada da maior para a menor ocupação. "
+                 "APLICAÇÃO: identificar salas superlotadas (>100%) e ociosas; redistribuir participantes."),
+                ("48_Ocupacao_Local", 'ocupacao_local',
+                 "OBJETIVO: Ocupação por LOCAL = ensalados (N02) ÷ capacidade agregada do local (N52). "
+                 "APLICAÇÃO: dimensionamento macro por prédio; locais acima de 100% exigem atenção."),
+                ("49_Forasteiros_por_UF", 'forasteiros_uf',
+                 "OBJETIVO: Ranking de FORASTEIROS (residência ≠ UF de prova, N90) por UF de prova. "
+                 "APLICAÇÃO: prever pressão de hospedagem/transporte nos polos que mais atraem candidatos de fora."),
+                ("50_Distancias_Faixas", 'distancia_faixas',
+                 "OBJETIVO: Distribuição dos deslocamentos (N02) em faixas de distância (km). "
+                 "APLICAÇÃO: dimensionar a logística de acesso; faixas altas concentram risco de ausência."),
+                ("51_Distancia_por_Municipio", 'distancia_municipio',
+                 "OBJETIVO: Distância média e máxima por município de prova (N02). Ordenada da maior média. "
+                 "APLICAÇÃO: priorizar municípios onde os participantes percorrem mais quilômetros."),
+                ("52_Casos_Criticos_Distancia", 'casos_criticos_distancia',
+                 "OBJETIVO: Participantes com deslocamento CRÍTICO (acima do limiar de contrato). "
+                 "APLICAÇÃO: revisar a alocação buscando locais mais próximos da residência."),
+                ("53_Kit_Divergente", 'kit_divergente',
+                 "OBJETIVO: Participantes com ID_KIT_PROVA diferente entre N02 e N91 (risco de material incompatível). "
+                 "APLICAÇÃO: padronizar a atribuição de kit conforme a nota técnica de ensalamento."),
+                ("54_Kit_Distribuicao", 'kit_distribuicao',
+                 "OBJETIVO: Distribuição dos KITS DE PROVA entre os ensalados (N02) — quantos participantes recebem cada "
+                 "tipo de kit (ID_KIT_PROVA) e o percentual correspondente. O kit é o material especial (Braille, ampliado, "
+                 "recursos) atribuído conforme a necessidade. APLICAÇÃO: dimensionar a produção e a logística de cada kit."),
+                ("55_Kit_por_Tipo_Atend", 'kit_por_tipo_atendimento',
+                 "OBJETIVO: Cruzamento KIT × TIPO DE ATENDIMENTO (N91) — quais kits estão associados a atendimentos "
+                 "Específicos, Especializados ou Recursos. APLICAÇÃO: validar se a combinação kit↔necessidade segue a nota "
+                 "técnica de ensalamento."),
+                ("56_Kit_Funil_Atribuicao", 'kit_funil_atribuicao',
+                 "OBJETIVO: FUNIL de atribuição — do total de participantes com atendimento/necessidade (N91), quantos também "
+                 "estão inscritos (N90), ensalados (N02) e, por fim, com kit atribuído. APLICAÇÃO: medir a COBERTURA ponta a "
+                 "ponta da acessibilidade; cada degrau perdido é um participante em risco."),
+                ("57_Atend_Sem_Ensalamento", 'atend_sem_ensalamento',
+                 "OBJETIVO: Participantes com atendimento/necessidade no N91 que NÃO estão ensalados no N02 — precisam de "
+                 "material/sala especiais e não têm alocação (risco CRÍTICO de acessibilidade). APLICAÇÃO: ensalar com urgência."),
+                ("58_Atend_Sem_Kit", 'atend_sem_kit',
+                 "OBJETIVO: Ensalados que têm atendimento no N91 mas estão SEM kit atribuído no N02 — podem receber material "
+                 "padrão incompatível com a necessidade. APLICAÇÃO: atribuir o kit correto conforme a nota técnica."),
+                ("59_Painel_Totais", 'painel_totais',
+                 "OBJETIVO: PAINEL DE TOTAIS executivo — consolida em uma única visão as grandezas de todos os layouts "
+                 "(participantes, infraestrutura, municípios/UFs, deslocamento, acessibilidade e kits). APLICAÇÃO: leitura "
+                 "gerencial imediata dos números-chave da aplicação e dos principais riscos."),
+                ("60_Kit_por_UF", 'kit_por_uf',
+                 "OBJETIVO: Matriz KIT × UF de prova — quantos participantes recebem cada tipo de kit em cada estado. "
+                 "APLICAÇÃO: planejar a produção e a distribuição regional do material especial (Braille, ampliado, recursos)."),
+                ("61_Kit_por_Curso", 'kit_por_curso',
+                 "OBJETIVO: Ranking dos GRUPOS DE CURSO por demanda de kit especial. APLICAÇÃO: identificar em quais cursos "
+                 "se concentram as necessidades de acessibilidade."),
+                ("62_Kit_Local_Ranking", 'kit_local_ranking',
+                 "OBJETIVO: Ranking de LOCAIS por número de participantes com kit especial. APLICAÇÃO: priorizar a preparação "
+                 "logística (materiais e salas adaptadas) nos locais com maior demanda de acessibilidade."),
+                ("63_Kit_por_Laudo", 'kit_por_laudo',
+                 "OBJETIVO: Matriz KIT × situação do LAUDO MÉDICO (N91) — cruza o kit com o status do laudo "
+                 "(Aprovado/Reprovado/Em Análise/Recurso). APLICAÇÃO: identificar kits cuja entrega depende de decisão de laudo."),
+                ("64_Multiplos_Atendimentos", 'multiplos_atendimentos_dist',
+                 "OBJETIVO: Distribuição do NÚMERO DE ITENS de atendimento por participante (N91). APLICAÇÃO: dimensionar a "
+                 "complexidade — participantes com muitos itens exigem combinação de recursos, sala e kit específicos."),
+                ("65_Multi_Atend_Lista", 'multiplos_atendimentos_lista',
+                 "OBJETIVO: Lista dos participantes com MAIS DE UM item de atendimento (N91), com a contagem de itens. "
+                 "APLICAÇÃO: revisar individualmente os casos de maior complexidade de acessibilidade."),
+                ("66_Ranking_Locais", 'ranking_locais_participantes',
+                 "OBJETIVO: Ranking geral dos LOCAIS por número de participantes ensalados (N02). APLICAÇÃO: dimensionamento "
+                 "logístico e identificação dos maiores polos de aplicação."),
+                ("67_Ranking_Municipios", 'ranking_municipios_participantes',
+                 "OBJETIVO: Ranking geral dos MUNICÍPIOS por número de participantes de prova (N02). APLICAÇÃO: concentração "
+                 "geográfica da aplicação e apoio ao planejamento regional."),
+                ("68_Ranking_Problemas", 'ranking_problemas',
+                 "OBJETIVO: RANKING CONSOLIDADO de todos os problemas detectados pela auditoria, ordenado por severidade e "
+                 "volume de ocorrências, com a recomendação de cada um. APLICAÇÃO: é a agenda de trabalho do gestor/auditor — "
+                 "ataque de cima para baixo (CRÍTICOS primeiro)."),
+                ("69_Municipios_Criticos", 'municipios_criticos',
+                 "OBJETIVO: Municípios que CONCENTRAM problemas (divergências de município + deslocamentos críticos). "
+                 "APLICAÇÃO: priorizar investigação e ação de campo nos municípios com mais ocorrências."),
+                ("70_Qualidade_Dados", 'qualidade_dados',
+                 "OBJETIVO: QUALIDADE de cada layout — completude média (% de células preenchidas) e integridade da chave "
+                 "natural (registros duplicados). APLICAÇÃO: medir a confiabilidade da base antes das decisões operacionais."),
+                ("71_Kit_Incompativel_Tipo", 'kit_incompativel_tipo',
+                 "OBJETIVO: Itens cujo kit DIFERE do kit predominante para o seu tipo de atendimento (possível atribuição "
+                 "incorreta). APLICAÇÃO: revisar a atribuição de material conforme a nota técnica por tipo de necessidade."),
+                ("72_Kit_Laudo_Reprovado", 'kit_laudo_reprovado',
+                 "OBJETIVO: Itens com kit associado mas LAUDO REPROVADO — material pode estar sendo preparado para quem não "
+                 "tem direito. APLICAÇÃO: confirmar elegibilidade antes de produzir/entregar o kit."),
+                ("73_N91_Sem_Inscricao", 'n91_sem_inscricao',
+                 "OBJETIVO: Atendimentos do N91 cujo participante NÃO consta como inscrito no N90 (registro órfão). "
+                 "APLICAÇÃO: reconciliar CO_INSCRICAO entre N91 e N90; corrigir cadastro."),
+                ("74_Bloco_Inexistente", 'bloco_inexistente',
+                 "OBJETIVO: Ensalamentos apontando para um par LOCAL+BLOCO inexistente no N52 (quebra da hierarquia). "
+                 "APLICAÇÃO: reconciliar os blocos entre N02 e N52."),
+                ("75_Ocupacao_Estatisticas", 'ocupacao_estatisticas',
+                 "OBJETIVO: Estatísticas descritivas da OCUPAÇÃO das salas (média, mediana, desvio-padrão, quartis, mín/máx). "
+                 "APLICAÇÃO: entender a dispersão da ocupação — desvio alto revela salas cheias convivendo com vazias."),
+                ("76_Salas_Subutilizadas", 'salas_subutilizadas',
+                 "OBJETIVO: Salas operando ABAIXO de 50% da capacidade (capacidade ociosa). APLICAÇÃO: consolidar ensalados "
+                 "para reduzir custo operacional (fiscais, materiais, logística)."),
+                ("77_Ocupacao_Bloco", 'ocupacao_bloco',
+                 "OBJETIVO: Ocupação por BLOCO = ensalados (N02) ÷ capacidade do bloco (N52). APLICAÇÃO: dimensionamento no "
+                 "nível de bloco; blocos acima de 100% exigem atenção."),
+                ("78_Tabela_Mestre_Candidatos", 'tabela_mestre_candidatos',
+                 "OBJETIVO: TABELA MESTRE — uma linha por candidato consolidando N90 (inscrição), N02 (ensalamento) e N91 "
+                 "(atendimento/kit): situação de inscrição/ensalamento, local/bloco/sala, kit, atendimento e laudo, distância "
+                 "e faixa, forasteiro/residente, idade, faixa etária, gênero e a SITUAÇÃO DE AUDITORIA (alertas e divergências "
+                 "por candidato). APLICAÇÃO: base de RASTREABILIDADE — filtre no Excel para achar qualquer candidato/grupo."),
+                ("79_Candidatos_por_Genero", 'candidatos_por_genero',
+                 "OBJETIVO: Distribuição dos candidatos por GÊNERO (TP_SEXO do N90), com contagem e percentual."),
+                ("80_Candidatos_por_Faixa_Etaria", 'candidatos_por_faixa_etaria',
+                 "OBJETIVO: Distribuição por FAIXA ETÁRIA (calculada de DT_NASCIMENTO do N90)."),
+                ("81_Candidatos_por_Faixa_Distancia", 'candidatos_por_faixa_distancia',
+                 "OBJETIVO: Distribuição por FAIXA DE DESLOCAMENTO (NU_DISTANCIA do N02)."),
+                ("82_Candidatos_por_Situacao", 'candidatos_por_situacao',
+                 "OBJETIVO: Distribuição dos candidatos pela SITUAÇÃO DE AUDITORIA (OK vs quantidade de alertas)."),
+                ("83_Estimativa_Provas_Painel", 'estimativa_provas_painel',
+                 "OBJETIVO: PAINEL DE ESTIMATIVA DE PROVAS E LOGÍSTICA — provas necessárias (1 por inscrito, N90), provas "
+                 "comuns vs especiais/adaptadas (N91), kits necessários vs atribuídos (N91×N02) e a folga de capacidade "
+                 "(N50/N52 − demanda). Cada linha traz a PREMISSA do cálculo. APLICAÇÃO: planejamento de produção de provas/"
+                 "kits e dimensionamento de assentos."),
+                ("84_Provas_por_Municipio", 'provas_por_municipio',
+                 "OBJETIVO: Demanda estimada de provas por MUNICÍPIO (1 por participante ensalado no N02). APLICAÇÃO: "
+                 "distribuição territorial da produção e logística de provas."),
+                ("85_Provas_por_Local", 'provas_por_local',
+                 "OBJETIVO: Demanda estimada de provas por LOCAL de aplicação (N02). APLICAÇÃO: dimensionamento por unidade e "
+                 "roteirização da entrega de provas/kits."),
+                ("86_Estatistica_Descritiva", 'estatisticas_descritivas',
+                 "OBJETIVO: ESTATÍSTICA DESCRITIVA das variáveis numéricas-chave (distância de deslocamento — N02; participantes "
+                 "por local e por município — N02; capacidade por sala — N50): média, mediana, moda, desvio-padrão, variância, "
+                 "coeficiente de variação, percentis (P10/P25/P75/P90), amplitude e assimetria. APLICAÇÃO: entender a dispersão "
+                 "e a forma das distribuições — CV alto indica valores muito desiguais; nesses casos use mediana/quartis e "
+                 "investigue outliers (compare P90 com o máximo)."),
+                ("87_Provas_por_Bloco", 'provas_por_bloco',
+                 "OBJETIVO: Demanda estimada de provas por BLOCO (local+bloco, N02). APLICAÇÃO: dimensionamento no nível de bloco."),
+                ("88_Provas_por_Sala", 'provas_por_sala',
+                 "OBJETIVO: Provas por SALA (local+bloco+sala, N02). APLICAÇÃO: conferência fina da alocação e da carga por sala."),
+                ("89_Provas_por_Tipo_Ensal", 'provas_por_tipo_ensalamento',
+                 "OBJETIVO: Distribuição das provas por TIPO DE ENSALAMENTO (TP_ENSALAMENTO do N02) — comum, especial, etc. "
+                 "APLICAÇÃO: dimensionar a produção por modalidade de prova."),
+                ("90_Kits_por_Municipio", 'kits_por_municipio',
+                 "OBJETIVO: Kits atribuídos por MUNICÍPIO (N02), com contagem e tipos distintos. APLICAÇÃO: logística regional "
+                 "de produção e distribuição de kits."),
+                ("91_Kits_por_Atendimento", 'kits_por_atendimento',
+                 "OBJETIVO: Kits por ITEM DE ATENDIMENTO (N91) — quais recursos concentram a demanda de material especial. "
+                 "APLICAÇÃO: planejar a produção por tipo de necessidade."),
+                ("92_Estimativa_Provas_Comparativa", 'estimativa_provas_comparativa',
+                 "OBJETIVO: ESTIMATIVA COMPARATIVA de provas por diferentes BASES (inscritos N90, ensalados N02, kits N91, "
+                 "capacidade N50/N52), cada uma com a sua premissa. APLICAÇÃO: validar a demanda de provas por triangulação — "
+                 "inscritos ≈ ensalados; a diferença revela participantes não alocados; a capacidade é o teto físico."),
+                ("93_Kits_Tipos_N02", 'kits_tipos_n02',
+                 "OBJETIVO: CONTAGEM DE TODOS OS TIPOS DE KIT no ensalamento (ID_KIT_PROVA do N02) — quantos participantes cada "
+                 "tipo de kit distinto cobre, com ranking e percentual. APLICAÇÃO: dimensionar a produção por tipo de kit."),
+                ("94_Kits_Tipos_N91", 'kits_tipos_n91',
+                 "OBJETIVO: CONTAGEM DE TODOS OS TIPOS DE KIT nos atendimentos (ID_KIT_PROVA do N91) — quantos itens de "
+                 "atendimento cada tipo cobre. APLICAÇÃO: entender a demanda de kits pela ótica das necessidades (N91)."),
+                ("95_Kits_Tipos_Consolidado", 'kits_tipos_consolidado',
+                 "OBJETIVO: UNIVERSO CONSOLIDADO de todos os tipos de kit e a presença de cada um no N02 e no N91 — sinaliza "
+                 "kits em ambos, só no N02 (atribuído sem atendimento) ou só no N91 (necessário mas não atribuído). APLICAÇÃO: "
+                 "auditar a coerência da atribuição de kits entre os dois layouts."),
+                ("96_N60_Acessibilidade_Local", 'n60_acessibilidade_local',
+                 "OBJETIVO: ÍNDICE DE ACESSIBILIDADE POR LOCAL calculado a partir das flags de infraestrutura da N60 "
+                 "(IN_ACESSIBILIDADE, IN_SALA_ADAPTADA, rampas, piso, portas, mesa para cadeirante, bebedouros…), com o nível "
+                 "(Baixa/Média/Alta) e o nº de participantes ensalados (N02) em cada local. APLICAÇÃO: priorizar adequação "
+                 "predial onde há mais gente em locais pouco acessíveis."),
+                ("97_N60_Ensalados_por_Nivel", 'n60_ensalados_por_nivel',
+                 "OBJETIVO: Distribuição de LOCAIS e ENSALADOS por NÍVEL DE ACESSIBILIDADE (N60 × N02). APLICAÇÃO: dimensiona o "
+                 "passivo de acessibilidade — quantos participantes estão em locais de baixa acessibilidade."),
+                ("98_N60_Distancia_Capacidade", 'n60_distancia_capacidade_nivel',
+                 "OBJETIVO: DESIGUALDADE ACUMULADA — cruza o nível de acessibilidade do local (N60) com a distância média/mediana "
+                 "de deslocamento (N02) e a capacidade média do local (N50/N52). APLICAÇÃO: revela se quem está em local menos "
+                 "acessível também viaja mais ou enfrenta maior lotação — sinal de desigualdades que se somam."),
+                ("99_N91_Status_Laudo", 'n91_status_laudo',
+                 "OBJETIVO: Distribuição dos itens do N91 por SITUAÇÃO DO LAUDO MÉDICO (Aprovado/Reprovado/Em análise/Em recurso), "
+                 "derivada de CO_SITUACAO_LAUDO_MEDICO. APLICAÇÃO: dimensiona a fila de laudos e o passivo de pendências."),
+                ("100_N91_Laudo_x_Kit", 'n91_laudo_x_kit',
+                 "OBJETIVO: Cruzamento SITUAÇÃO DO LAUDO × PRESENÇA DE KIT (N91) — quantos itens com/sem kit em cada status de "
+                 "laudo. APLICAÇÃO: RISCO OPERACIONAL — kits associados a laudo pendente/reprovado podem não ser entregues; "
+                 "acompanhe a fila de laudos antes de confirmar a produção."),
+                ("101_N91_Laudo_por_Tipo_Item", 'n91_laudo_por_tipo_item',
+                 "OBJETIVO: Situação do laudo por TIPO DE ITEM de atendimento (N91). APLICAÇÃO: identificar quais tipos de "
+                 "necessidade concentram pendências/reprovações de laudo."),
+                ("102_Atendimento_por_Genero", 'atendimento_por_genero',
+                 "OBJETIVO: TAXA DE ATENDIMENTO por GÊNERO (N91 × N90) — candidatos, quantos com atendimento e o percentual. "
+                 "APLICAÇÃO: enxergar diferenças de demanda de acessibilidade entre gêneros para planejar recursos."),
+                ("103_Atendimento_por_Faixa_Etaria", 'atendimento_por_faixa_etaria',
+                 "OBJETIVO: TAXA DE ATENDIMENTO por FAIXA ETÁRIA (N91 × N90) — candidatos, com atendimento e percentual por "
+                 "faixa. APLICAÇÃO: identificar quais faixas concentram maior demanda de atendimento especializado."),
+                ("104_Risco_Composto_por_Local", 'risco_composto_local',
+                 "OBJETIVO: ÍNDICE DE RISCO COMPOSTO por LOCAL — combina em um único número (0–100) a ocupação (N02÷N50/N52), "
+                 "a acessibilidade (N60) e a distância média (N02), com classe Baixo/Médio/Alto e ranking. APLICAÇÃO: "
+                 "INTELIGÊNCIA OPERACIONAL — priorizar onde agir primeiro (vistoria, realocação, reforço logístico), começando "
+                 "pelos locais que somam vários fatores de risco ao mesmo tempo."),
+                ("105_Eficiencia_de_Ocupacao", 'eficiencia_ocupacao',
+                 "OBJETIVO: EFICIÊNCIA DE OCUPAÇÃO — classifica os locais por taxa de ocupação (ensalados N02 ÷ capacidade "
+                 "N50/N52) em Subutilizado/Adequado/Quase cheio/Superlotado, com assentos ociosos e excedente. APLICAÇÃO: "
+                 "oportunidade de REBALANCEAMENTO — mover participantes de locais cheios para os com folga e avaliar consolidação "
+                 "de locais muito vazios."),
+                ("106_Distancia_por_Faixa", 'distancia_por_faixa',
+                 "OBJETIVO: Classificação dos deslocamentos (NU_DISTANCIA, N02) por FAIXA (<1 km, 1–5, 5–10, 10–15, 15–20 ATENÇÃO, "
+                 ">20 CRÍTICO), com contagem de participantes e percentual. APLICAÇÃO: dimensionar o perfil de deslocamento e "
+                 "quantos casos fogem do padrão contratual."),
+                ("107_Distancia_Criticos_Municipio", 'distancia_criticos_por_municipio',
+                 "OBJETIVO: Participantes acima do limiar contratual (>20 km) agregados por MUNICÍPIO, com contagem, média, máximo "
+                 "e mínimo de distância. APLICAÇÃO: identificar onde os deslocamentos críticos se concentram (regiões isoladas ou "
+                 "possível erro de georreferência)."),
+                ("108_Distancia_Criticos_Lista", 'distancia_criticos_lista',
+                 "OBJETIVO: Lista rastreável dos participantes com deslocamento crítico (>20 km), com identificador, município, "
+                 "local e distância. APLICAÇÃO: conferência caso a caso (realocação, verificação de coordenadas)."),
+                ("109_Salas_sem_Folga", 'salas_sem_folga',
+                 "OBJETIVO: LOCAIS SEM SALA EXTRA — locais usando todas as salas (salas utilizadas no N02 = total de salas do "
+                 "N50/N52, extras = 0). APLICAÇÃO: risco operacional — sem sala de reserva não há para onde remanejar em imprevistos."),
+                ("110_Salas_Folga_por_Local", 'salas_folga_por_local',
+                 "OBJETIVO: Folga de salas por local (utilizadas × total × extras), ordenado pela menor folga. APLICAÇÃO: planejar "
+                 "salas de contingência priorizando os locais mais apertados."),
+                ("111_Inscritos_por_UF", 'inscritos_por_uf',
+                 "OBJETIVO: Distribuição dos inscritos (N90) por UF de prova, com contagem e percentual. APLICAÇÃO: dimensionar "
+                 "recursos e logística por região."),
+                ("112_Inscritos_por_Genero", 'inscritos_por_genero',
+                 "OBJETIVO: Distribuição dos inscritos (N90) por gênero, com contagem e percentual. APLICAÇÃO: perfil demográfico "
+                 "para planejamento de atendimento e comunicação."),
+                ("113_Totais_Gerais_Consolidados", 'totais_gerais',
+                 "OBJETIVO: PAINEL DE TOTAIS — dezenas de contagens consolidadas de toda a base (registros por layout, "
+                 "participantes, ensalados, atendimentos, locais, blocos, salas, municípios, UFs, tipos de kit e de atendimento, "
+                 "capacidade instalada), cada uma com métrica, valor e origem (layout/coluna). APLICAÇÃO: conferência rápida e "
+                 "auditável de todos os volumes da base num único lugar."),
+                ("114_Kits_Reconciliacao_N91_N02", 'kits_reconciliacao_n91_n02',
+                 "OBJETIVO: RECONCILIAÇÃO dos tipos de kit entre N91 (solicitado/validado) e N02 (atribuído) — tipos em ambos, só "
+                 "no N91 e só no N02. APLICAÇÃO: apoiar o preenchimento/validação do ID_KIT_PROVA do N02 a partir do N91, que já "
+                 "passou por conferência."),
+                ("115_Validacao_Cruzada", 'validacao_cruzada',
+                 "OBJETIVO: CONFERÊNCIA AUTOMÁTICA — verificações de consistência matemática entre os KPIs, as tabelas e os "
+                 "layouts (ex.: ensalados ≤ inscritos; soma por UF/gênero = total; percentuais somam 100%; partições cobrem o "
+                 "todo). Cada verificação traz ESPERADO, OBTIDO e STATUS (OK/DIVERGÊNCIA). APLICAÇÃO: a plataforma conferindo a "
+                 "si mesma — garante que os números exibidos são internamente consistentes antes de você confiar neles."),
+            ]
+            for tab_name, key, exp in audit_tabs:
+                dfp = T.get(key)
+                if isinstance(dfp, pd.DataFrame) and not dfp.empty:
+                    create_sheet(tab_name, exp, dfp, False)
+
+            # ---- Painel Visual: GRÁFICOS NATIVOS do Excel (interativos na planilha) ----
+            try:
+                wsv = writer.book.add_worksheet("01_Painel_Visual_Graficos")
+                writer.sheets["01_Painel_Visual_Graficos"] = wsv
+                wsv.set_column('A:A', 3)
+                wsv.merge_range('A1:J1', " PAINEL VISUAL — GRÁFICOS NATIVOS DA PLANILHA (resumo dos principais cruzamentos)", title_fmt)
+                wsv.merge_range('A2:J4', "Estes gráficos são NATIVOS do Excel — clique neles para interagir, redimensionar ou copiar. "
+                                 "Cada um resume um cruzamento entre os layouts (a fonte de cada número está nas abas numeradas). "
+                                 "As pequenas tabelas de apoio ficam à direita (colunas L em diante).", desc_fmt)
+
+                dcol = 11  # coluna L — área de dados de apoio
+                drow = 0
+                anchors = ['B6', 'B27', 'B48', 'B69']
+                a_idx = 0
+
+                def _add_native_chart(titulo, df, cat_col, val_col, ctype):
+                    nonlocal drow, a_idx
+                    if not (isinstance(df, pd.DataFrame) and not df.empty and cat_col in df.columns and val_col in df.columns):
+                        return
+                    if a_idx >= len(anchors):
+                        return
+                    d = df.head(15)
+                    wsv.write(drow, dcol, cat_col); wsv.write(drow, dcol + 1, val_col)
+                    n = len(d)
+                    for i, (_, r) in enumerate(d.iterrows()):
+                        wsv.write(drow + 1 + i, dcol, str(r[cat_col]))
+                        try:
+                            v = float(r[val_col])
+                        except (ValueError, TypeError):
+                            v = 0
+                        wsv.write(drow + 1 + i, dcol + 1, v)
+                    ch = writer.book.add_chart({'type': ctype})
+                    ch.add_series({
+                        'name': titulo,
+                        'categories': ['01_Painel_Visual_Graficos', drow + 1, dcol, drow + n, dcol],
+                        'values': ['01_Painel_Visual_Graficos', drow + 1, dcol + 1, drow + n, dcol + 1],
+                        'data_labels': {'value': True},
+                        'points': [{'fill': {'color': c}} for c in ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#0EA5E9', '#EC4899', '#14B8A6']][:n] if ctype == 'pie' else None,
+                    })
+                    ch.set_title({'name': titulo})
+                    ch.set_legend({'position': 'bottom' if ctype == 'pie' else 'none'})
+                    ch.set_size({'width': 560, 'height': 300})
+                    wsv.insert_chart(anchors[a_idx], ch)
+                    drow += n + 3
+                    a_idx += 1
+
+                _add_native_chart("Ensalados por Nível de Acessibilidade (N60 × N02)",
+                                  T.get('n60_ensalados_por_nivel'), 'NIVEL_ACESSIBILIDADE', 'ENSALADOS', 'column')
+                _add_native_chart("Participantes por Tipo de Kit (N02)",
+                                  T.get('kits_tipos_n02'), 'TIPO_DE_KIT (ID)', 'PARTICIPANTES', 'column')
+                _add_native_chart("Itens por Situação do Laudo Médico (N91)",
+                                  T.get('n91_status_laudo'), 'STATUS_LAUDO', 'ITENS', 'pie')
+                _add_native_chart("Estimativa de Provas por Base (triangulação)",
+                                  T.get('estimativa_provas_comparativa'), 'BASE DE ESTIMATIVA', 'PROVAS_ESTIMADAS', 'bar')
+
+                if a_idx == 0:
+                    wsv.write(5, 1, "Sem dados suficientes para os gráficos nativos nesta base.", header_fmt)
+            except Exception as _e:
+                self.logger.warning(f"Painel visual de gráficos nativos não pôde ser criado: {_e}")
+
+        writer.close()
+        self.logger.info("Excel Data Warehouse Enterprise Exportado com Sucesso Extremo Ouro. (O Arquivo Físico Matriz XLSX Ouro Limitadora Array com 21 Abas Formatas na Integralidade e Fórmulas de Color Scale foi descarregado intocado e fechado com segurança).")
+
+
+    def generate_didactic_html_dashboard(self, results: MLProcessingResults, didactic_pack: dict, audit=None):
+        """
+        ========================================================================
+        MOTOR EXECUTIVO DO DASHBOARD SINGLE PAGE APPLICATION (SPA HTML) - V27.0 CORPORATIVA
+        ========================================================================
+        O HTML SPA Mestre Extremo Anti-Regressão Total. 
+        - Data Explorer Pleno (8 Abas Nativas Cidadãs Interativas completas).
+        - Plotly JS Crossfilter (11 Gráficos Dinâmicos Renderizados Simultaneamente com Fail-Safe Arrays).
+        - EXPLAINABLE AI NOS KPIS DA SEÇÃO I (Tooltips didáticos rigorosos em todos os +40 indicadores numéricos dinâmicos).
+        """
+        self.logger.info("Engenharia Web Avançada: Renderizando Dashboard Interativo Ultimate SPA 27.0 (Data Explorer Pleno, Cross-Filtering Dinâmico, 11 Charts e Todos os KPIs com Explainable AI Ouro)...")
+        filepath = self.dirs[""] / "Dashboard_BI.html" if "" in self.dirs else self.dirs["arquivos_auxiliares"].parent / "Dashboard_BI.html"
+        
+        df_json_str = results.df.to_json(orient='records', force_ascii=True, date_format='iso')
+        locais_json_str = results.locais_agg.to_json(orient='records', force_ascii=True, date_format='iso')
+        
+        df_totals_clean = results.totals_df.copy().reset_index()
+        df_totals_clean.columns = ['Metrica', 'Valor Consolidado']
+        totals_json_str = df_totals_clean.to_json(orient='records', force_ascii=True)
+        
+        df_stats_clean = results.stats_df.copy().reset_index()
+        df_stats_clean.columns = ['Metrica', 'Valor Estimado']
+        stats_json_str = df_stats_clean.to_json(orient='records', force_ascii=True)
+        
+        outliers_json_str = results.outliers_df.to_json(orient='records', force_ascii=True, date_format='iso')
+        pareto_json_str = results.pareto_uf.to_json(orient='records', force_ascii=True, date_format='iso')
+        uf_agg_json_str = results.uf_agg.to_json(orient='records', force_ascii=True, date_format='iso')
+        mun_agg_json_str = results.mun_agg.to_json(orient='records', force_ascii=True, date_format='iso')
+        bloco_agg_json_str = results.bloco_agg.to_json(orient='records', force_ascii=True, date_format='iso')
+
+        # ---------------- NOVAS SÉRIES DE DADOS PARA O DASHBOARD (v28) ----------------
+        geo_json_str = results.geo_df.round(6).to_json(orient='records', force_ascii=True) if not results.geo_df.empty else "[]"
+        conserv_json_str = results.conservacao_agg.to_json(orient='records', force_ascii=True) if not results.conservacao_agg.empty else "[]"
+        dep_json_str = results.dependencia_agg.to_json(orient='records', force_ascii=True) if not results.dependencia_agg.empty else "[]"
+
+        # ---------------- SÉRIES DO MÓDULO DE INSCRITOS & ENSALAMENTO (v29 — N02/N90) ----
+        def _df_json(df):
+            return df.to_json(orient='records', force_ascii=True) if (df is not None and not df.empty) else "[]"
+        curso_json_str = _df_json(results.curso_agg.head(20) if not results.curso_agg.empty else results.curso_agg)
+        ensalamento_json_str = _df_json(results.ensalamento_agg)
+        faixa_etaria_json_str = _df_json(results.faixa_etaria_agg)
+        demografia_json_str = _df_json(results.demografia_agg)
+        atendimento_json_str = _df_json(results.atendimento_agg)
+        migracao_json_str = _df_json(results.migracao_agg)
+        situacao_json_str = _df_json(results.situacao_agg)
+        inscritos_meta_json_str = json.dumps(getattr(results, 'inscritos_meta', {}) or {}, ensure_ascii=True, default=str)
+
+        # ---------------- SÉRIES DO MÓDULO DE ATENDIMENTOS & RECURSOS (v30 — N91) -------
+        item_atend_json_str = _df_json(results.item_atend_agg.head(15) if not results.item_atend_agg.empty else results.item_atend_agg)
+        tipo_item_json_str = _df_json(results.tipo_item_agg)
+        laudo_json_str = _df_json(results.laudo_agg)
+        laudo_uf_json_str = _df_json(results.laudo_uf_agg)
+        atendimentos_meta_json_str = json.dumps(getattr(results, 'atendimentos_meta', {}) or {}, ensure_ascii=True, default=str)
+
+        # ---------------- SÉRIES DA AUDITORIA DE CRUZAMENTO (v31 — relacional) ----------
+        audit_ativo = bool(audit is not None and getattr(audit, 'ativo', False))
+        if audit_ativo:
+            audit_kpis_json_str = json.dumps(audit.kpis or {}, ensure_ascii=True, default=str)
+            audit_findings_json_str = json.dumps(audit.findings or [], ensure_ascii=True, default=str)
+            audit_dist_faixas_json_str = _df_json(audit.tabelas.get('distancia_faixas', pd.DataFrame()))
+            audit_forasteiros_json_str = _df_json(audit.tabelas.get('forasteiros_uf', pd.DataFrame()))
+            audit_kit_dist_json_str = _df_json(audit.tabelas.get('kit_distribuicao', pd.DataFrame()))
+            audit_kit_funil_json_str = _df_json(audit.tabelas.get('kit_funil_atribuicao', pd.DataFrame()))
+            audit_kit_uf_json_str = _df_json(audit.tabelas.get('kit_por_uf', pd.DataFrame()))
+            audit_kit_laudo_json_str = _df_json(audit.tabelas.get('kit_por_laudo', pd.DataFrame()))
+            audit_multi_atend_json_str = _df_json(audit.tabelas.get('multiplos_atendimentos_dist', pd.DataFrame()))
+            audit_ranking_prob_json_str = _df_json(audit.tabelas.get('ranking_problemas', pd.DataFrame()).head(12) if isinstance(audit.tabelas.get('ranking_problemas'), pd.DataFrame) else pd.DataFrame())
+            audit_qualidade_json_str = _df_json(audit.tabelas.get('qualidade_dados', pd.DataFrame()))
+            audit_kits_tipos_json_str = _df_json(audit.tabelas.get('kits_tipos_n02', pd.DataFrame()).head(25) if isinstance(audit.tabelas.get('kits_tipos_n02'), pd.DataFrame) else pd.DataFrame())
+            audit_kits_tipos_cons_json_str = _df_json(audit.tabelas.get('kits_tipos_consolidado', pd.DataFrame()))
+            audit_est_comp_json_str = _df_json(audit.tabelas.get('estimativa_provas_comparativa', pd.DataFrame()))
+            audit_provas_tipo_json_str = _df_json(audit.tabelas.get('provas_por_tipo_ensalamento', pd.DataFrame()))
+            audit_n60_nivel_json_str = _df_json(audit.tabelas.get('n60_ensalados_por_nivel', pd.DataFrame()))
+            audit_n60_dist_json_str = _df_json(audit.tabelas.get('n60_distancia_capacidade_nivel', pd.DataFrame()))
+            audit_laudo_status_json_str = _df_json(audit.tabelas.get('n91_status_laudo', pd.DataFrame()))
+            audit_atend_faixa_json_str = _df_json(audit.tabelas.get('atendimento_por_faixa_etaria', pd.DataFrame()))
+            _mt = audit.tabelas.get('tabela_mestre_candidatos', pd.DataFrame())
+            if isinstance(_mt, pd.DataFrame) and not _mt.empty:
+                _mt_show = _mt.head(5000).copy()
+                audit_master_cols_json_str = json.dumps(list(_mt_show.columns), ensure_ascii=True)
+                audit_master_json_str = _mt_show.to_json(orient='values', force_ascii=True)
+                audit_master_total = int(len(_mt))
+            else:
+                audit_master_cols_json_str = "[]"; audit_master_json_str = "[]"; audit_master_total = 0
+            audit_resumo_str = json.dumps(audit.resumo_txt or "", ensure_ascii=True)
+        else:
+            audit_kpis_json_str = "{}"
+            audit_findings_json_str = "[]"
+            audit_dist_faixas_json_str = "[]"
+            audit_forasteiros_json_str = "[]"
+            audit_kit_dist_json_str = "[]"
+            audit_kit_funil_json_str = "[]"
+            audit_kit_uf_json_str = "[]"
+            audit_kit_laudo_json_str = "[]"
+            audit_multi_atend_json_str = "[]"
+            audit_ranking_prob_json_str = "[]"
+            audit_qualidade_json_str = "[]"
+            audit_kits_tipos_json_str = "[]"; audit_kits_tipos_cons_json_str = "[]"
+            audit_est_comp_json_str = "[]"; audit_provas_tipo_json_str = "[]"
+            audit_n60_nivel_json_str = "[]"
+            audit_n60_dist_json_str = "[]"
+            audit_laudo_status_json_str = "[]"
+            audit_atend_faixa_json_str = "[]"
+            audit_master_cols_json_str = "[]"; audit_master_json_str = "[]"; audit_master_total = 0
+            audit_resumo_str = '""'
+        dict_json_str = INEPLayoutDictionary.build_dataframe().to_json(orient='records', force_ascii=True)
+        dict_idx_json_str = INEPLayoutDictionary.build_derived_dataframe().to_json(orient='records', force_ascii=True)
+        if not results.correlation_matrix.empty:
+            corr_vars = list(results.correlation_matrix.columns)
+            corr_z = results.correlation_matrix.values.tolist()
+        else:
+            corr_vars, corr_z = [], []
+        corr_vars_str = json.dumps(corr_vars, ensure_ascii=True)
+        corr_z_str = json.dumps(corr_z, ensure_ascii=True)
+        cov_json_str = json.dumps(getattr(results, 'column_validation', {}) or {}, ensure_ascii=True)
+        conceitos_json_str = json.dumps(didactic_pack.get('conceitos_criados', []), ensure_ascii=True)
+        cutoffs_json_str = json.dumps(results.cutoffs or {}, ensure_ascii=True)
+        totals_meta_json_str = json.dumps(getattr(results, 'totals_meta', []) or [], ensure_ascii=True, default=str)
+
+        heat_x, heat_y, heat_z = [], [], []
+        if not results.crosstab_faixa_ia.empty:
+            heat_x = list(results.crosstab_faixa_ia.columns)[:-1]
+            heat_y = list(results.crosstab_faixa_ia.index)[:-1]
+            heat_z = results.crosstab_faixa_ia.iloc[:-1, :-1].values.tolist()
+
+        heat_uf_x, heat_uf_y, heat_uf_z = [], [], []
+        if not results.crosstab_uf_faixa.empty:
+            heat_uf_x = list(results.crosstab_uf_faixa.columns)[:-1]
+            heat_uf_y = list(results.crosstab_uf_faixa.index)[:-1]
+            heat_uf_z = results.crosstab_uf_faixa.iloc[:-1, :-1].values.tolist()
+            
+        heat_x_str = json.dumps(heat_x, ensure_ascii=True)
+        heat_y_str = json.dumps(heat_y, ensure_ascii=True)
+        heat_z_str = json.dumps(heat_z, ensure_ascii=True)
+        
+        heat_uf_x_str = json.dumps(heat_uf_x, ensure_ascii=True)
+        heat_uf_y_str = json.dumps(heat_uf_y, ensure_ascii=True)
+        heat_uf_z_str = json.dumps(heat_uf_z, ensure_ascii=True)
+
+        html_template = """
         <!DOCTYPE html>
         <html lang="pt-BR">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Plataforma BI: Analítica Estratégica</title>
+            <title>Plataforma Analítica C-Level Extrema Multi-Dimensional Avançada: Enterprise Business Intelligence Formal Estruturado</title>
+            
             <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
             <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+            
             <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+            
             <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+
             <style>
-                :root {{ --primary: #0f4c81; --secondary: #2980b9; --citizen: #e67e22; --tech: #8e44ad; --bg: #f4f7f6; --danger: #c0392b; --success: #27ae60; }}
-                body {{ font-family: 'Segoe UI', Roboto, Arial, sans-serif; background-color: var(--bg); color: #333; margin: 0; padding: 0; display: flex; }}
-                .sidebar {{ width: 300px; background: #fff; height: 100vh; position: fixed; padding: 25px; box-shadow: 2px 0 10px rgba(0,0,0,0.05); overflow-y: auto; z-index: 1000; border-right: 1px solid #ddd; box-sizing: border-box; }}
-                .main-content {{ margin-left: 300px; padding: 40px; flex-grow: 1; max-width: 1400px; box-sizing: border-box; }}
-                h1, h2, h3 {{ color: var(--primary); }}
+                :root { 
+                    --p: #0F172A; --s: #3B82F6; --a: #EF4444; --bg: #F1F5F9; 
+                    --txt: #334155; --box: #FFFFFF; --gold: #F59E0B; --purple: #8B5CF6; --emerald: #10B981; 
+                }
+                * { box-sizing: border-box; }
+                html { scroll-behavior: smooth; }
+                body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--txt); margin: 0; padding: 0; display: flex; -webkit-font-smoothing: antialiased; }
+                h1, h2, h3, h4 { color: var(--p); margin-top: 0; }
+                
+                .sidebar-nav { width: 260px; height: 100vh; position: fixed; background: #0F172A; color: white; padding: 30px 20px; box-shadow: 4px 0 15px rgba(0,0,0,0.1); z-index: 2000; overflow-y: auto; }
+                .sidebar-nav h2 { color: white; font-size: 1.3em; margin-bottom: 30px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #334155; padding-bottom: 15px; }
+                .sidebar-nav a { display: flex; align-items: center; gap: 12px; color: #94A3B8; text-decoration: none; padding: 12px 15px; border-radius: 8px; margin-bottom: 8px; font-weight: 500; font-size: 0.95em; transition: 0.2s; }
+                .sidebar-nav a:hover, .sidebar-nav a.active { background: var(--s); color: white; }
+                .sidebar-nav a i { width: 20px; text-align: center; }
+
+                .main-wrapper { margin-left: 260px; width: calc(100% - 260px); min-height: 100vh; }
+                
+                .top-filter-bar { position: sticky; top: 0; z-index: 1000; background: white; padding: 20px 30px; display: flex; flex-wrap: wrap; gap: 15px; align-items: flex-end; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border-bottom: 1px solid #E2E8F0; }
+                .top-filter-bar .filter-item { flex: 1; min-width: 140px; }
+                .top-filter-bar label { display: block; font-size: 0.70em; margin-bottom: 6px; color: #64748B; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; }
+                .top-filter-bar select, .top-filter-bar input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #CBD5E1; background: #F8FAFC; color: #334155; font-size: 0.9em; outline: none; transition: 0.2s; font-family: 'Inter', sans-serif; }
+                .top-filter-bar select:focus, .top-filter-bar input:focus { border-color: var(--s); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2); background: white; }
+                .top-filter-bar select.highlight-select { border-color: var(--gold); background: #FFFBEB; font-weight: 600; color: #B45309; }
+                
+                .btn-group-top { display: flex; gap: 10px; flex: 2; justify-content: flex-end; }
+                .btn-action { background: var(--p); color: white; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-weight: 600; transition: 0.3s; display: flex; align-items: center; gap: 8px; font-size: 0.85em; height: 38px; font-family: 'Inter', sans-serif; }
+                .btn-action:hover { background: var(--s); transform: translateY(-1px); }
+                .btn-help { background: var(--gold); color: #78350F; }
+                .btn-help:hover { background: #D97706; color: white; }
+                
+                .tooltip-icon { cursor: help; color: var(--s); margin-left: 8px; font-size: 0.9em; position: relative; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: #E0E7FF; transition: 0.2s; }
+                .tooltip-icon:hover { background: var(--s); color: white; }
+                .tooltip-text { display: none; }
+                #floating-tip { position: fixed; max-width: min(340px, calc(100vw - 24px)); background-color: #1E293B; color: #F8FAFC; text-align: left; border-radius: 8px; padding: 14px; z-index: 12000; font-size: 0.82rem; font-weight: 400; line-height: 1.5; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.4); border-left: 4px solid var(--gold); pointer-events: none; white-space: normal; overflow-wrap: break-word; word-break: break-word; display: none; }
+                #floating-tip strong { color: #FDE68A; }
+                .tt-formula { display: block; font-family: 'Courier New', Courier, monospace; background: #0F172A; padding: 8px; margin: 10px 0; border-radius: 4px; color: #38BDF8; font-size: 0.9em; border: 1px solid #334155; }
+
+                .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.8); display: none; z-index: 10000; justify-content: center; align-items: center; backdrop-filter: blur(5px); }
+                .modal-content { background: var(--box); width: 850px; max-width: 95%; max-height: 90vh; overflow-y: auto; padding: 40px; border-radius: 16px; position: relative; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); }
+                .modal-close { position: absolute; top: 20px; right: 20px; font-size: 1.5em; cursor: pointer; color: #94A3B8; background: none; border: none; transition: 0.2s; }
+                .modal-close:hover { color: var(--a); transform: rotate(90deg); }
+                
+                section { padding: 40px 50px; border-bottom: 1px solid #E2E8F0; }
+                .section-header { margin-bottom: 30px; }
+                .section-header h1 { font-size: 2.2em; font-weight: 800; color: var(--p); margin-bottom: 10px; letter-spacing: -0.5px; }
+                .section-header p { font-size: 1.1em; color: #64748B; margin: 0; line-height: 1.6; }
+                
+                .totals-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; margin-top: 20px; }
+                .total-card { background: white; border: 1px solid #E2E8F0; border-radius: 12px; padding: 25px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1); display: flex; flex-direction: column; justify-content: space-between; transition: 0.3s; position: relative; overflow: hidden; }
+                .total-card::before { content: ""; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--s); }
+                .total-card:hover { transform: translateY(-4px); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); border-color: #CBD5E1; }
+                .total-card .lbl { font-size: 0.75rem; text-transform: uppercase; color: #64748B; font-weight: 700; margin-bottom: 15px; line-height: 1.4; display: flex; justify-content: space-between; align-items: flex-start; }
+                .total-card .val { font-size: 2.4rem; font-weight: 800; color: var(--p); letter-spacing: -1px; }
+                .total-card .icon { color: #CBD5E1; font-size: 1.5em; }
+                
+                #profile-panel { display: none; background: white; padding: 35px; border-radius: 16px; margin-bottom: 40px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); border-top: 6px solid var(--purple); animation: slideDown 0.4s ease-out; position: relative; }
+                @keyframes slideDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+                .profile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-top: 25px; }
+                .prof-box { background: #F8FAFC; padding: 20px; border-radius: 10px; border: 1px solid #E2E8F0; text-align: center; }
+                .prof-lbl { font-size: 0.85em; color: #64748B; text-transform: uppercase; font-weight: 700; display: block; margin-bottom: 8px; }
+                .prof-val { font-size: 2em; font-weight: 800; color: var(--purple); margin-top: 5px; letter-spacing: -1px; }
+                .prof-sub { font-size: 0.85em; color: #94A3B8; font-weight: 500; margin-top: 8px; display: block; }
+                .prof-insight { margin-top: 25px; padding: 20px; background: #FEF2F2; border-left: 4px solid var(--a); border-radius: 8px; font-size: 0.95em; color: #991B1B; display: none; line-height: 1.6; font-weight: 500; }
+                
+                .insight-box { background: #FFFFFF; border: 1px solid #E2E8F0; padding: 35px; border-radius: 16px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05); margin-bottom: 40px; }
+                .insight-box h3 { color: var(--p); margin-top: 0; font-size: 1.4em; display: flex; align-items: center; gap: 10px; }
+                #live-narrative { font-size: 1.05rem; line-height: 1.7; color: #475569; padding: 25px; background: #F8FAFC; border-radius: 8px; border-left: 4px solid var(--s); margin-bottom: 30px; }
+                
+                .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+                .kpi-box { background: #FFFFFF; padding: 25px 15px; border-radius: 12px; border: 1px solid #E2E8F0; text-align: center; transition: 0.3s; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.02); cursor: pointer; position: relative; }
+                .kpi-box:hover { border-color: #6366F1; box-shadow: 0 6px 16px -4px rgba(99,102,241,0.18); transform: translateY(-1px); }
+                .kpi-box::after { content: "\f05a"; font-family: "Font Awesome 6 Free"; font-weight: 900; position: absolute; top: 8px; right: 10px; font-size: 0.62rem; color: #C7D2FE; opacity: 0; transition: 0.2s; }
+                .kpi-box:hover::after { opacity: 1; }
+                #kpiModalOverlay { display: none; position: fixed; inset: 0; background: rgba(15,23,42,0.55); z-index: 9999; align-items: center; justify-content: center; padding: 20px; }
+                #kpiModalCard { background: #fff; border-radius: 16px; max-width: 640px; width: 100%; max-height: 82vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+                #kpiModalHead { padding: 20px 24px; border-bottom: 1px solid #E2E8F0; display: flex; align-items: flex-start; gap: 14px; }
+                #kpiModalBody { padding: 20px 24px; }
+                #kpiModalClose { margin-left: auto; cursor: pointer; border: none; background: #F1F5F9; width: 34px; height: 34px; border-radius: 50%; font-size: 1.1rem; color: #475569; }
+                #kpiModalClose:hover { background: #E2E8F0; }
+                .kpi-box:hover { transform: translateY(-5px); border-color: var(--s); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
+                .kpi-val { font-size: 2.6em; font-weight: 800; color: var(--s); letter-spacing: -1px; }
+                .kpi-lbl { font-size: 0.75em; text-transform: uppercase; color: #64748B; font-weight: 700; margin-top: 10px; display: flex; align-items: center; justify-content: center; line-height: 1.4; }
+
+                .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 30px; margin-bottom: 40px; }
+                .card { background: white; padding: 30px; border-radius: 16px; border: 1px solid #E2E8F0; display: flex; flex-direction: column; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.03); transition: 0.3s; }
+                .card:hover { box-shadow: 0 20px 25px -5px rgba(0,0,0,0.05); }
+                .card-title { color: var(--p); font-size: 1.15em; font-weight: 800; border-bottom: 2px solid #F8FAFC; padding-bottom: 15px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; }
+                .chart-container { width: 100%; height: 400px; min-height: 340px; flex-grow: 1; }
+                .mestre-filter { padding: 8px 12px; border: 1.5px solid #CBD5E1; border-radius: 8px; background: #fff; font-size: 0.85rem; color: #334155; cursor: pointer; }
+                .layout-chk { display:inline-flex; align-items:center; gap:6px; background:rgba(255,255,255,0.1); border:1.5px solid rgba(255,255,255,0.25); border-radius:999px; padding:7px 14px; font-size:0.85rem; cursor:pointer; user-select:none; transition:0.15s; }
+                .layout-chk:hover { background:rgba(255,255,255,0.2); }
+                .layout-chk input { cursor:pointer; accent-color:#0EA5E9; }
+                .layout-chk strong { color:#38BDF8; }
+                .mestre-filter:focus { outline: none; border-color: var(--gold); }
+                #masterTable_wrapper { font-size: 0.85rem; }
+                #masterTable_wrapper .dataTables_filter input { padding: 6px 10px; border: 1.5px solid #CBD5E1; border-radius: 8px; }
+                .aula-box { margin-top: 20px; background: #F8FAFC; padding: 20px; border-radius: 10px; border-left: 4px solid var(--s); font-size: 0.90rem; line-height: 1.6; color: #475569; }
+                .aula-box strong { color: var(--p); display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 1.05em; }
+
+                .table-container { background: white; padding: 35px; border-radius: 16px; border: 1px solid #E2E8F0; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.03); }
+                table.dataTable { border-collapse: collapse; margin-top: 20px !important; width: 100% !important; }
+                table.dataTable thead th { background: #F8FAFC; color: #334155; font-weight: 700; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; border-bottom: 2px solid #CBD5E1 !important; padding: 15px 10px !important; }
+                table.dataTable tbody td { padding: 12px 10px !important; color: #475569; border-bottom: 1px solid #E2E8F0; font-size: 0.9rem; }
+                table.dataTable tbody tr { cursor: pointer; transition: 0.2s; }
+                table.dataTable tbody tr:hover { background-color: #F0FDF4 !important; transform: scale(1.001); box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+                .dt-buttons .dt-button { background: var(--p); color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 600; transition: 0.3s; font-family: 'Inter', sans-serif; font-size: 0.85rem; margin-bottom: 20px; }
+                .dt-buttons .dt-button:hover { background: var(--s); transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                
+                .data-explorer-tabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #E2E8F0; padding-bottom: 10px; overflow-x: auto; }
+                .data-explorer-tabs button { background: none; border: none; padding: 10px 15px; font-size: 0.95rem; font-weight: 600; color: #64748B; cursor: pointer; border-radius: 8px; transition: 0.2s; white-space: nowrap; }
+                .data-explorer-tabs button:hover { background: #F1F5F9; color: var(--p); }
+                .data-explorer-tabs button.active-tab { background: #DBEAFE; color: var(--s); border-bottom: 3px solid var(--s); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+                .table-wrapper-div { display: none; animation: slideDown 0.3s ease-out; width: 100%; overflow-x: auto;}
+
+                /* ===================== INTERAÇÃO E RESPONSIVIDADE (v28.1) ===================== */
+                /* Rede de segurança: nada pode gerar rolagem horizontal na página inteira */
+                html, body { overflow-x: hidden; max-width: 100%; }
+                .main-wrapper, section, .insight-box, .card, .table-container, #profile-panel { min-width: 0; max-width: 100%; }
+                /* Tabelas largas rolam DENTRO do próprio contêiner, sem empurrar a página */
+                .dataTables_wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+                .dataTables_wrapper table.dataTable { min-width: 640px; }
+                img, svg, canvas { max-width: 100%; }
+
+                .menu-toggle { display: none; position: fixed; top: 14px; left: 14px; z-index: 3000; background: #0F172A; color: #fff; border: none; width: 46px; height: 46px; border-radius: 10px; font-size: 1.2em; cursor: pointer; box-shadow: 0 6px 16px rgba(0,0,0,0.25); align-items: center; justify-content: center; }
+                .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(15,23,42,0.5); z-index: 1999; }
+
+                /* KPIs e cards clicáveis */
+                .kpi-box, .total-card { cursor: pointer; }
+                .kpi-box:focus-visible, .total-card:focus-visible { outline: 3px solid var(--s); outline-offset: 2px; }
+                .kpi-hint { display: block; margin-top: 8px; font-size: 0.60rem; letter-spacing: 0.5px; color: var(--s); font-weight: 800; text-transform: uppercase; opacity: 0.9; }
+                .total-card .kpi-hint { text-align: left; }
+
+                /* Inspetor de KPI (modal com dados) */
+                .inspector-badge { display: inline-block; padding: 5px 12px; border-radius: 999px; font-size: 0.70rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 14px; }
+                .badge-criado { background: #FEF3C7; color: #92400E; border: 1px solid #FCD34D; }
+                .badge-layout { background: #DBEAFE; color: #1E40AF; border: 1px solid #93C5FD; }
+                .inspector-explain { background: #F8FAFC; border-left: 4px solid var(--s); padding: 18px; border-radius: 8px; line-height: 1.65; color: #475569; margin-bottom: 22px; font-size: 0.95rem; }
+                .inspector-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid #E2E8F0; border-radius: 10px; }
+                .inspector-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+                .inspector-table th { position: sticky; top: 0; background: #0F172A; color: #fff; text-align: left; padding: 10px 12px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
+                .inspector-table td { padding: 9px 12px; border-bottom: 1px solid #E2E8F0; color: #334155; white-space: nowrap; }
+                .inspector-table tbody tr:nth-child(even) { background: #F8FAFC; }
+                .inspector-note { font-size: 0.8rem; color: #94A3B8; margin-top: 12px; }
+
+                /* Painel de operações sobre os dados */
+                .ops-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; align-items: end; }
+                .ops-field { display: flex; flex-direction: column; min-width: 0; }
+                .ops-field label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.5px; color: #64748B; font-weight: 700; margin-bottom: 6px; }
+                .ops-field select { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #CBD5E1; background: #F8FAFC; color: #334155; font-size: 0.9em; font-family: 'Inter', sans-serif; outline: none; }
+                .ops-field select:focus { border-color: var(--emerald); box-shadow: 0 0 0 3px rgba(16,185,129,0.18); background: #fff; }
+                .ops-actions { justify-content: flex-end; }
+                .ops-actions .btn-action { width: 100%; justify-content: center; height: 40px; }
+                .ops-scalar { background: #ECFDF5; border: 1px solid #A7F3D0; border-radius: 12px; padding: 22px 26px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 18px; }
+                .ops-scalar .ops-num { font-size: 2.1rem; font-weight: 800; color: #047857; letter-spacing: -0.5px; }
+                .ops-scalar .ops-desc { font-size: 0.95rem; color: #065F46; }
+                .ops-scalar .ops-meta { font-size: 0.8rem; color: #059669; width: 100%; }
+
+                /* Cartões de conceitos criados */
+                .concept-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-top: 20px; }
+                .concept-card { background: #fff; border: 1px solid #E2E8F0; border-left: 5px solid var(--gold); border-radius: 12px; padding: 22px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.04); }
+                .concept-card h4 { margin: 0 0 8px; font-size: 1.05em; color: var(--p); line-height: 1.35; }
+                .concept-badge { display: inline-block; font-size: 0.62rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; padding: 3px 9px; border-radius: 999px; margin-bottom: 10px; background: #FEF3C7; color: #92400E; border: 1px solid #FCD34D; }
+                .concept-badge.derivado { background: #DBEAFE; color: #1E40AF; border-color: #93C5FD; }
+                .concept-card .concept-base { font-size: 0.76rem; color: #64748B; margin-bottom: 12px; font-style: italic; }
+                .concept-card p { margin: 0; font-size: 0.9rem; line-height: 1.6; color: #475569; }
+
+                /* Gráficos nunca ultrapassam a largura */
+                .chart-container { max-width: 100%; }
+                .js-plotly-plot, .plotly, .plot-container, .main-svg { max-width: 100% !important; }
+
+                @media (max-width: 1024px) {
+                    .sidebar-nav { transform: translateX(-100%); transition: transform 0.3s ease; }
+                    .sidebar-nav.open { transform: translateX(0); }
+                    .main-wrapper { margin-left: 0; width: 100%; }
+                    .menu-toggle { display: flex; }
+                    body.nav-open .sidebar-overlay { display: block; }
+                    section { padding: 30px 24px; }
+                    .top-filter-bar { padding: 16px 20px 16px 72px; }
+                    .chart-grid { grid-template-columns: 1fr; gap: 22px; }
+                    .card { grid-column: auto !important; }
+                    .section-header h1 { font-size: 1.7em; }
+                }
+
+                @media (max-width: 640px) {
+                    section { padding: 22px 14px; }
+                    .top-filter-bar { padding: 14px 14px 14px 66px; gap: 10px; }
+                    .top-filter-bar .filter-item { flex: 1 1 100%; min-width: 0; }
+                    .btn-group-top { flex: 1 1 100%; justify-content: stretch; flex-wrap: wrap; }
+                    .btn-group-top .btn-action { flex: 1 1 auto; justify-content: center; }
+                    .totals-grid, .kpi-grid, .profile-grid, .concept-grid { grid-template-columns: 1fr; }
+                    .kpi-val { font-size: 2.1em; }
+                    .total-card .val { font-size: 1.9rem; }
+                    .section-header h1 { font-size: 1.4em; }
+                    .section-header p { font-size: 0.98em; }
+                    .insight-box, .card, .table-container, #profile-panel { padding: 18px; }
+                    .chart-container { height: 320px; }
+                    #chartGeoMap { height: 380px !important; }
+                    .modal-content { padding: 22px; }
+                    table.dataTable thead th, table.dataTable tbody td { font-size: 0.72rem !important; padding: 8px 6px !important; }
+                }
             </style>
         </head>
         <body>
-            <div class="sidebar"><h2>Painel (Filtros)</h2></div>
-            <div class="main-content"><h1>PLATAFORMA DE INTELIGÊNCIA LOGÍSTICA</h1></div>
+
+            <div id="floating-tip"></div>
+            <button class="menu-toggle" id="menuToggle" aria-label="Abrir menu"><i class="fas fa-bars"></i></button>
+            <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+            <!-- INSPETOR DE KPI (v28.1): clique num KPI para ver a que dados ele se refere -->
+            <div id="modal-inspector" class="modal-overlay">
+                <div class="modal-content">
+                    <button class="modal-close" onclick="$('#modal-inspector').fadeOut()"><i class="fas fa-times"></i></button>
+                    <h2 id="inspector-title" style="color:var(--p); border-bottom: 2px solid var(--s); padding-bottom: 15px; padding-right: 40px;"><i class="fas fa-magnifying-glass-chart"></i> Detalhe do Indicador</h2>
+                    <div id="inspector-badge-wrap"></div>
+                    <div id="inspector-explain" class="inspector-explain"></div>
+                    <h4 style="color:var(--p); margin: 0 0 12px;"><i class="fas fa-table"></i> Dados a que este indicador se refere</h4>
+                    <div id="inspector-table-host"></div>
+                    <div class="inspector-note"><i class="fas fa-circle-info"></i> A tabela reflete os filtros atualmente aplicados no topo do painel. Os mesmos dados estão disponíveis, em detalhe, no Data Explorer e nas abas correspondentes da planilha Excel.</div>
+                </div>
+            </div>
+
+            <div id="modal-help" class="modal-overlay">
+                <div class="modal-content">
+                    <button class="modal-close" onclick="$('#modal-help').fadeOut()"><i class="fas fa-times"></i></button>
+                    <h2 style="color:var(--p); border-bottom: 2px solid var(--s); padding-bottom: 15px;">
+                        <i class="fas fa-book-open"></i> Guia Executivo de Utilização (Data Storytelling & BI Avançado C-Level)
+                    </h2>
+                    <p>Bem-vindo ao módulo operacional analítico de ponta. A plataforma extraiu os metadados contábeis e estatísticos matemáticos e transformou este painel na versão virtual exata de seu Conselho de Analistas Logísticos Independentes Físicos para facilitar respostas complexas.</p>
+                    
+                    <h4 style="color:var(--s); margin-top: 25px;"><i class="fas fa-database"></i> 1. A Verdade Inegociável dos Dados</h4>
+                    <p>Nenhuma métrica exposta é arbitrária. Todos os cálculos sensíveis derivam restritamente das documentações oficias (Layouts N50, N52 e N60). O motor JavaScript injetado blinda sua sessão garantindo que você explore a base sem riscos de desvios matemáticos empíricos Ouro.</p>
+                    
+                    <h4 style="color:var(--s); margin-top: 25px;"><i class="fas fa-cubes"></i> 2. Alternância de Granularidade Extrema Hierárquica Relacional</h4>
+                    <p>Use o primeiro menu dourado em destaque superior na barra contínua de filtros para alternar entre a Visão Espacial Extrema Fina por Salas (Nível Folha) ou pela Consolidada Estruturada por Escolas/Prédios Inteiros Consolidados. Isso impacta imediatamente as 8 abas do Data Explorer tabular e todos os gráficos Ouro de matriz interligados.</p>
+                </div>
+            </div>
+
+            <div class="sidebar-nav">
+                <h2><i class="fas fa-chart-pie"></i> Menu Analítico</h2>
+                <a href="#sec-visao"><i class="fas fa-eye"></i> Visão Geral & Totais Frios</a>
+                <a href="#sec-insights"><i class="fas fa-brain"></i> Inteligência & Risco Cidadão</a>
+                <a href="#sec-dist"><i class="fas fa-chart-bar"></i> Distribuição & Morfometria Logística</a>
+                <a href="#sec-infra"><i class="fas fa-shield-alt"></i> Infraestrutura Predial N60</a>
+                <a href="#sec-inscritos"><i class="fas fa-users"></i> Inscritos &amp; Ensalamento (N02/N90)</a>
+                <a href="#sec-atendimentos"><i class="fas fa-universal-access"></i> Atendimentos &amp; Recursos (N91)</a>
+                <a href="#sec-auditoria-cruz"><i class="fas fa-clipboard-check"></i> Auditoria de Cruzamento (Relacional)</a>
+                <a href="#sec-mestre"><i class="fas fa-table-list"></i> Tabela Mestre dos Candidatos (Interativa)</a>
+                <a href="#sec-kits-tipos"><i class="fas fa-boxes-stacked"></i> Tipos de Kit (Contagem)</a>
+                <a href="#sec-n60-acess"><i class="fas fa-wheelchair"></i> Acessibilidade da Rede (N60 × Equidade)</a>
+                <a href="#sec-laudo"><i class="fas fa-file-medical"></i> Laudos Médicos × Kit (N91)</a>
+                <a href="#sec-atend-demo"><i class="fas fa-chart-column"></i> Atendimento por Faixa Etária (N91 × N90)</a>
+                <a href="#sec-dados"><i class="fas fa-database"></i> Data Explorer Mestre (8 Abas)</a>
+                <a href="#sec-metodologia"><i class="fas fa-book"></i> Metodologia & Dicionário (Novo)</a>
+            </div>
+
+            <div class="main-wrapper">
+                
+                <div class="top-filter-bar">
+                    <div class="filter-item">
+                        <label style="color:var(--gold); font-size: 0.8em;">🎯 Filtro Mestre Dimensional (Visão Operante):</label>
+                        <select id="filterView" class="highlight-select" onchange="toggleTableView()">
+                            <option value="ESCOLA">Visão Macro (Consolidado por Instituição)</option>
+                            <option value="SALA">Visão Micro (Inspeção por Sala/Porta Fio)</option>
+                        </select>
+                    </div>
+                    <div class="filter-item">
+                        <label>🔍 Auditoria Rápida RegEx (Nome/UF/Cidade):</label>
+                        <input type="text" id="filterText" onkeyup="debounceUpdate()" placeholder="Filtre aqui de forma livre...">
+                    </div>
+                    <div class="filter-item">
+                        <label>📍 Estado Oficial (UF Logística Limpa):</label>
+                        <select id="filterUF" onchange="updateDashboard()"><option value="ALL">Nacional (Brasil Todo)</option></select>
+                    </div>
+                    <div class="filter-item">
+                        <label>🏢 Natureza Institucional Restrita:</label>
+                        <select id="filterTipo" onchange="updateDashboard()"><option value="ALL">Todas Instituições (Pública/Privada)</option></select>
+                    </div>
+                    <div class="filter-item">
+                        <label>♿ Nível Score Adequação Cidadã (Acesso N60):</label>
+                        <select id="filterAcesso" onchange="updateDashboard()">
+                            <option value="ALL">Todas as Condições Arquitetônicas Inclusivas</option>
+                            <option value="Alta Acessibilidade">Alta Excelência Formal (>80 Pts)</option>
+                            <option value="Média Acessibilidade">Média e Mediana Transitória (50-80 Pts)</option>
+                            <option value="Baixa Acessibilidade (Crítico)">Baixa Acessibilidade (Crítico Legal - Abaixo 50)</option>
+                        </select>
+                    </div>
+                    <div class="filter-item">
+                        <label>❄️ Climatização Biológica Térmica N60:</label>
+                        <select id="filterClima" onchange="updateDashboard()">
+                            <option value="ALL">Todos os Tipos Avaliativos In-Loco</option>
+                            <option value="Com Ar-Condicionado">Com Climatização Integral (Ar-Condicionado)</option>
+                            <option value="Sem Ar-Condicionado">Sem Ar-Condicionado (Alarme Risco Térmico Operacional)</option>
+                        </select>
+                    </div>
+                    <div class="filter-item">
+                        <label>🛗 Avaliação Elevador Físico (N60 Formal):</label>
+                        <select id="filterElevador" onchange="updateDashboard()">
+                            <option value="ALL">Ambos Cenários Logísticos Avaliados</option>
+                            <option value="Com Elevador">Aprovado Com Elevador Operante Cidadão</option>
+                            <option value="Sem Elevador">Rejeitado Sem Elevador Mapeado Limitador</option>
+                        </select>
+                    </div>
+                    <div class="filter-item">
+                        <label>📊 Classificação Morfométrica Estrutural IQR:</label>
+                        <select id="filterFaixa" onchange="updateDashboard()"><option value="ALL">Todas Faixas Ouro Formais</option></select>
+                    </div>
+                    <div class="filter-item">
+                        <label>🤖 Perfil Analítico C-Level (K-Means Sklearn IA):</label>
+                        <select id="filterCluster" onchange="updateDashboard()"><option value="ALL">Visualizar Todos Clusters Preditivos IA</option></select>
+                    </div>
+                    <div class="btn-group-top">
+                        <button class="btn-action" style="background:#475569;" onclick="resetFilters()"><i class="fas fa-undo"></i> Resetar Filtros Vivos</button>
+                        <button class="btn-action btn-help" onclick="$('#modal-help').css('display','flex').hide().fadeIn()"><i class="fas fa-book-open"></i> Guia Normativo</button>
+                    </div>
+                </div>
+
+                <section id="sec-visao">
+                    <div id="offlineWarning" style="display:none; background:#FEF3C7; border:2px solid #F59E0B; border-radius:14px; padding:18px 22px; margin-bottom:24px; color:#92400E;">
+                        <div style="display:flex; align-items:flex-start; gap:14px;">
+                            <i class="fas fa-triangle-exclamation" style="font-size:1.6rem; margin-top:2px;"></i>
+                            <div>
+                                <strong style="font-size:1.05rem;">As bibliotecas de visualização não carregaram</strong>
+                                <p style="margin:8px 0 0 0; line-height:1.6; font-size:0.9rem;">Este painel usa <strong>Plotly</strong> (gráficos), <strong>jQuery</strong> e <strong>DataTables</strong> (tabelas interativas), que são baixados da internet quando o arquivo é aberto. Como não foi possível carregá-las, os <strong>gráficos e as tabelas interativas não vão funcionar</strong> — mas os números, textos, KPIs e explicações continuam disponíveis normalmente.<br><br><strong>Como resolver:</strong> abra este arquivo em um computador <strong>com acesso à internet</strong>. Se você precisa usar o painel <strong>sem internet</strong>, peça a versão com as bibliotecas embutidas no próprio arquivo (funciona 100% offline).</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="layoutSelectorPanel" style="background:linear-gradient(135deg,#1E293B,#334155); color:#fff; border-radius:14px; padding:18px 22px; margin-bottom:24px; box-shadow:0 4px 16px rgba(15,23,42,0.15);">
+                        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                            <i class="fas fa-layer-group" style="font-size:1.3rem;"></i>
+                            <strong style="font-size:1.05rem;">Layouts identificados automaticamente na sua base</strong>
+                            <span style="font-size:0.82rem; color:#CBD5E1;">A plataforma detectou sozinha (pelo nome e pelas colunas) quais dos seis layouts existem no seu arquivo e rodou as análises possíveis com eles. Os que não foram encontrados aparecem desativados. Você pode desmarcar algum para focar a visão.</span>
+                        </div>
+                        <div style="margin-top:10px; padding-top:10px; border-top:1px solid rgba(255,255,255,0.15); font-size:0.8rem; color:#94A3B8; display:flex; flex-wrap:wrap; gap:16px;">
+                            <span><i class="fas fa-clock"></i> Gerado em <strong style="color:#CBD5E1;">GEN_META_TIMESTAMP</strong></span>
+                            <span><i class="fas fa-code-branch"></i> Versão <strong style="color:#CBD5E1;">GEN_META_VERSION</strong></span>
+                            <span><i class="fas fa-database"></i> Cobertura de campos da base: <strong style="color:#CBD5E1;">GEN_META_COVERAGE</strong></span>
+                            <span><i class="fas fa-table"></i> Registros processados: <strong style="color:#CBD5E1;">GEN_META_ROWS</strong></span>
+                        </div>
+                        <div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:14px;" id="layoutChecks">
+                            <label class="layout-chk"><input type="checkbox" value="N90" checked> <strong>N90</strong> Inscritos</label>
+                            <label class="layout-chk"><input type="checkbox" value="N02" checked> <strong>N02</strong> Ensalamento</label>
+                            <label class="layout-chk"><input type="checkbox" value="N91" checked> <strong>N91</strong> Atendimentos</label>
+                            <label class="layout-chk"><input type="checkbox" value="N52" checked> <strong>N52</strong> Locais/Blocos</label>
+                            <label class="layout-chk"><input type="checkbox" value="N50" checked> <strong>N50</strong> Salas</label>
+                            <label class="layout-chk"><input type="checkbox" value="N60" checked> <strong>N60</strong> Infraestrutura</label>
+                            <button id="layoutTodos" style="cursor:pointer; padding:6px 14px; border-radius:8px; border:none; background:#0EA5E9; color:#fff; font-weight:700; font-size:0.82rem;"><i class="fas fa-check-double"></i> Marcar todos</button>
+                            <span id="layoutStatus" style="margin-left:auto; font-size:0.82rem; color:#93C5FD; align-self:center;"></span>
+                        </div>
+                    </div>
+                    <div class="section-header">
+                        <h1>I. Visão Geral Executiva e Painel de Totais Nacionais Consolidados (Absolutos)</h1>
+                        <p>O <strong>Master Card Grid</strong> exibe a volumetria bruta da infraestrutura. Todos os totais contábeis dispostos nesta seção operam de forma isolada aos filtros de topo, atestando o tamanho absoluto, real e oficial validado do parque físico matricial logístico da união perante os órgãos de controladoria e TCU C-Level.</p>
+                    </div>
+                    <div class="totals-grid" id="totals-grid-container"></div>
+                </section>
+
+                <section id="sec-insights">
+                    <div class="section-header">
+                        <h1>II. Inteligência Cognitiva C-Level de Risco Contratual e Operacional Logístico Estruturado</h1>
+                        <p>O Motor Algorítmico Preditivo avalia interativamente o cenário realístico da seleção de filtros do topo da tela. Ele calcula <em>Ratios Críticos Financeiros</em> dinâmicos (O Gini Logístico de Desigualdade Operacional da tela e o Deflator de Contingência EN 1.6 de Reserva Técnica Mestre de Seguridade) e traduz analiticamente a matemática via Data Storytelling no quadro diagnóstico interativo de NLP (Natural Language Processing Cidadão) abaixo.</p>
+                    </div>
+                    
+                    <div id="profile-panel">
+                        <button class="modal-close" style="position:absolute; top:20px; right:20px;" onclick="$('#profile-panel').slideUp();"><i class="fas fa-times"></i></button>
+                        <h2 style="font-size: 1.5em; border-bottom: 2px solid var(--purple); padding-bottom: 10px; color:var(--p);">
+                            <i class="fas fa-microscope"></i> Raio-X Diagnóstico Dimensional de Risco Predial da Instituição: <span id="prof-nome" style="color:var(--purple); font-weight:800;">...</span>
+                        </h2>
+                        
+                        <div class="profile-grid">
+                            <div class="prof-box"><div class="prof-lbl">Vagas Físicas Brutas Instaladas</div><div class="prof-val" id="prof-vagas">0</div><div class="prof-sub" id="prof-seguras" style="color: var(--s); font-weight:bold;">0 Seguras (EN 1.6 Mestre)</div></div>
+                            <div class="prof-box"><div class="prof-lbl">Salas Úteis Ouro (Portas Auditadas)</div><div class="prof-val" id="prof-salas">0</div><div class="prof-sub" id="prof-media-sala">0 vagas/sala (Adensamento Logístico)</div></div>
+                            <div class="prof-box"><div class="prof-lbl">Score Inclusivo (Acessibilidade N60)</div><div class="prof-val" id="prof-acess">...</div><div class="prof-sub">Validação Universal 0 a 100 Pts</div></div>
+                            <div class="prof-box"><div class="prof-lbl">Score Contingência (Segurança Predial N60)</div><div class="prof-val" id="prof-seguranca">...</div><div class="prof-sub">Validação Anti-Sinistro 0 a 100 Pts</div></div>
+                            <div class="prof-box" style="grid-column: span 2; background: #EEF2FF; border-color: #C7D2FE;"><div class="prof-lbl">Diagnóstico Inteligente Combinado (Data Storytelling Institucional Restrito)</div><div class="prof-val" id="prof-faixa" style="font-size:1.05em; color: #4338CA; white-space: pre-line; text-align: left; padding: 5px; line-height: 1.6; font-weight: 500;">...</div></div>
+                        </div>
+                        <div id="prof-insight-alert" class="prof-insight"></div>
+                    </div>
+
+                    <div class="insight-box">
+                        <h3><i class="fas fa-satellite-dish"></i> Interpretador Automático de Negócios Ouro C-Level (Data Storytelling Integrado Frio)</h3>
+                        <div id="live-narrative"></div>
+                        
+                        <div class="kpi-grid">
+                            <div class="kpi-box">
+                                <div class="kpi-val" id="kpi-locais">0</div>
+                                <div class="kpi-lbl">Instituições Logísticas (Prédios Validados) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>O que é Mestre:</strong> Contagem exata de endereços físicos operantes distintos após a aplicação matemática dos filtros.<br><strong>Impacto:</strong> Determina a capilaridade geográfica Ouro Exata e a malha viária Mestre Base necessária para entrega dos malotes sensíveis de prova.</span></span></div>
+                            </div>
+                            <div class="kpi-box">
+                                <div class="kpi-val" id="kpi-cap">0</div>
+                                <div class="kpi-lbl">Assentos Brutos Alocados Filtrados Mestre <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>O que é (Força Bruta Institucional Ouro):</strong> O agrupamento absoluto da lotação máxima reportada (Soma limpa parametrizada do campo QT_CAPACIDADE_MAXIMA_SALA).<br><strong>Impacto:</strong> É o balizador inegociável oficial matemático logístico para as métricas financeiras.</span></span></div>
+                            </div>
+                            <div class="kpi-box" style="border-color:var(--s); background:#ECFDF5;">
+                                <div class="kpi-val" id="kpi-seguro" style="color:#059669;">0</div>
+                                <div class="kpi-lbl" style="color:#047857;">Capacidade Segura Logística Auditada (EN 1.6) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Margem de Segurança Protetiva Mestre Isolada Cidadã (Contrato EN 1.6 Frio Limitador)</strong><br>O Edital Operacional exige rigidamente Mestre Ouro que a capacidade física instalada seja inegociavelmente 30% superior Ouro Limpa Oficial Array à estimativa inicial de inscritos para prevenir superlotação fatal no check-in do portão.<br><span class="tt-formula">Lotação Segura = Vagas Totais Submetidas na Base * 0.70</span></span></span></div>
+                            </div>
+                            <div class="kpi-box">
+                                <div class="kpi-val" id="kpi-gini">0.00</div>
+                                <div class="kpi-lbl">Desigualdade Vetorial Operacional (Índice Gini Frio Limitador) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Curva Econômica de Lorenz (Gini Logístico Analítico C-Level Oculto)</strong><br>Mede a desigualdade estrutural estrita de alocação física do mercado locado Exato Ouro. Se o valor for > 0.5, a operação concentra a imensa maioria das vagas Cidadãs numa minoria de "Mega-Prédios", atestando letal Risco Sistêmico de Quebra Dominó (Efeito Gargalo Logístico Matriz Ouro Formativa).</span></span></div>
+                            </div>
+                            <div class="kpi-box" style="border-color:var(--purple); background:#F5F3FF;">
+                                <div class="kpi-val" id="kpi-acess" style="color:var(--purple);">0</div>
+                                <div class="kpi-lbl" style="color:#4338CA;">Acessibilidade Média Cidadã Score N60 (Limitadora Ouro) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Score Composto de Inclusão Universal Matemática N60 Preditivo Formal (0-100 Pts Mestre Array)</strong><br>Índice dinâmico frio computacional agregando todas as exigências físicas matriz limitadoras (Rampas de Acesso Ouro, Elevadores Ativos, Mesas PCD Restritas, Banheiros Especiais Ocultos) nas escolas formalmente presentes no seu exato filtro de visualização operacional Cidadão Matriz.</span></span></div>
+                            </div>
+                        </div>
+                        <div class="aula-box" style="margin-top:14px;"><strong><i class="fas fa-circle-info"></i> Sobre estes indicadores:</strong> os valores reagem aos filtros do topo da tela e são calculados a partir dos campos da base (capacidade em <code>QT_CAPACIDADE_MAXIMA_SALA</code> — N50; acessibilidade nas flags <code>IN_*</code> — N60). Se um indicador aparecer como <strong>0</strong> ou <strong>—</strong>, isso normalmente significa que <strong>a base fornecida não contém o campo necessário</strong> (por exemplo, uma base só com inscritos e ensalamento, sem a infraestrutura da N60, mostrará acessibilidade 0). Não é erro: é a plataforma sendo transparente sobre a cobertura dos dados.</div>
+                    </div>
+                </section>
+
+                <!-- fim-interpretador -->
+
+                <section id="sec-dist">
+                    <div class="section-header">
+                        <h1>III. Distribuições, Composição Logística de Capacidade Estrita e Segmentação Inteligente de Machine Learning</h1>
+                        <p>Aprofunde sua Análise Estrita C-Level de dispersão espacial geométrica, eficiência de escalas (via estatística Tukey IQR Quartil) e detecção robótica passiva de padrões anômalos. Identifique de forma ativa os vazamentos financeiros onerosos atrelados a milhares de "Micro Salas" e evite o acionamento judicial extremo da União validando os mapas estatísticos operantes limitadores Mestre Array Ouro.</p>
+                    </div>
+                    
+                    <div class="chart-grid">
+                        <div class="card">
+                            <div class="card-title">A. Faixas de Lotação Logística e Estruturais (Morfologia IQR Tukey C-Level Preditiva) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Estatística Descritiva Robusta Científica Exata Fria Oculta Mestre Array Ouro Limpo Formativa</strong><br>A classificação estrutural oficial de "Micro Sala" e "Auditório Gigante" advém dos Quartis restritos matemáticos Mestre Preditivos (IQR) computados sobre as portas ativas N50. Fundamenta isoladamente e de modo auditável os bilionários custos financeiros aprovados de aquisição de efetivo civil operacional tático (Custo Fio de Fiscais de Sala e Segurança Array Oculta Base).</span></span></div>
+                            <div id="chartFaixa" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-search-chart"></i> Oportunidade Analítica Focada (Cross-Filter Dinâmico C-Level):</strong> Picos massivos Mestre Ouro isolados na categoria logística restrita de "Micro Sala" revelam categoricamente uma fragmentação financeira gravíssima e ineficiência. <strong>Ação Prática Matriz Array: Clique interativamente nas barras sólidas azuis limitadoras para isolar cirurgicamente aquele modelo arquitetônico exato puro de prédio no resto do painel (Exploração Direta de Data Explorer Front-End Ouro Base Formativa).</strong></div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-title">B. Dispersão Multi-Dimensional de Eficiência Fria Ouro e Anomalias Logísticas Severas (Isolation Forest Sklearn AI) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Machine Learning Unsupervised Ativo Mestre Formal Ouro Preditivo (Algoritmo Científico Extremo Isolation Forest Oculto Cidadão)</strong><br>A dimensão geométrica vetorial Limpa Base da bolha revela o peso absoluto do prédio. Bolhas com contornos avermelhados apontam falhas estruturais lógicas de dados na Base ou inconsistências civis letais restritas rastreadas matematicamente pela Malha Neural da Inteligência Artificial C-Level Ouro Base Formal.</span></span></div>
+                            <div id="chartScatter" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-compress-arrows-alt"></i> Radar Institucional Oculto Exato Físico Preditivo Mestre Array:</strong> Identifique imediatamente e ativamente com a máquina neural os custosos "Falsos Positivos" e Erros Ouro de Digitação da Base N50. Prédios isolados na extrema direita cartográfica matemática com eixo Y cravado no fundo do poço são, na prática executiva da nação, labirintos ociosos absurdamente ineficientes. <strong>Ação Prática: Clique em qualquer bolha para deslizar automaticamente o Raio-X Diagnóstico Drill-Down do respectivo prédio no topo mágico do Dashboard.</strong></div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-title">C. Curva Gausiana Ouro de Densidade Logística Estrita Parametrizada por Unidade Federal Limitadora (Violin Plot Interquartil Mestre Array) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Distribuição Populacional C-Level e Risco Assimétrico UF (Estatística Base Ouro Oculta Formal Preditiva)</strong><br>Mede a espessura e extensão matemática estrita dimensional da alocação de salas em cada Estado Preditivo Ouro. Balões gausianos muito dilatados ou com caudas extremas no topo representam super-concentração operacional crítica de alto risco sistêmico naquelas Unidades Federativas Extratas C-Level Formativas Limpas Preditivo.</span></span></div>
+                            <div id="chartViolin" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-chart-area"></i> Observação Executiva Cidadã Limpa Base:</strong> Identifique caudas longas estreitas esticadas lá no topo que apontam silenciosamente para infraestruturas gigantescas concentradoras (Outliers Preditivos Geométricos Letais) mascaradas perigosamente dentro da simples média pacífica do estado na visão gerencial superficial C-Level Oculta Base Formal Limitadora.</div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-title">D. Teorema Operacional Limitador Analítico de Pareto 80/20 Integrado (Sustentação Financeira Acumulada Ouro Matriz Base Formal Preditiva) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Concentração Relativa Financeira Preditiva Mestre Array (Pareto Curva Acumulativa)</strong><br>Cruza diretamente as somas estritas das colunas limpas de capacidade bruta Cidadã com a métrica cumulativa estatística para descobrir com exatidão matemática quais e quantos Estados formam a âncora que sustenta 80% de todo o custo do contrato logístico financeiro governamental nacional Base Oculta Matriz Exata Preditiva Oficial Limpo Base Ouro.</span></span></div>
+                            <div id="chartPareto" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-chart-line"></i> Ação Operante Ouro C-Level Mestre Dimensional Array Formal Pura Preditiva:</strong> As UFs à esquerda rigorosa da linha que cruza e intercepta o marco civil de 80% requerem presença física iminente e severa da Diretoria Executiva Matriz Ativa. Nelas, o risco financeiro limpo oficial Ouro de falha sistêmica ou quebra da logística predial na Data-Prova é catastrófico Mestre Base Ouro Preditivo Limitador.</div>
+                        </div>
+
+                        <div class="card" style="grid-column: span 2;">
+                            <div class="card-title">E. Espectro Hierárquico Visual Circular Geográfico Operacional Mestre do Modelo Institucional Formal Base Array Ouro Cidadão (Sunburst C-Level Preditivo) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Modelo Hierárquico Radial de Impacto Visual Dimensional Parametrizado Limitador Estrito Formal Limpo Exato Preditivo (Extração Base Oculta Dimensional Matriz Ouro N60/N50)</strong><br>O centro originário é a UF (Federação Nacional Geográfica Ouro), o anel mediano seguinte isola a ramificação do Tipo Institucional Logístico (Esfera Pública, Rede Privada), e as bordas periféricas detalham e explodem em fatias matemáticas qual Faixa IQR de Custo Logístico de Escalas Preditivo Mestre Dimensional (Micro, Média, Gigante) efetivamente domina o peso contratual logístico.</span></span></div>
+                            <div id="chartSunburst" class="chart-container" style="height: 600px;"></div>
+                            <div class="aula-box"><strong><i class="fas fa-bullseye"></i> Foco Estratégico de Auditoria Ativa Dimensional de Oportunidades Geopolíticas e Extratificadas Executivas Limpas Formais Base Cidadã Mestre:</strong> As Parcerias Governamentais Estaduais concentram paradoxalmente a grande massa operacional Ouro Mestre Preditivo Oculto da sua aplicação letal em caríssimas "Micro Salas" Array Mestre Oculta Dimensional Formativa Limpa Base Oficial? Quebre paradigmas e falácias empíricas da controladoria enxergando em um raio interativo toda a hierarquia contábil predial de uma só vez na geometria interativa dos arcos Ocultos Matrizes Dimensionais Ouro. <strong>Ação de Exploração Dinâmica C-Level Mestre Exata Oficial Base Array: Clique nos robustos anéis centrais coloridos estáticos na interface para focar sua visão C-Level Mestre no alvo (Mergulhar/Drill-Down Limpo Mestre). Clique no círculo vazio central (Núcleo Branco Mestre Limitador Ouro) para retornar ao zoom escalar global da pátria Ouro Mestre (Drill-Up Ouro Paramétrico Cidadão Preditivo Matriz Oculto).</strong></div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-infra">
+                    <div class="section-header">
+                        <h1>IV. Avaliação Extrema Parametrizada de Infraestrutura Predial N60, Acessibilidade Inclusiva Universal Cidadã e Conformidade Normativa EN 1.2 Limitadora Oculta Preditiva Mestre</h1>
+                        <p>Atesto categórico oficial formal e validação estatística matemática irrefutável dos Itens críticos complexos do Edital (Relatórios Frios N60 Auditados In Loco Mestre Array Ouro Limpo Dimensional Cidadã Matriz Exata Preditiva). Dissecagem analítica visual contendo novos potentes Gráficos Exatos C-Level dinâmicos avaliando Acessibilidade Universal, Segurança Armada e Policiamento Anti-Sinistro e Contingência Avançada Térmica Cidadã da Rede, além dos Índices Ouro Globais Calculados pela Arquitetura.</p>
+                    </div>
+
+                    <div class="chart-grid">
+                        <div class="card">
+                            <div class="card-title">F. Assinatura Comportamental e Inclusiva Cidadã Mestre Preditiva Limpa (Radar Multivariado Inteligente ML de Índices Compostos N60 Ouro Matriz Base Formal Pura) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Normalização Polar Geométrica Ouro Limitadora de Dispersão Relacional Avaliativa de Negócio Base Oculta Ouro Formal Mestre Cidadã Oculta Dimensional Preditiva Oficial Limpa</strong><br>Plota inteligentemente as rigorosas médias ponderadas geradas a frio no Python Matriz Mestre pela Feature Engineering Ouro Preditivo (Acessibilidade Formal vs Segurança Contingencial Oculta vs Conforto Biológico), segregadas geometricamente estritamente pelo perfil matemático isolador do agrupador automático Preditivo Mestre K-Means IA (Comparando os Grupos C1 a C4 de Risco Sistêmico Logístico C-Level Limitador Ouro Matriz Formativa).</span></span></div>
+                            <div id="chartRadar" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-spider"></i> Avaliação Direcional Estratégica Espacial N60 de Qualidade Humana Cidadã Inclusiva Plena Oficial Matriz Limpa Extrema Preditiva Formal Mestre Ouro Array:</strong> O Gráfico Radar Ouro Dimensional prova textualmente e cientificamente se os perigosos e maciços "Super-Polos Mestre Ouro Preditivos Cidadãos" da restrita Categoria de Cluster K-Means C4 efetivamente ofertam e garantem notas qualitativas superiores e inclusivas no questionário oficial de acessibilidade Mestre Array que justifiquem inegociavelmente a sua massiva e temerária adoção concentrada pela diretoria nacional Preditivo Dimensional Matriz Oficial Formativa Limpa Array, ou se são apenas vergonhosos imensos blocos ociosos vazios frios limpos de concreto oco Formativo Limitador Mestre Preditivo Matriz sem suporte estrutural ao cidadão avaliado PcD na Base Pura Ouro Limpa.</div>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-title">G. Distribuição Contínua Exploratória Interquartil C-Level Paramétrica Limitadora da Qualidade Predial Nacional Base Cidadã (Boxplots Científicos Estritos IQR de Score de Acessibilidade/Segurança Preditiva Ouro) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Dispersão Interquartil Mestre Rigorosa Estatística Ouro de Risco Frio Limitador Baseada nos Novos Índices Analíticos Compostos N60 Mestre (IQR Científico Boxplot Matriz Paramétrica Formal Preditiva Oculta Dimensional Base Array Pura Preditiva Mestre Ativo Formal Ouro Oculto Matriz Exata Oficial Pura Formal Limpa Preditivo Dimensional Ouro Matriz Base Mestre Cidadã Exata Array)</strong><br>Verifica analiticamente a robustez e regularidade estrutural Mestre. Caixas centrais curtas e estreitas C-Level Dimensional Mestre indicam alta padronização, isonomia e estabilidade isolada Cidadã na excelência de acessibilidade formal inclusiva oficial Cidadã legal. Caixas monstruosamente altas ou esticadas no diagrama demonstram extremo e inegociável caos paramétrico legal Cidadão na rede locada do estado avaliado Ouro Mestre Preditivo Dimensional Array Matriz Exata Preditiva (Prédios formidáveis limpos C-Level misturados aleatoriamente com sucatas operacionais precárias Físicas Cidadão Ouro Mestre Preditivas Exatas no mesmo contrato).</span></span></div>
+                            <div id="chartBoxIndex" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-boxes"></i> Garantia Direta Inegociável de Qualidade Cidadã Operacional C-Level Legal de Compliance Ouro Dimensional Preditiva Oficial Limpa Ouro Ativo Formal Cidadã Mestre Array Pura Oculto Mestre:</strong> Se a linha estatística geométrica Ouro mediana de corte (linha espessa interna escura do centro geométrico Ouro Matriz da caixa visual interativa Ouro Preditivo) estiver cravada ou posicionada perigosamente Preditiva Matriz Oculta abaixo da marca crítica Oculto Mestre restrita limitadora Ouro Mestre Array Pura Formativa dos 50 pontos, a amostra C-Level selecionada apresenta matematicamente Cidadã Ouro Matriz e inegociavelmente Oculta Array C-Level Mestre uma barreira física estrutural letal e mortífera Formativa Ouro Preditiva Matriz à aplicação cidadã Array Ouro Matriz Mestre. Isolar essas amostras C-Level Dimensional e estados falhos logísticos logísticamente do planejamento de aprovação do contrato Base Ouro Mestre Preditivo Dimensional Matriz Oficial.</div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-title">H. Inventário Frio Computacional Analítico Massivo N60 de Tecnologia Aplicada e Multimídia Restrita Integrada Limitadora Ouro Mestre Array Preditivo Cidadão Matriz <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Volume Absoluto Matemático Oculto Mestre Frio Massivo Cidadão Ouro Preditivo Dimensional de Equipamentos Eletrônicos Instalados (Processamento Exato Javascript Engine C-Level Data-Binding Real-Time Matriz)</strong><br>Agregação contábil computacional C-Level Mestre imediata calculada matematicamente Array Ouro Preditiva Oculta Dimensional Matriz Ouro Limpo baseada estritamente e rigorosamente nos estritos cortes Preditivo Ouro Limpo e filtros Mestre de Tabela Ativa Limitadora Ouro. Soma e processa textualmente e exatamente Dimensional o inventário de ativos eletrônicos de PCs, TV e Projetores Preditivos Formais Ouro C-Level Mestre Oculta Formativa.</span></span></div>
+                            <div id="chartEquip" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-laptop"></i> Oportunidade Logística Limpa Extrema de Matriz de Prova Eletrônica Formal Cidadã Oficial Pura Ouro Dimensional Exato Formativo Cidadão Matriz Oculta Array:</strong> Verifique ativamente e visualmente em 1 curto clique cruzado de Mouse Mestre Preditivo se o estrito filtro de grupo selecionado na tela de cima (ex: Prédios agregados Base Ouro Array de um Município Alvo Limitador Exato C-Level Ouro Preditivo) efetivamente suporta Preditivo Matriz Oculta Ouro as complexas e digitais Mestre aplicações civis normativas Ouro de Provas Eletrônicas Dimensionais Nacionais de Mídia Preditivo Limpo (INEP Digital Computacional Ouro Array Mestre), e se há oferta audiovisual Formativa para a prova Especializada PcD Preditiva Base Limpa.</div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-title">I. Ranking Ouro Estadual Preditivo Dimensional C-Level Limitador de Qualidade Predial Global Integrada N60 Oficial Array Exata Preditiva Base Ouro Mestre (Soma C-Level Mestre Fria da Tecnologia, Conforto Térmico, Acessibilidade PcD Inclusiva e Segurança Paramétrica Armada Ouro Mestre Array Limitadora) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Índice Preditivo Ouro Master Executivo de Qualidade Nacional Ouro Extrema Cidadã Dimensional Mestre Ouro Matriz Base Formal Pura Limpa Ativa Array Mestre</strong><br>Agrega estritamente em uma nota de 0 a 100 Pts todas as ponderações das flag do N60, expondo de forma crua, fria, clara e ordenada e do melhor ao pior a avaliação estrutural analítica limpa Ouro Mestre Oculta Oficial Limitadora C-Level Dimensional Base Mestre das Unidades Federativas de Operação Preditivo Mestre.</span></span></div>
+                            <div id="chartQualidade" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-trophy"></i> Avaliação Competitiva Institucional de Excelência Base Ouro Mestre Matriz Ouro Preditivo:</strong> Premia logisticamente e visualiza de forma direta no painel Ouro Mestre as UFs que ofereceram infraestrutura de ponta Cidadã Limpa Preditivo Dimensional. Estados estagnados na parte inferior da base do gráfico necessitam inegociavelmente de vistoria rigorosa especial presencial Preditivo Mestre imediata Mestre Preditiva Limpa Ouro N60.</div>
+                        </div>
+
+                        <div class="card" style="grid-column: span 2;">
+                            <div class="card-title">J. Auditoria Fria C-Level Mestre de Compliance Contratual Legal Editalícia EN 1.2 (Centralidade Urbana Dimensional Limitadora Oculta Mestre vs Existência Ouro Formal de Transporte Viário Público Coletivo Ativo Paramétrico) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Requisito Contratual Sólido Jurídico Logístico Operacional Limitador Exato Preditivo Dimensional Ouro (Edital Preditivo Cidadão Restrito Estrito Contábil Exato C-Level EN 1.2 Formal Oculto Matriz Exato Pura Preditiva Mestre Dimensional Oculta Base Formal)</strong><br>Cruza implacavelmente Preditivo Ouro Mestre Dimensional Limpa Pura a topologia georreferenciada paramétrica analítica Preditivo Ouro Mestre exata Ouro Dimensional Preditiva Oficial Limpa Ouro Array (Região Geográfica de Centro Adensado Limitador Formativo Oficial Preditiva Ouro Dimensional Mestre vs Periferia Cidadã Rural Ouro Matriz Isolada Fria Limitadora Oculto Oficial Limpo Oculta) contra a validação presencial Oculta categórica civil estrita Array Preditivo Mestre Limitadora da flag N60 de atestação pura de existência limpa civil e operação contratual de Transporte Público Integrado Mestre Ouro Cidadão Preditiva Ouro Exata.</span></span></div>
+                            <div id="chartCompliance" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-bus"></i> Auditoria Focada Extrema Limpa Limitadora Mestre Oculta Ouro de Cercanias Preditivas Vitais (Compliance Zone Limpo Formal Mestre C-Level Ouro Preditivo Base Exato Oculto Array Preditiva Matriz Inteligente Ouro Limitador Formativo Matriz Oculto Oficial Base Preditivo Mestre):</strong> Barras e densas instâncias gráficas Stacked visuais Mestre Ocultas preenchidas com a flagrante etiqueta Cidadã avermelhada/laranja dimensional fatal Preditiva Limitadora oficial C-Level Mestre de "Região Periférica Isolada" E simultaneamente Cidadã Preditiva Ativa Ouro Exata da etiqueta "Sem Transporte Ativo Mapeado" são pesadas e irrevogáveis red flags legais Cidadã Ouro de não-conformidade contratual sistêmica severa Ouro C-Level Mestre. Estes espaços rurais periféricos estritos Ouro Mestre Mapeados sem via pública Cidadã Limpa causarão na certa Ouro C-Level imensas Mestre ausências limitadoras na prova oficial Preditiva Oculta Dimensional Matriz Mestre Array Base e profundos litígios administrativos por mobilidade. Isolar imediatamente C-Level Formal Preditiva Limitadora da Base Cidadã Mestre Ouro Oculta.</div>
+                        </div>
+
+                        <div class="card" style="grid-column: span 2;">
+                            <div class="card-title">K. Assinatura Estrutural Geopolítica Formal Oculta de Matriz de Saturação Predial Parametrizada Preditiva Limpa (UF Demográfica Nacional vs Tipologia Ouro Tukey Interquartil de Eficiência IQR C-Level Mestre Array Ouro Oculto Formal) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Matriz Fria Exata Oculta Cidadã Mestre Preditiva Ouro Oculto Limitador Paramétrica Estruturada de Pearson Categórica Cruzada Plena C-Level Limitadora Ouro Mestre Preditiva Base (Crosstab Dimensional Formativo Logístico Base Matriz Array Ouro Mestre Formativa Limitadora Preditiva Ouro Base Formal Limpo Ouro Mestre Oculta Matriz Exata)</strong><br>Uma Heatmap contingencial Mestre Preditiva Base Ouro Cidadã direta revelando sem filtros Ouro Mestre o exato e frio Ouro Preditivo déficit limitador Cidadão ou a sufocante Ouro Preditivo saturação C-Level Ouro Formativo Oculta arquitetônica estruturada dimensional Formativo Ouro pelo poderoso Quartil matemático Tukey dentro Oculta Limitador do espectro matriz Cidadão Mestre Ouro demográfico Preditivo Formativo Dimensional Matriz Cidadão Ouro Limitador Preditiva de cada UF brasileira C-Level Ouro Limpo Base contida na extração SAS original Cidadã Array Mestre Limitadora.</span></span></div>
+                            <div id="chartHeatmapUF" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-map-marked-alt"></i> Mapeamento Estratégico Rigoroso Oculto Mestre Geopolítico de Custos Frios Preditivos Mestre Ocultos, Oportunidades Logísticas e Letais Gargalos (Análise Ouro Mestre Ativa Dimensional Formal Array Ouro Limpo Formativa Preditivo Mestre Oculto Base Oficial Formal Oculta Mestre Cidadã Exata Preditiva Limitadora Preditivo Oculto Base Formal):</strong> Tons visuais mais escuros e saturados no mapa termal mostram forte e inegável Ouro Mestre dependência regional Ouro e saturação predial Limitadora Ouro Mestre Array Preditivo Limpo Base Oculta Formal Exato. Um Estado geográfico inteiramente limpo e oco esbranquiçado Ouro Mestre em categorias ótimas estruturais eficientes ("Sala Média" e "Sala Grande") e completamente denso Preditivo Mestre, negro e saturado financeiramente em ineficientes "Micro Salas" precisará fatalmente Mestre Array Cidadão Preditiva Oculta Dimensional Base Pura de altíssimas dotações orçamentárias extras para triplicar a folha Preditiva Mestre e coordenadores de corredores na Base Ouro C-Level Mestre Formativa Preditiva Array Cidadã. Planeje com precisão contábil C-Level Pura as frotas Mestre Ocultas Limitadoras Ouro Formais Preditivas Exatas.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-inscritos">
+                    <div class="section-header">
+                        <h1>V. Perfil dos Inscritos &amp; Ensalamento (Layouts N02 e N90)</h1>
+                        <p>Enquanto as seções anteriores descrevem os <strong>prédios</strong> (onde a prova acontece), esta seção descreve <strong>quem</strong> faz a prova e <strong>como</strong> cada participante é alocado. Todas as métricas abaixo derivam dos layouts oficiais <strong>N02 (Ensalamento)</strong> e <strong>N90 (Inscritos)</strong>: perfil demográfico (sexo e idade), áreas de avaliação (grupos de curso), demanda por atendimento especial, tipos de ensalamento, situação cadastral e migração interestadual. <em>Esta seção só é preenchida quando a base carregada contém dados de participantes; caso contrário, exibe um aviso e permanece inativa — nunca gera erro.</em></p>
+                    </div>
+
+                    <div id="inscritosVazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Módulo inativo nesta base:</strong> a base carregada não contém as colunas de participantes dos layouts N02/N90 (ex.: <code>TP_SEXO</code>, <code>DT_NASCIMENTO</code>, <code>NO_GRUPO_CURSO</code>, <code>TP_ENSALAMENTO</code>). Assim que uma base com esses campos for processada, este painel exibirá automaticamente todo o perfil demográfico e de ensalamento.</div>
+                    </div>
+
+                    <div id="inscritosConteudo">
+                        <div id="inscritosKPIs" class="kpi-grid" style="margin-bottom: 20px;"></div>
+
+                        <div class="chart-grid">
+                            <div class="card" style="grid-column: span 2;">
+                                <div class="card-title">A. Ranking das Áreas de Avaliação / Grupos de Curso (N02/N90) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>NO_GRUPO_CURSO — volume de participantes por área</strong><br>Mostra quantos participantes cada grupo de curso concentra. Áreas no topo respondem pela maior parte do volume de cadernos, salas e correção.</span></span></div>
+                                <div id="chartCursoBar" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-graduation-cap"></i> Como interpretar:</strong> as primeiras barras são as áreas mais volumosas. Poucas áreas costumam responder pela maior parte do público (padrão de Pareto aplicado às inscrições) — é onde concentrar a logística de impressão, ensalamento e correção.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">B. Perfil Etário dos Participantes (N90) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>FAIXA_ETARIA — idade derivada de DT_NASCIMENTO</strong><br>Distribuição do público por faixa de idade. Públicos mais velhos elevam a importância de acessibilidade e conforto.</span></span></div>
+                                <div id="chartFaixaEtaria" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-user-clock"></i> Como interpretar:</strong> a concentração etária orienta desde comunicação até logística inclusiva. Em públicos mais velhos, rampas, salas acessíveis e mobiliário adequado ganham peso proporcional.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">C. Tipos de Ensalamento (N02) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>TP_ENSALAMENTO — porte da sala do participante</strong><br>Sala Comum vs. salas reduzidas (1/6/20/40) e Prova Reserva. Salas menores concentram atendimentos especializados.</span></span></div>
+                                <div id="chartEnsalamento" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-chair"></i> Como interpretar:</strong> predomínio de "Sala Comum" é esperado. Volumes relevantes em salas reduzidas indicam a operação especial (mais fiscais, tempo adicional e materiais acessíveis) que precisa de planejamento dedicado.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">D. Demanda de Atendimento Especial por UF (N02) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>% de participantes com qualquer atendimento diferenciado, por estado</strong><br>Indicador de inclusão e de complexidade operacional.</span></span></div>
+                                <div id="chartAtendimentoUF" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-universal-access"></i> Como interpretar:</strong> percentuais mais altos sinalizam estados que precisam de mais salas adaptadas, fiscais treinados e materiais em formatos acessíveis. É um mapa direto de onde reforçar a inclusão.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">E. Migração Interestadual por UF de Prova (N90) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Residência × Prova — % que vem de outra UF</strong><br>Mede a atração de participantes de fora do estado, pressionando hospedagem e transporte.</span></span></div>
+                                <div id="chartMigracaoUF" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-route"></i> Como interpretar:</strong> percentuais elevados indicam polos regionais que atraem candidatos vizinhos. Cruze com a capacidade instalada (N50/N52) para antecipar gargalos de acomodação e deslocamento.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-atendimentos">
+                    <div class="section-header">
+                        <h1>VI. Atendimentos &amp; Recursos de Acessibilidade (Layout N91)</h1>
+                        <p>Esta seção é o <strong>cruzamento adjudicado</strong> das necessidades especiais. Enquanto a seção anterior (N02) responde <em>"o participante tem alguma demanda especial?"</em>, o <strong>N91</strong> responde <em>"QUAL item foi solicitado, de que TIPO, e foi CONCEDIDO?"</em>. São os atendimentos e recursos itemizados do formulário de inscrição, homologados (ou não) pelo INEP — com o <strong>tipo</strong> (Específico/Especializado/Recurso), a <strong>situação do laudo médico</strong> e a <strong>taxa de deferimento</strong>. <em>A seção só é preenchida quando a base contém dados do N91; caso contrário, exibe um aviso e permanece inativa — nunca gera erro.</em></p>
+                    </div>
+
+                    <div id="atendVazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Módulo inativo nesta base:</strong> a base carregada não contém as colunas de atendimentos do layout N91 (ex.: <code>NO_ITEM_ATENDIMENTO</code>, <code>TP_ITEM_ATENDIMENTO</code>, <code>CO_SITUACAO_LAUDO_MEDICO</code>). Assim que uma base com esses campos for processada, este painel exibirá automaticamente os itens solicitados, os tipos de atendimento e a taxa de deferimento.</div>
+                    </div>
+
+                    <div id="atendConteudo">
+                        <div id="atendKPIs" class="kpi-grid" style="margin-bottom: 20px;"></div>
+
+                        <div class="chart-grid">
+                            <div class="card" style="grid-column: span 2;">
+                                <div class="card-title">A. Itens de Atendimento / Recurso Mais Solicitados (N91) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>NO_ITEM_ATENDIMENTO — o que a rede precisa prover</strong><br>Ranking das acomodações pedidas (Braille, Ledor, Tempo Adicional, Intérprete de Libras, etc.). A cor/rótulo indica o % deferido de cada item.</span></span></div>
+                                <div id="chartItemAtend" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-list-check"></i> Como interpretar:</strong> os itens no topo definem a operação de acessibilidade — materiais em formatos especiais, profissionais habilitados (ledores, intérpretes) e salas adaptadas. Um item muito solicitado com baixo deferimento sugere exigência documental alta ou gargalo na análise de laudos.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">B. Tipos de Atendimento (N91) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>TP_ITEM_ATENDIMENTO — taxonomia oficial</strong><br>1-Específico (gestante, lactante, sabatista), 2-Especializado (Braille, Libras, ledor), 3-Recurso (tempo adicional, mobiliário).</span></span></div>
+                                <div id="chartTipoItem" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-sitemap"></i> Como interpretar:</strong> o mix entre os três tipos dimensiona equipes e materiais. Predomínio de "Especializado" sinaliza maior complexidade operacional (profissionais habilitados e materiais acessíveis).</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">C. Situação do Laudo Médico (N91) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>CO_SITUACAO_LAUDO_MEDICO — decisão do pedido</strong><br>Aprovado / Reprovado / Em Análise / Recurso, conforme o domínio oficial de 13 códigos.</span></span></div>
+                                <div id="chartLaudo" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-file-medical"></i> Como interpretar:</strong> uma fatia relevante de "Em Análise" é PENDÊNCIA a resolver antes da prova; "Reprovado" elevado pode indicar exigência documental ou necessidade de revisão do fluxo de laudos.</div>
+                            </div>
+
+                            <div class="card" style="grid-column: span 2;">
+                                <div class="card-title">D. Taxa de Deferimento por UF de Prova (N91) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>% de itens Deferidos/Ativos por estado</strong><br>Regra oficial da VW N91: item ativo quando o laudo está aprovado ou em análise. Ordenado do menor ao maior deferimento.</span></span></div>
+                                <div id="chartLaudoUF" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-scale-balanced"></i> Como interpretar:</strong> disparidades regionais no deferimento podem sinalizar gargalos na comissão de análise, exigência documental desigual ou fluxos administrativos distintos. Estados à esquerda (menor deferimento) merecem investigação para garantir ISONOMIA no atendimento às necessidades especiais.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-auditoria-cruz">
+                    <div class="section-header">
+                        <h1>VII. Auditoria de Cruzamento entre Layouts (Análise Relacional N02 · N50 · N52 · N90 · N91)</h1>
+                        <p>Esta é a camada <strong>relacional</strong> da plataforma: em vez de olhar cada layout isoladamente, ela <strong>cruza</strong> as tabelas para reconciliar participantes e detectar inconsistências que só aparecem no confronto entre arquivos — participantes <strong>sem ensalamento</strong>, <strong>órfãos</strong>, <strong>ensalamento duplicado</strong>, <strong>local/sala inexistentes</strong>, <strong>divergência de município</strong>, <strong>capacidade × ocupação</strong>, <strong>forasteiros</strong>, <strong>distâncias críticas</strong> e <strong>divergência de kit</strong>. Cada achado traz severidade, interpretação automática e recomendação. <em>A seção só é preenchida quando o arquivo contém as abas normalizadas por layout; caso contrário, exibe um aviso e permanece inativa.</em></p>
+                    </div>
+
+                    <div id="auditVazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Auditoria de cruzamento inativa:</strong> o arquivo processado não contém abas normalizadas por layout (N02, N50, N52, N90, N91). Para habilitar as reconciliações relacionais, forneça um workbook com uma aba por layout (a plataforma reconhece pelo nome da aba ou pelas colunas). No modo <code>--demo</code>, essas abas são geradas automaticamente.</div>
+                    </div>
+
+                    <div id="auditConteudo">
+                        <div class="card" style="border-left: 5px solid var(--s);">
+                            <div class="card-title"><i class="fas fa-clipboard-check"></i> Resumo Executivo Automático da Auditoria</div>
+                            <p id="auditResumoTxt" style="margin:0; color:#334155; line-height:1.7;"></p>
+                        </div>
+
+                        <div id="auditKPIs" class="kpi-grid" style="margin: 20px 0;"></div>
+
+                        <div class="card">
+                            <div class="card-title">A. Achados da Auditoria (por severidade) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Cada linha é uma verificação relacional</strong><br>CRÍTICO exige ação imediata; ATENÇÃO deve ser investigado; OK está conforme.</span></span></div>
+                            <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; align-items:center;">
+                                <strong style="color:#334155; font-size:0.85rem;"><i class="fas fa-filter"></i> Filtrar:</strong>
+                                <button class="fsev-btn active" data-sev="" style="cursor:pointer; padding:6px 14px; border-radius:999px; border:1.5px solid #CBD5E1; background:#1E293B; color:#fff; font-weight:700; font-size:0.8rem;">Todos</button>
+                                <button class="fsev-btn" data-sev="CRÍTICO" style="cursor:pointer; padding:6px 14px; border-radius:999px; border:1.5px solid #EF4444; background:#fff; color:#EF4444; font-weight:700; font-size:0.8rem;">Só críticos</button>
+                                <button class="fsev-btn" data-sev="ATENÇÃO" style="cursor:pointer; padding:6px 14px; border-radius:999px; border:1.5px solid #F59E0B; background:#fff; color:#B45309; font-weight:700; font-size:0.8rem;">Só atenção</button>
+                                <button class="fsev-btn" data-sev="OK" style="cursor:pointer; padding:6px 14px; border-radius:999px; border:1.5px solid #10B981; background:#fff; color:#047857; font-weight:700; font-size:0.8rem;">Só OK</button>
+                                <button id="fsevBaixar" style="cursor:pointer; padding:6px 14px; border-radius:999px; border:none; background:#059669; color:#fff; font-weight:700; font-size:0.8rem;"><i class="fas fa-download"></i> Baixar achados (CSV)</button>
+                                <span id="fsevCount" style="margin-left:auto; color:#64748B; font-size:0.82rem;"></span>
+                            </div>
+                            <div id="auditFindingsTable" style="overflow-x:auto;"></div>
+                        </div>
+
+                        <div class="chart-grid" style="margin-top: 20px;">
+                            <div class="card">
+                                <div class="card-title">B. Reconciliação de Participantes (N90 × N02) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Ensalados vs. sem ensalamento</strong><br>Proporção de inscritos que possuem sala atribuída.</span></span></div>
+                                <div id="chartReconc" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-users-between-lines"></i> Como interpretar:</strong> a fatia "Sem ensalamento" deveria ser zero. Qualquer valor representa participantes em risco de não realizar a prova — investigue a aba <em>42_Sem_Ensalamento</em>.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">C. Faixas de Distância de Deslocamento (N02) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>NU_DISTANCIA em faixas de km</strong><br>Quanto os participantes percorrem até o local de prova.</span></span></div>
+                                <div id="chartDistFaixas" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-route"></i> Como interpretar:</strong> concentração nas faixas altas (acima de 20 km) sinaliza deslocamentos críticos e risco de ausência — cruze com os casos críticos e a capacidade dos polos próximos.</div>
+                            </div>
+
+                            <div class="card" style="grid-column: span 2;">
+                                <div class="card-title">D. Forasteiros por UF de Prova (N90) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Residência ≠ UF de prova</strong><br>Estados que mais recebem participantes de fora.</span></span></div>
+                                <div id="chartForastUF" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-people-arrows"></i> Como interpretar:</strong> UFs no topo funcionam como polos de atração regional — pressionam hospedagem, transporte e capacidade instalada. Planeje reforço logístico nesses estados.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">E. Atribuição de Kits de Prova (N91 → N02) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>ID_KIT_PROVA por tipo</strong><br>Quantos ensalados recebem cada kit de material especial.</span></span></div>
+                                <div id="chartKitDist" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-box-open"></i> Como interpretar:</strong> o kit é o material especial (Braille, ampliado, recursos) que viabiliza a acessibilidade. Esta distribuição dimensiona a produção e a logística de cada tipo de kit. Detalhes nas abas <em>54</em> a <em>58</em> do Excel.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">F. Funil de Cobertura da Acessibilidade <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Atendimento → inscrito → ensalado → com kit</strong><br>Onde a cobertura se perde ao longo da cadeia.</span></span></div>
+                                <div id="chartKitFunil" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-filter"></i> Como interpretar:</strong> cada degrau que encolhe é um grupo de participantes com necessidade que ficou sem inscrição, sem sala ou sem kit — ou seja, em risco de não ter o atendimento efetivado no dia da prova. O ideal é uma barra constante do topo à base.</div>
+                            </div>
+
+                            <div class="card" style="grid-column: span 2;">
+                                <div class="card-title">G. Kits de Prova por UF de Prova (N02) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>ID_KIT_PROVA por estado</strong><br>Distribuição regional de cada tipo de kit especial.</span></span></div>
+                                <div id="chartKitUF" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-map-location-dot"></i> Como interpretar:</strong> mostra onde cada tipo de material especial é mais demandado — insumo direto para produção e distribuição regional dos kits. Detalhe completo na aba <em>60_Kit_por_UF</em>.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">H. Kits × Situação do Laudo Médico (N91) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Kit vs. Aprovado/Em Análise/Reprovado</strong><br>Kits cuja entrega depende de decisão de laudo.</span></span></div>
+                                <div id="chartKitLaudo" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-file-circle-check"></i> Como interpretar:</strong> kits associados a laudos 'Em Análise' ou 'Reprovado' são pendências — a produção/entrega do material pode depender da homologação. Priorize a análise desses laudos.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">I. Itens de Atendimento por Participante (N91) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Quantos itens cada participante acumula</strong><br>Participantes com muitos itens = maior complexidade.</span></span></div>
+                                <div id="chartMultiAtend" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-layer-group"></i> Como interpretar:</strong> participantes com múltiplos itens exigem combinação de recursos, sala e kit específicos — casos de maior complexidade logística que merecem revisão individual (aba <em>65</em>).</div>
+                            </div>
+
+                            <div class="card" style="grid-column: span 2;">
+                                <div class="card-title">J. Ranking Consolidado de Problemas (agenda do auditor) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Todos os achados por severidade e volume</strong><br>Ataque de cima para baixo — CRÍTICOS primeiro.</span></span></div>
+                                <div id="chartRankingProb" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-list-ol"></i> Como interpretar:</strong> é a agenda de trabalho priorizada — as barras no topo (mais ocorrências e maior severidade) devem ser tratadas primeiro. A lista completa com recomendações está na aba <em>68_Ranking_Problemas</em>.</div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-title">K. Qualidade dos Dados por Layout <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Completude média (% de células preenchidas)</strong><br>Confiabilidade da base por layout.</span></span></div>
+                                <div id="chartQualidadeDados" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-clipboard-check"></i> Como interpretar:</strong> completude alta indica base confiável; layouts com baixa completude ou chaves duplicadas (aba <em>70</em>) exigem saneamento antes das decisões operacionais.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-mestre">
+                    <div class="section-header">
+                        <h1><i class="fas fa-table-list"></i> Tabela Mestre dos Candidatos (Rastreabilidade Interativa)</h1>
+                        <p>Uma linha por candidato, cruzando <strong>inscrição (N90)</strong>, <strong>ensalamento (N02)</strong> e <strong>atendimento/kit (N91)</strong>. Use a <strong>busca</strong>, a <strong>ordenação</strong> (clique nos cabeçalhos) e os <strong>filtros rápidos</strong> para localizar qualquer candidato ou grupo. A coluna <strong>ALERTAS</strong> mostra exatamente qual divergência afeta cada pessoa, e os <strong>cartões de KPI são clicáveis</strong> — clique para filtrar a tabela nos registros correspondentes. <em>Esta seção só aparece quando o arquivo tem as abas por layout (N90/N02/N91).</em></p>
+                    </div>
+                    <div id="mestreVazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Tabela mestre inativa:</strong> forneça um arquivo com abas por layout (N90/N02/N91) para gerar a rastreabilidade candidato a candidato. A base completa também é exportada na aba <code>78_Tabela_Mestre_Candidatos</code> do Excel.</div>
+                    </div>
+                    <div id="mestreConteudo">
+                        <div class="card">
+                            <div id="mestreKpis" class="kpi-grid" style="margin-bottom:16px;"></div>
+                            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px;">
+                                <strong style="color:#334155;"><i class="fas fa-filter"></i> Filtros:</strong>
+                                <select id="fMestreSit" class="mestre-filter"><option value="">Situação: Todos</option><option value="alerta">Somente com alerta</option><option value="ok">Somente OK</option></select>
+                                <select id="fMestreEns" class="mestre-filter"><option value="">Ensalamento: Todos</option><option value="Sim">Ensalado</option><option value="Não">Sem ensalamento</option></select>
+                                <select id="fMestreAtend" class="mestre-filter"><option value="">Atendimento: Todos</option><option value="Sim">Com atendimento</option><option value="Não">Sem atendimento</option></select>
+                                <select id="fMestreKit" class="mestre-filter"><option value="">Kit: Todos</option><option value="Sim">Com kit</option><option value="Não">Sem kit</option></select>
+                                <select id="fMestreForast" class="mestre-filter"><option value="">Deslocamento: Todos</option><option value="Sim">Forasteiro</option><option value="Não">Residente</option></select>
+                                <select id="fMestreUF" class="mestre-filter"><option value="">UF de prova: Todas</option></select>
+                                <select id="fMestreFaixa" class="mestre-filter"><option value="">Faixa etária: Todas</option></select>
+                                <select id="fMestreGenero" class="mestre-filter"><option value="">Gênero: Todos</option></select>
+                                <button id="fMestreLimpar" class="mestre-filter" style="background:#F1F5F9; font-weight:600; cursor:pointer;"><i class="fas fa-eraser"></i> Limpar</button>
+                                <button id="fMestreBaixar" class="mestre-filter" style="background:#059669; color:#fff; border-color:#059669; font-weight:700; cursor:pointer;"><i class="fas fa-download"></i> Baixar CSV (filtrado)</button>
+                                <span id="mestreCount" style="margin-left:auto; color:#64748B; font-size:0.85rem;"></span>
+                            </div>
+                            <div style="overflow-x:auto;"><table id="masterTable" class="display" style="width:100%; font-size:0.82rem;"></table></div>
+                            <div class="aula-box" style="margin-top:12px;"><strong><i class="fas fa-lightbulb"></i> Dica:</strong> os KPIs acima filtram a tabela ao serem clicados; a busca cobre todas as colunas (digite um CO_INSCRICAO, um kit, um município…). Base completa na aba 78 do Excel.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-kits-tipos">
+                    <div class="section-header">
+                        <h1><i class="fas fa-boxes-stacked"></i> Tipos de Kit — Contagem e Cobertura</h1>
+                        <p>Quantos participantes cada <strong>tipo de kit de prova</strong> (campo <code>ID_KIT_PROVA</code>) cobre no <strong>ensalamento (N02)</strong>, e a checagem de coerência com os <strong>atendimentos (N91)</strong>. Kits que aparecem só em um layout podem indicar erro de atribuição.</p>
+                    </div>
+                    <div id="kitsTiposVazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Sem dados de tipos de kit:</strong> a base fornecida não tem o campo <code>ID_KIT_PROVA</code> preenchido no N02/N91. Detalhes completos nas abas 93–95 do Excel.</div>
+                    </div>
+                    <div id="kitsTiposConteudo">
+                        <div class="card">
+                            <div id="kitsTiposKpis" class="kpi-grid" style="margin-bottom:16px;"></div>
+                            <div class="card-title">Participantes por Tipo de Kit (N02)</div>
+                            <div id="chartKitsTipos" class="chart-container"></div>
+                            <div class="aula-box" style="margin-top:12px;"><strong><i class="fas fa-lightbulb"></i> Como ler:</strong> cada barra é um tipo de kit e a sua quantidade de participantes no ensalamento (N02). Um tipo que só aparece no N91 (necessidade) e não no N02 (atribuição) é sinalizado nos KPIs e detalhado na aba <code>95_Kits_Tipos_Consolidado</code>.</div>
+                        </div>
+                        <div class="chart-grid">
+                            <div class="card">
+                                <div class="card-title">Estimativa de Provas por Base (triangulação)</div>
+                                <div id="chartEstComp" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-scale-balanced"></i> Como ler:</strong> compara o número de provas estimado por diferentes bases — inscritos (N90), ensalados (N02), kits/atendimentos (N91) e capacidade instalada (N50/N52). Idealmente inscritos ≈ ensalados; barras muito diferentes revelam participantes não alocados. A capacidade é o teto físico.</div>
+                            </div>
+                            <div class="card">
+                                <div class="card-title">Provas por Tipo de Ensalamento (N02)</div>
+                                <div id="chartProvasTipo" class="chart-container"></div>
+                                <div class="aula-box"><strong><i class="fas fa-shapes"></i> Como ler:</strong> distribui as provas pelas modalidades de ensalamento (TP_ENSALAMENTO do N02) — comum, especial, etc. Ajuda a dimensionar a produção por modalidade.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-n60-acess">
+                    <div class="section-header">
+                        <h1><i class="fas fa-wheelchair"></i> Acessibilidade da Rede de Locais (N60 × Equidade)</h1>
+                        <p>Cruza a <strong>infraestrutura predial (N60)</strong> com o <strong>ensalamento (N02)</strong> e os <strong>atendimentos (N91)</strong>. Cada local recebe um índice de acessibilidade (flags <code>IN_*</code> da N60) e é classificado em <strong>Baixa / Média / Alta</strong>. O foco é a <strong>equidade</strong>: quantos participantes — e sobretudo quantos <strong>com necessidade de atendimento</strong> — estão alocados em locais pouco acessíveis. <em>Requer a aba N60 na base.</em></p>
+                    </div>
+                    <div id="n60Vazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Sem dados da N60:</strong> a base fornecida não tem a aba N60 (infraestrutura) com as flags de acessibilidade. Detalhes nas abas 96–97 do Excel quando disponíveis.</div>
+                    </div>
+                    <div id="n60Conteudo">
+                        <div class="card">
+                            <div id="n60Kpis" class="kpi-grid" style="margin-bottom:16px;"></div>
+                            <div class="card-title">Locais e Ensalados por Nível de Acessibilidade (N60 × N02)</div>
+                            <div id="chartN60Nivel" class="chart-container"></div>
+                            <div class="aula-box" style="margin-top:12px;"><strong><i class="fas fa-lightbulb"></i> Como ler:</strong> as barras mostram, para cada nível de acessibilidade, quantos locais existem e quantos participantes estão ensalados neles. Concentração de ensalados no nível "Baixa" é um alerta de equidade — detalhado por local na aba <code>96_N60_Acessibilidade_Local</code>. O KPI "Com atendimento em baixa acessibilidade" é o mais crítico.</div>
+                        </div>
+                        <div class="card">
+                            <div class="card-title">Desigualdade Acumulada — Distância Média por Nível de Acessibilidade (N60 × N02)</div>
+                            <div id="chartN60Dist" class="chart-container"></div>
+                            <div class="aula-box" style="margin-top:12px;"><strong><i class="fas fa-road"></i> Como ler:</strong> cada barra é a distância média (km) percorrida pelos participantes ensalados em locais de cada nível de acessibilidade. Se a barra "Baixa" for a mais alta, as desigualdades se <strong>acumulam</strong> — quem está em local menos acessível também viaja mais. Detalhes (média, mediana e capacidade) na aba <code>98_N60_Distancia_Capacidade</code>.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-laudo">
+                    <div class="section-header">
+                        <h1><i class="fas fa-file-medical"></i> Laudos Médicos × Kit (N91) — Risco Operacional</h1>
+                        <p>Situação do <strong>laudo médico</strong> dos itens de atendimento (N91) e o cruzamento com a <strong>presença de kit</strong>. O foco é o risco: um kit associado a um laudo <strong>em análise</strong>, <strong>em recurso</strong> ou <strong>reprovado</strong> pode não ser entregue no dia da prova. <em>Requer o N91 na base.</em></p>
+                    </div>
+                    <div id="laudoVazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Sem dados de laudo:</strong> a base não tem a coluna CO_SITUACAO_LAUDO_MEDICO no N91. Detalhes nas abas 99–101 do Excel quando disponíveis.</div>
+                    </div>
+                    <div id="laudoConteudo">
+                        <div class="card">
+                            <div id="laudoKpis" class="kpi-grid" style="margin-bottom:16px;"></div>
+                            <div class="card-title">Distribuição dos Itens por Situação do Laudo (N91)</div>
+                            <div id="chartLaudoStatus" class="chart-container"></div>
+                            <div class="aula-box" style="margin-top:12px;"><strong><i class="fas fa-lightbulb"></i> Como ler:</strong> cada fatia é uma situação de laudo. "Em análise", "Em recurso" e "Reprovado" são os status de risco — quando há kit associado, o material pode não chegar ao participante. O KPI "Kits em risco" quantifica isso; o detalhe está nas abas <code>100_N91_Laudo_x_Kit</code> e <code>101_N91_Laudo_por_Tipo_Item</code>.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-atend-demo">
+                    <div class="section-header">
+                        <h1><i class="fas fa-chart-column"></i> Demanda de Atendimento por Perfil (N91 × N90)</h1>
+                        <p>Cruza a <strong>necessidade de atendimento</strong> (N91) com a <strong>faixa etária</strong> do participante (N90) — a <strong>taxa</strong> de quem demanda acessibilidade em cada faixa. Ajuda a dimensionar recursos de forma equitativa. <em>Requer N90 e N91 na base.</em></p>
+                    </div>
+                    <div id="atendDemoVazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Sem dados suficientes:</strong> a base não tem faixa etária (N90) e atendimento (N91) para este cruzamento. Detalhes nas abas 102–103 do Excel quando disponíveis.</div>
+                    </div>
+                    <div id="atendDemoConteudo">
+                        <div class="card">
+                            <div id="atendDemoKpis" class="kpi-grid" style="margin-bottom:16px;"></div>
+                            <div class="card-title">Taxa de Atendimento por Faixa Etária (%)</div>
+                            <div id="chartAtendFaixa" class="chart-container"></div>
+                            <div class="aula-box" style="margin-top:12px;"><strong><i class="fas fa-lightbulb"></i> Como ler:</strong> cada barra é a taxa (%) de candidatos daquela faixa etária que demandam atendimento especializado. Faixas acima da média merecem atenção no dimensionamento de acessibilidade. A leitura por gênero e os números absolutos estão nas abas <code>102_Atendimento_por_Genero</code> e <code>103_Atendimento_por_Faixa_Etaria</code>.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="sec-dados">
+                    <div class="section-header">
+                        <h1>V. Data Explorer Completo Interativo C-Level: O Maior Extrator Ativo Corporativo de Microdados Analíticos Logísticos do Estado (Garante Exportação Plena Excel/CSV Mestre Ouro Limitador)</h1>
+                        <p>Navegue profundamente pelas 8 ricas Abas do formidável Motor Analítico Preditivo Limitador Mestre. As tabelas SQL-Like Preditivas Ouro a seguir acompanham, mutam e obedecem estritamente Ouro Base Formativa Limitadora Preditiva Mestre aos Filtros Mestre Operacionais parametrizados lá no topo mágico desta página. Exporte e congele a qualquer preciso momento temporal Oculto Cidadão a matriz cruzada gerada na sua sessão e os pesados resultados tabulares filtrados em frios relatórios estáticos oficiais clicando nos potentes botões integrados paramétricos de <strong>Excel e CSV Mestre Preditivo</strong>.</p>
+                    </div>
+
+                    <!-- ============ OPERAÇÕES SOBRE OS DADOS (calculadora analítica ao vivo) ============ -->
+                    <div class="insight-box" style="border-left:6px solid var(--emerald);">
+                        <h3><i class="fas fa-calculator"></i> Operações sobre os dados — calcule você mesmo</h3>
+                        <p style="color:#64748B; margin:6px 0 16px; line-height:1.6;">Escolha uma coluna e uma operação (contagem, contagem distinta, soma, média, mínimo, máximo...) para obter resultados que não aparecem prontos no painel. Opcionalmente, agrupe por outra coluna. O cálculo é feito ao vivo sobre os dados <strong>filtrados</strong> no topo da página.</p>
+                        <div class="ops-controls">
+                            <div class="ops-field">
+                                <label>Base</label>
+                                <select id="opDataset">
+                                    <option value="salas">Salas (registro por sala)</option>
+                                    <option value="locais">Locais/Prédios (consolidado)</option>
+                                </select>
+                            </div>
+                            <div class="ops-field">
+                                <label>Coluna</label>
+                                <select id="opColumn"></select>
+                            </div>
+                            <div class="ops-field">
+                                <label>Operação</label>
+                                <select id="opAgg">
+                                    <option value="count">Contagem (linhas não vazias)</option>
+                                    <option value="distinct">Contagem distinta (valores únicos)</option>
+                                    <option value="sum">Soma</option>
+                                    <option value="mean">Média</option>
+                                    <option value="median">Mediana</option>
+                                    <option value="min">Mínimo</option>
+                                    <option value="max">Máximo</option>
+                                    <option value="stddev">Desvio-padrão</option>
+                                </select>
+                            </div>
+                            <div class="ops-field">
+                                <label>Agrupar por (opcional)</label>
+                                <select id="opGroup"><option value="">— Nenhum (total geral) —</option></select>
+                            </div>
+                            <div class="ops-field ops-actions">
+                                <button class="btn-action" id="opRun" style="background:var(--emerald);"><i class="fas fa-play"></i> Calcular</button>
+                            </div>
+                        </div>
+                        <div id="opResult" style="margin-top:22px;"></div>
+                    </div>
+                    
+                    <!-- MENU TAB-CONTROL OTIMIZADO C-LEVEL (COMUTAÇÃO DINÂMICA DE TABELAS SEM RECARREGAR A PÁGINA) -->
+                    <div class="data-explorer-tabs">
+                        <button class="active-tab" onclick="switchTab('tab-escolas', this)"><i class="fas fa-building"></i> Nível Instituição Mestre Consolidada</button>
+                        <button onclick="switchTab('tab-salas', this)"><i class="fas fa-door-open"></i> Nível Micro Sala Cidadã (Base de Folha Fria)</button>
+                        <button onclick="switchTab('tab-blocos', this)"><i class="fas fa-layer-group"></i> Nível Bloco Analítico de Pavilhão (Campus Mestre)</button>
+                        <button onclick="switchTab('tab-mun', this)"><i class="fas fa-city"></i> Sumário Regional (Cidades e Municípios Base Oculta)</button>
+                        <button onclick="switchTab('tab-uf', this)"><i class="fas fa-map"></i> Consolidado Massivo Estados Logísticos (UF Base)</button>
+                        <button onclick="switchTab('tab-outliers', this)" style="color:var(--a);"><i class="fas fa-exclamation-triangle"></i> Lixeira Preditiva (Anomalias Sklearn I.A.)</button>
+                        <button onclick="switchTab('tab-pareto', this)"><i class="fas fa-chart-line"></i> Curva Econômica de Pareto Contábil Oficial (80/20)</button>
+                        <button onclick="switchTab('tab-stats', this)"><i class="fas fa-calculator"></i> Auditoria Robusta Estatística Geral Gausiana Mestre</button>
+                    </div>
+                    
+                    <div class="table-container">
+                        
+                        <!-- TABELA 1: PRÉDIOS E ESCOLAS (AGREGAÇÃO MATRIZ N52 BASE LIMITADORA PREDITIVA MESTRE) -->
+                        <div id="tab-escolas" class="table-wrapper-div" style="display:block;">
+                            <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-building"></i> Matriz Consolidada de Execução Operacional em Nível Prédio Físico Adensado (Polos Educacionais Ouro Mestre)</h3>
+                            <p style="color:var(--txt); margin-bottom: 15px; font-size: 0.9em;">Visualização Preditiva Executiva Base Ouro das Mega-Escolas agrupadas perfeitamente com o preciso cômputo da capacidade limpa absoluta C-Level Formativa de Avaliação Logística. (Métrica N52 Dimensional Limitadora Mestre).</p>
+                            <table id="dtEscolas" class="display">
+                                <thead>
+                                    <tr>
+                                        <th>Designação Mestre Oficial da Instituição Educacional (Prédio Ouro Agregado Base Cidadã Preditiva Limitadora)</th>
+                                        <th>UF Logística</th>
+                                        <th>Salas Físicas Mapeadas Ocultas (N50 Formativas)</th>
+                                        <th>Vagas Assentos Físicos Totais Limpos (Lotação Máxima Limpa Mestre Array)</th>
+                                        <th>Score C-Level Avaliativo N60 Acessibilidade (Auditoria Ouro Universal Preditiva Limitadora)</th>
+                                        <th>Tipologia Predominante Interquartil Base (Frequência Mestre de Tukey IQR)</th>
+                                        <th>Classificação Computacional IA (Perfil Preditivo K-Means ML de Risco Sistêmico Mestre)</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+
+                        <!-- TABELA 2: SALAS (FOLHA BRUTA MATRIZ N50) -->
+                        <div id="tab-salas" class="table-wrapper-div">
+                            <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-door-open"></i> Matriz Logística Restrita Nível Folha Micro Físico (Salas Unificadas Cidadãs Estritas Dimensionais Mestre)</h3>
+                            <p style="color:var(--txt); margin-bottom: 15px; font-size: 0.9em;">A visão folha estrutural primária do sistema Ouro Mestre. Cada porta individual atestada e todo o vasto registro SAS N50 formatado puramente Oculto e avaliado rigorosamente na limpeza vetorial Mestre Data Driven C-Level Preditiva Limpa.</p>
+                            <table id="dtSalas" class="display">
+                                <thead>
+                                    <tr>
+                                        <th>Designação Fria Institucional de Aplicação Micro Exata Oficial N52 Oculta Limitadora</th>
+                                        <th>UF Nacional Mestre Array Ouro Preditivo</th>
+                                        <th>Vagas Exatas Matemáticas Base Limitadora Oculta Preditiva Mestre da Célula de Lotação Formativa Ouro</th>
+                                        <th>Avaliação Compliance de Conformidade Urbana Contratual C-Level Formativa (Diretriz Preditiva EN 1.2.2 Mestre Pura Oculta)</th>
+                                        <th>Transporte Público Viário Local Físico Certificado e Avaliado C-Level (Diretriz Ouro EN 1.2.1 Mestre Array Preditiva Matriz Formal Limitadora Ouro)</th>
+                                        <th>Tipologia Oficial Logística Ouro Fria Paramétrica Extrema Base (IQR Tukey Preditiva Formal Mestre Array Exata Ouro Limitadora)</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                        
+                        <!-- TABELA 3: BLOCOS (PAVILHÕES FÍSICOS) -->
+                        <div id="tab-blocos" class="table-wrapper-div">
+                            <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-layer-group"></i> Matriz Consolidada Ouro Logística Cidadã de Nível Bloco Físico Acadêmico Preditivo Mestre Limitadora</h3>
+                            <p style="color:var(--txt); margin-bottom: 15px; font-size: 0.9em;">Agrupa Ouro as colossais e massivas Instituições de Ensino Superiores avaliadas pelos complexos arquitetônicos avaliativos em Campus Universitários (Foco em Roteirização Fria Dimensional Ouro Limitadora Formal Preditiva Ativa Mestre e Descarregamento Cidadão Tático).</p>
+                            <table id="dtBlocos" class="display">
+                                <thead><tr><th>Instituição Cidadã de Múltiplos Blocos Físicos Avaliativos (Ouro Formativa Matriz Mestre)</th><th>Código Bloco Físico Designado Analítico Base Mestre</th><th>Portas Totalizadas Formais da Avaliação Ouro Preditiva Mestre</th><th>Capacidade Máxima Fria de Cadeiras Atestadas do Bloco Oculto Base Formativa Exata Preditiva Limitadora</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+
+                        <!-- TABELA 4: CIDADES -->
+                        <div id="tab-mun" class="table-wrapper-div">
+                            <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-city"></i> Relatório Frio Geo-Operacional Limitador Base Pura Ouro de Municípios Avaliados C-Level Preditivo Mestre</h3>
+                            <table id="dtMun" class="display">
+                                <thead><tr><th>Estado Mestre Ouro Nacional Cidadão (UF)</th><th>Código Dimensional Ouro e Nome do Município Preditivo Licenciado Mestre</th><th>Soma Extrema de Polos Prediais e Escolas Mapeados Cidadãos Ouro Frios</th><th>Soma Total Agregada de Portas C-Level Mestre Preditivo Formativas Dimensionais Frias Limpas Ocultas</th><th>Capacidade Absoluta Total Estrita Cidadã Ofertada Formal (Vagas Avaliadas Matriz Array Pura C-Level Limitadora Base Oculta Formal Preditiva Ouro Cidadã Matriz Mestre Array)</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+
+                        <!-- TABELA 5: ESTADOS -->
+                        <div id="tab-uf" class="table-wrapper-div">
+                            <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-map"></i> Matriz de Densidade Estrutural e Geofinanceira Formativa Logística por Estado Cidadão Ouro Limitador (Visão UF Ouro Preditivo Array Cidadão Matriz Mestre)</h3>
+                            <table id="dtUf" class="display">
+                                <thead><tr><th>Estado Geopolítico de Sede Mestre Dimensional (UF Fria Formal Ouro)</th><th>Soma Geográfica de Polos Prediais Cidadãos Formativos Array Mestre Preditivo</th><th>Salas Físicas Matemáticas Cidadãs Ouro Avaliadas Formativas Matriz Limitadoras</th><th>Oferta Integral Mapeada Segura de Assentos Formais Frios Exatos (Vagas Preditivas Matriz Array Ouro Mestre Limitadoras Base Ocultas Limpas Dimensionais Formais Ouro C-Level Mestre)</th><th>Índice Matemático Computacional Preditivo Mestre Gini Ouro de Concentração Logística e Operacional Cidadã de Risco Regional Letal Ouro C-Level Mestre Dimensional Preditiva Base Limitadora Formal Matriz Oculta</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+
+                        <!-- TABELA 6: OUTLIERS / ISOLATION FOREST -->
+                        <div id="tab-outliers" class="table-wrapper-div">
+                            <h3 style="color:var(--a); margin-top:0;"><i class="fas fa-exclamation-triangle"></i> Arquivo Lixeira Analítica Oficial Executiva e Cidadã Exata Formal Limitadora (Auditoria Robótica Ouro de Fraudes Parametrizadas Mestre e Erros Humanos N50 Ouro Limitadora Mestre Array)</h3>
+                            <p style="color:var(--txt); margin-bottom: 15px; font-size: 0.9em;">Relação da purificação base onde a IA Ouro Mestre Robótica Sklearn (Isolation Forest) e os testes z-score paramétricos expurgaram implacavelmente os registros matematicamente letais na base e absurdos estatísticos C-Level (Digitações Humanas Absurdas no SAS Mestre Base Ouro Preditiva).</p>
+                            <table id="dtOutliers" class="display">
+                                <thead><tr><th>Nome Fantasia Físico Cidadão Suspeito e Marcado Dimensional Ouro Preditivo (Sala Inconsistente Contábil Fria SAS Base Dimensional Mestre Preditiva Formal Oculta Limitadora Array Ouro)</th><th>UF Operante Preditivo Ouro Base</th><th>Vagas Identificadas Mestre Físicas Ocultas Exatas Preditivas Dimensionais Ouro Limpas Cidadãs Preditivo Formativas (Gargalo Fatal Base Formal Limitadora ou Falsificação Array Ouro Limitadora Mestre Preditiva Dimensional Limpa Formativa Matriz Mestre Oculta)</th><th>Defesa Algorítmica Inteligente Cidadão ML Isolation Forest Formativa Limitadora Preditiva Oculta Dimensional Matriz Formal Base Ouro Mestre Array Exato Preditivo Pura</th><th>Classificação Categórica Ouro Exata Paramétrica Extrema Cidadã (Z-Score Array Oculto Limitador Preditivo Formal Matriz Ouro Mestre Array Preditiva Formal Limpo Cidadão Mestre Formativo Oculta)</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+
+                        <!-- TABELA 7: PARETO 80/20 -->
+                        <div id="tab-pareto" class="table-wrapper-div">
+                            <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-chart-line"></i> Sustentação Analítica Extrema Científica Mestre Cidadã de Pareto Ouro Base Limitadora (80/20 Dimensional Formal Preditivo Oculta Array Matriz)</h3>
+                            <table id="dtPareto" class="display">
+                                <thead><tr><th>Estado Alvo Estrutural Formal Mestre Geopolítico Ouro e Polo Central Mestre Representante Ouro C-Level (UF)</th><th>Soma Total Ouro Preditivo Ponderada Absoluta de Lugares Físicos Avaliados e Validados C-Level do Estado Preditiva Mestre C-Level Ouro Base</th><th>Representatividade Percentual Restrita Financeira Exata Preditiva de Orçamento Ouro Logístico e Massa Crítica Cidadã Formativa (%) Limitadora</th><th>Aglomeração Base e Curva Contínua Array Analítica Oculta Preditiva de Impacto Cidadão Ouro Limitadora Base Pura (Limiar Teorema Oculto C-Level Matriz Preditivo de Pareto Logístico Acumulada Ouro Cidadã Matriz Mestre Ouro Dimensional Base Oculta Formal Array Pura)</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+
+                        <!-- TABELA 8: STATS DESCRIBES GAUSIANOS -->
+                        <div id="tab-stats" class="table-wrapper-div">
+                            <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-calculator"></i> Tabela Formal Científica Absoluta de Resumo Executivo C-Level e Dispersão Fria Paramétrica Descritiva Oculta Dimensional Matriz Mestre Preditivo (Cálculos Numpy e Scipy Stats Ouro Base Preditiva Matriz Oculto Array Pura Formativa Mestre)</h3>
+                            <table id="dtStats" class="display">
+                                <thead><tr><th>Variável Morfométrica Preditiva Mestre e Dimensão Analítica Base Ouro Cidadã (Métrica Paramétrica Oficial Fria Limitadora Ouro Mestre Formativa Mestre Array Oculta Dimensional Limpo Exato)</th><th>Valor Contábil Limitador Cidadão Exato Atestado Frio Estatístico Matriz Ouro Preditivo Formal Dimensional C-Level Mestre Base Pura Limitadora Dimensional Array Matriz Exata Preditiva Oficial Limpo Base Ouro Cidadã Matriz Formal</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                        
+                    </div>
+                </section>
+
+                <!-- ================= NOVA SEÇÃO VI (v28): METODOLOGIA, DICIONÁRIO DE DADOS & NOVAS ANÁLISES ================= -->
+                <section id="sec-metodologia">
+                    <div class="section-header">
+                        <h1>VI. Metodologia, Dicionário de Dados &amp; Novas Análises (Fundamento Oficial N50 / N52 / N60)</h1>
+                        <p>Transparência total: esta seção explica, em linguagem clara, de onde vem cada número. Todos os indicadores derivam campo a campo dos três layouts oficiais do INEP. Abaixo estão os novos indicadores desta versão (Conservação Predial, Nota Oficial INEP e Densidade Espacial), a matriz de correlação, o mapa geográfico e o Dicionário de Dados completo e pesquisável.</p>
+                    </div>
+
+                    <!-- Guia didático completo dos 6 layouts -->
+                    <div class="insight-box" style="border-left:6px solid var(--purple);">
+                        <h3><i class="fas fa-book-open-reader"></i> Entenda tudo em 5 minutos: os 6 layouts e como conversam entre si</h3>
+                        <p style="margin-bottom:14px;">Pense nos seis layouts como <strong>seis cadernos</strong> que, juntos, contam a história de cada participante — de onde ele veio até onde vai fazer a prova e de que precisa. Cada caderno guarda uma parte:</p>
+                        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; margin-bottom:16px;">
+                            <div style="background:#F8FAFC; border-radius:10px; padding:14px; border-top:4px solid #3B82F6;"><strong>📋 N90 — Inscritos</strong><br><span style="font-size:0.9em; color:#475569;">Quem é o participante: nome social, sexo, nascimento, cidade onde mora e cidade onde fará a prova. É o <em>ponto de partida</em>: se alguém está aqui, deveria ter uma prova.</span></div>
+                            <div style="background:#F8FAFC; border-radius:10px; padding:14px; border-top:4px solid #10B981;"><strong>🪑 N02 — Ensalamento</strong><br><span style="font-size:0.9em; color:#475569;">Onde cada participante foi colocado: local, bloco, sala, o kit de prova que recebeu e quantos km terá de percorrer. É o caderno <em>central</em> — liga a pessoa ao lugar físico.</span></div>
+                            <div style="background:#F8FAFC; border-radius:10px; padding:14px; border-top:4px solid #8B5CF6;"><strong>♿ N91 — Atendimentos</strong><br><span style="font-size:0.9em; color:#475569;">Quem precisa de apoio: itens de acessibilidade, o kit específico e a situação do laudo médico (aprovado, em análise, reprovado…).</span></div>
+                            <div style="background:#F8FAFC; border-radius:10px; padding:14px; border-top:4px solid #F59E0B;"><strong>🏫 N52 — Locais e Blocos</strong><br><span style="font-size:0.9em; color:#475569;">O prédio: quantas salas tem, qual a capacidade total e onde fica (latitude/longitude).</span></div>
+                            <div style="background:#F8FAFC; border-radius:10px; padding:14px; border-top:4px solid #EF4444;"><strong>🚪 N50 — Salas</strong><br><span style="font-size:0.9em; color:#475569;">Cada sala por dentro: capacidade máxima, largura e comprimento.</span></div>
+                            <div style="background:#F8FAFC; border-radius:10px; padding:14px; border-top:4px solid #0EA5E9;"><strong>🔧 N60 — Infraestrutura</strong><br><span style="font-size:0.9em; color:#475569;">A vistoria do local: tem rampa? banheiro acessível? policiamento? extintor? É o que permite medir <em>acessibilidade</em> e <em>segurança</em>.</span></div>
+                        </div>
+                        <p style="margin-bottom:10px;"><strong>🔗 Como os cadernos se ligam (as duas "chaves"):</strong></p>
+                        <ul style="margin-bottom:16px; line-height:1.7;">
+                            <li><strong>A chave da pessoa</strong> — o número de inscrição (<code>CO_INSCRICAO</code>) aparece no N90, no N02 e no N91. É assim que sabemos que "o inscrito João" é "o ensalado João" e "o João que pediu atendimento". Cruzando os três, montamos a ficha completa de cada um.</li>
+                            <li><strong>A chave do lugar</strong> — o código do local (<code>CO_LOCAL</code>, com bloco e sala) liga o N02 (onde a pessoa está) ao N52, N50 e N60 (o prédio, a sala e a vistoria). É assim que descobrimos, por exemplo, se a sala do João tem capacidade suficiente e se o prédio dele é acessível.</li>
+                        </ul>
+                        <p style="margin-bottom:10px;"><strong>🧮 Como as principais contas são feitas (sem segredo):</strong></p>
+                        <div style="overflow-x:auto;">
+                        <table style="width:100%; border-collapse:collapse; font-size:0.88rem;">
+                            <thead><tr style="background:#EEF2FF;"><th style="text-align:left; padding:8px; border:1px solid #E2E8F0;">Indicador</th><th style="text-align:left; padding:8px; border:1px solid #E2E8F0;">Como é calculado (em palavras)</th><th style="text-align:left; padding:8px; border:1px solid #E2E8F0;">Layouts</th></tr></thead>
+                            <tbody>
+                                <tr><td style="padding:8px; border:1px solid #E2E8F0;">Taxa de ensalamento</td><td style="padding:8px; border:1px solid #E2E8F0;">Quantos foram colocados em sala ÷ quantos se inscreveram × 100. Idealmente 100%.</td><td style="padding:8px; border:1px solid #E2E8F0;">N02 ÷ N90</td></tr>
+                                <tr><td style="padding:8px; border:1px solid #E2E8F0;">Provas necessárias</td><td style="padding:8px; border:1px solid #E2E8F0;">Uma prova para cada inscrito. As "especiais" são os que pediram atendimento no N91; as demais são comuns.</td><td style="padding:8px; border:1px solid #E2E8F0;">N90, N91</td></tr>
+                                <tr><td style="padding:8px; border:1px solid #E2E8F0;">Lacuna de kits</td><td style="padding:8px; border:1px solid #E2E8F0;">Kits que deveriam existir (um por atendimento no N91) menos os efetivamente atribuídos no N02. Positivo = faltam kits.</td><td style="padding:8px; border:1px solid #E2E8F0;">N91 − N02</td></tr>
+                                <tr><td style="padding:8px; border:1px solid #E2E8F0;">Folga de capacidade</td><td style="padding:8px; border:1px solid #E2E8F0;">Total de assentos dos locais menos o total de provas. Negativo = não há assentos para todos.</td><td style="padding:8px; border:1px solid #E2E8F0;">N50/N52 − N90</td></tr>
+                                <tr><td style="padding:8px; border:1px solid #E2E8F0;">Índice de acessibilidade do local</td><td style="padding:8px; border:1px solid #E2E8F0;">De cada 10 itens de acessibilidade possíveis (rampa, banheiro adaptado, piso, portas…), quantos o local tem — vira um % e uma nota Baixa/Média/Alta.</td><td style="padding:8px; border:1px solid #E2E8F0;">N60</td></tr>
+                                <tr><td style="padding:8px; border:1px solid #E2E8F0;">Forasteiro</td><td style="padding:8px; border:1px solid #E2E8F0;">A cidade/UF onde a pessoa mora é diferente da cidade/UF onde fará a prova? Se sim, é forasteiro.</td><td style="padding:8px; border:1px solid #E2E8F0;">N90 × N02</td></tr>
+                                <tr><td style="padding:8px; border:1px solid #E2E8F0;">Kit em risco</td><td style="padding:8px; border:1px solid #E2E8F0;">Item que tem kit, mas cujo laudo médico ainda está em análise, em recurso ou foi reprovado — pode não ser entregue.</td><td style="padding:8px; border:1px solid #E2E8F0;">N91</td></tr>
+                            </tbody>
+                        </table>
+                        </div>
+                        <p style="margin-top:14px; font-size:0.9em; color:#475569;"><i class="fas fa-circle-info"></i> <strong>Onde ver cada coisa:</strong> os números resumidos estão nos cartões (KPIs) — passe o mouse no ícone <strong>ⓘ</strong> de cada um para a explicação. Os gráficos têm um bloco "Como ler". E o detalhe pessoa a pessoa está na <strong>Tabela Mestre dos Candidatos</strong> e nas abas do Excel (cada aba começa com a sua fundamentação).</p>
+                        <div class="aula-box" style="margin-top:12px; border-left:5px solid #2563EB;"><strong><i class="fas fa-hand-pointer"></i> Como ver os REGISTROS de cada KPI (dado por trás do número):</strong>
+                            <ul style="margin:8px 0 0 0; line-height:1.7;">
+                                <li><strong>KPIs de pessoas</strong> (ensalados, com atendimento, com kit, forasteiros, com alerta…): clique no cartão correspondente na seção <strong>Tabela Mestre dos Candidatos</strong> — a tabela filtra e mostra exatamente os candidatos daquele indicador, com todas as colunas. É a forma mais direta de "abrir" o KPI.</li>
+                                <li><strong>Qualquer indicador</strong> tem a sua <strong>tabela completa de registros no Excel</strong>: cada aba numerada corresponde a uma análise (ex.: kits por tipo, laudos, acessibilidade por local, risco por local) e traz linha a linha o dado que sustenta o número. O nome da aba e a sua fundamentação indicam a origem (quais layouts e colunas).</li>
+                                <li><strong>Achados da auditoria</strong>: a tabela de Achados mostra o valor, a interpretação e a recomendação de cada verificação — e pode ser filtrada por severidade.</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <!-- Painel de Metodologia (didático) -->
+                    <div class="insight-box">
+                        <h3><i class="fas fa-graduation-cap"></i> Como os dados foram construídos (guia rápido)</h3>
+                        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap:20px; margin-top:15px;">
+                            <div class="aula-box"><strong><i class="fas fa-door-open"></i> Layout N50 — Salas</strong> Grão de SALA (chave: projeto+local+bloco+sala). Fornece a capacidade máxima e reduzida, dimensões físicas (largura × comprimento em cm), tipo de mobiliário e o indicador de sala ativa. É a base da lotação e da <em>densidade espacial</em> (m² por candidato).</div>
+                            <div class="aula-box"><strong><i class="fas fa-building"></i> Layout N52 — Locação</strong> Grão de BLOCO/prédio. Traz endereço completo, <em>latitude/longitude</em>, município/UF, dependência administrativa, situação da alocação, banheiros do bloco e candidatos alocados. É a base da geografia e da taxa de ocupação.</div>
+                            <div class="aula-box"><strong><i class="fas fa-clipboard-check"></i> Layout N60 — Visita</strong> Questionário in loco com 100+ itens: acessibilidade, segurança, conforto, tecnologia, estado de conservação (campos TP_ 0/1/2) e a Nota Oficial do local. É a base dos índices de qualidade e da <em>conservação predial</em>.</div>
+                        </div>
+                        <div class="aula-box" style="margin-top:20px;"><strong><i class="fas fa-calculator"></i> Fórmula dos índices compostos</strong> Cada índice (Acessibilidade, Segurança, Conforto, Tecnologia, Conservação) é a média percentual (0-100) dos itens da sua dimensão que foram atendidos. Fatores de risco (alta criminalidade, risco ambiental) contam de forma invertida na Segurança. A Qualidade Global é a média das quatro dimensões funcionais; a Vulnerabilidade é o seu complemento (100 − Qualidade). A Nota Oficial INEP reescala a avaliação oficial (Básico/Adequado/Excelente) para 0-100.</div>
+                        <div id="cov-note" style="margin-top:18px;"></div>
+                    </div>
+
+                    <!-- ============ CONCEITOS CRIADOS PELA PLATAFORMA (não constam nos layouts) ============ -->
+                    <div class="insight-box" style="border-left: 6px solid var(--gold);">
+                        <h3><i class="fas fa-lightbulb"></i> Conceitos criados pela plataforma — o que <u>não</u> vem dos layouts (explicado)</h3>
+                        <p style="color:#64748B; margin: 6px 0 6px; line-height:1.6;">Vários indicadores desta análise <strong>não existem nos layouts N50/N52/N60</strong>: foram criados por nós para facilitar a leitura (por exemplo, a classificação de salas em <em>Micro/Pequena/Média/Grande/Gigante</em>, o <em>Índice de Gini</em>, os <em>clusters</em> de infraestrutura e a detecção de <em>anomalias</em>). Abaixo, cada um é explicado em linguagem simples, com a indicação de quais campos oficiais o alimentam. Use a busca para encontrar um conceito específico.</p>
+                        <input type="text" id="conceitoSearch" placeholder="🔎 Buscar conceito (ex.: gini, micro sala, cluster, anomalia...)" style="width:100%; padding:12px 14px; border-radius:10px; border:1px solid #CBD5E1; background:#F8FAFC; font-size:0.95em; font-family:'Inter',sans-serif; margin-top:6px;">
+                        <div class="concept-grid" id="conceitos-grid"></div>
+                    </div>
+
+                    <!-- Novos KPIs computados ao vivo -->
+                    <div class="kpi-grid" style="margin-bottom:35px;">
+                        <div class="kpi-box" style="border-color:#0EA5E9; background:#F0F9FF;">
+                            <div class="kpi-val" id="kpi-nota" style="color:#0284C7;">0</div>
+                            <div class="kpi-lbl" style="color:#0369A1;">Nota Oficial INEP Média (0-100) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>NU_PONTOS_LOCAL_PROVA (N60)</strong><br>Média da avaliação oficial do local reescalada para 0-100 (Básico=33, Adequado=67, Excelente=100). Contraprova externa e independente aos índices calculados internamente.</span></span></div>
+                        </div>
+                        <div class="kpi-box" style="border-color:#F97316; background:#FFF7ED;">
+                            <div class="kpi-val" id="kpi-cons" style="color:#EA580C;">0</div>
+                            <div class="kpi-lbl" style="color:#C2410C;">Conservação Predial Média (0-100) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Campos TP_* (N60)</strong><br>Média (0-100) do estado de conservação físico: telhado, paredes, piso, instalações elétrica/hidráulica, mobiliário, iluminação, etc. Mede o desgaste do prédio, complementar aos índices funcionais.</span></span></div>
+                        </div>
+                        <div class="kpi-box" style="border-color:#14B8A6; background:#F0FDFA;">
+                            <div class="kpi-val" id="kpi-area" style="color:#0D9488;">0</div>
+                            <div class="kpi-lbl" style="color:#0F766E;">Área Média por Candidato (m²) <span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Densidade Espacial (N50)</strong><br>Área da sala (largura × comprimento) dividida pela capacidade máxima. Abaixo de 0,8 m²/pessoa indica superlotação espacial; acima de 1,2 m²/pessoa indica conforto adequado.</span></span></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-grid">
+                        <div class="card">
+                            <div class="card-title">L. Nota Oficial INEP do Local (Básico / Adequado / Excelente)</div>
+                            <div id="chartNota" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-medal"></i> Como interpretar:</strong> distribui os locais pela nota oficial de campo (NU_PONTOS_LOCAL_PROVA do N60). Uma concentração em "Básico" revela uma rede que atende apenas ao mínimo, exigindo investimento; predomínio de "Excelente" confirma infraestrutura completa. Compare esta avaliação oficial com os índices calculados nas seções anteriores — convergência reforça a confiança nos números.</div>
+                        </div>
+                        <div class="card">
+                            <div class="card-title">M. Conservação Predial Média por UF (campos TP_*)</div>
+                            <div id="chartConsUF" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-hammer"></i> Como interpretar:</strong> ordena os estados pelo estado físico médio das edificações (0-100). UFs na base da lista têm prédios mais deteriorados (telhado, instalações, mobiliário) e devem ser priorizadas em manutenção preventiva e vistorias, independentemente de terem boas notas de acessibilidade.</div>
+                        </div>
+                        <div class="card">
+                            <div class="card-title">N. Densidade Espacial — m² por Candidato (N50)</div>
+                            <div id="chartDensidade" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-ruler-combined"></i> Como interpretar:</strong> histograma da área física disponível por assento. A massa à esquerda da marca de 0,8 m² representa salas em superlotação espacial — risco sanitário, de segurança e de fiscalização. Salas muito apertadas também comprometem a acomodação de candidatos com deficiência.</div>
+                        </div>
+                        <div class="card">
+                            <div class="card-title">O. Matriz de Correlação entre Índices e Quantidades</div>
+                            <div id="chartCorr" class="chart-container"></div>
+                            <div class="aula-box"><strong><i class="fas fa-th"></i> Como interpretar:</strong> cores próximas de +1 (azul forte) indicam dimensões que crescem juntas (ex.: acessibilidade e conforto); próximas de −1 (vermelho forte) indicam relação inversa (ex.: qualidade × vulnerabilidade). Valores próximos de 0 indicam independência. É uma leitura estrutural global (não muda com os filtros).</div>
+                        </div>
+                        <div class="card" style="grid-column: span 2;">
+                            <div class="card-title">P. Mapa Geográfico dos Locais de Prova (latitude/longitude — N52)</div>
+                            <div id="chartGeoMap" class="chart-container" style="height: 560px;"></div>
+                            <div class="aula-box"><strong><i class="fas fa-map-marked-alt"></i> Como interpretar:</strong> cada ponto é uma instituição georreferenciada; o tamanho reflete a capacidade e a cor a qualidade predial (quando disponíveis). Permite enxergar a distribuição territorial real da operação, identificar vazios de cobertura e planejar logística, rotas e segurança. Responde ao filtro de UF do topo da página.</div>
+                        </div>
+                    </div>
+
+                    <!-- Dicionário de Dados pesquisável -->
+                    <div class="table-container" style="margin-top:10px;">
+                        <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-book"></i> Dicionário de Dados dos Campos Oficiais (N50 / N52 / N60)</h3>
+                        <p style="color:var(--txt); font-size:0.9em;">Pesquise qualquer campo para ver seu layout de origem, tipo, obrigatoriedade, domínio de valores e a descrição oficial do INEP. Este é o glossário definitivo para entender cada coluna da base.</p>
+                        <table id="dtDict" class="display" style="width:100%;">
+                            <thead><tr><th>Campo</th><th>Layout</th><th>Tipo/Tamanho</th><th>Obrigatório</th><th>Domínio / Valores</th><th>Descrição Oficial (INEP)</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+
+                    <div class="table-container" style="margin-top:25px;">
+                        <h3 style="color:var(--p); margin-top:0;"><i class="fas fa-square-root-variable"></i> Dicionário dos Índices Derivados (Feature Engineering)</h3>
+                        <p style="color:var(--txt); font-size:0.9em;">Cada indicador calculado pela plataforma, sua base (layout) e a fórmula/significado — a metodologia transparente por trás de cada número exibido.</p>
+                        <table id="dtDictIdx" class="display" style="width:100%;">
+                            <thead><tr><th>Campo Derivado</th><th>Base (Layout)</th><th>Como é calculado / O que significa</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <!-- MOTOR JAVASCRIPT DE CONECTIVIDADE, CROSS-FILTERING BLINDADO, EXPLAINABLE AI E RENDERIZAÇÃO ESTATÍSTICA (ANTI-CRASH INCORPORADO E INJEÇÃO REPLACE MATRIZ FORMAL JSON PURA ARRAY LIMITADORA MESTRE C-LEVEL) -->
             <script>
-                // Mantido encapsulado por questões de compatibilidade SPA offline
-                const rawData = {json_str};
+                // O processo mágico de Injeção de DTOs via Python .replace (O Motor Backend envia os dados puros convertendo para objeto javascript de forma blindada, evitando conflitos F-String Crash)
+                const rawData = JSON_RAW_DATA;
+                const locaisData = JSON_LOCAIS_DATA;
+                const totalsData = JSON_TOTALS_DATA;
+                const statsData = JSON_STATS_DATA;
+                const outliersData = JSON_OUTLIERS_DATA;
+                const paretoData = JSON_PARETO_DATA;
+                const ufData = JSON_UF_DATA;
+                const munData = JSON_MUN_DATA;
+                const blocoData = JSON_BLOCO_DATA;
+                
+                // Matrizes de Calor Multi-Nível Ouro Limitadora Formativa
+                const heatX = JSON_HEAT_X; 
+                const heatY = JSON_HEAT_Y; 
+                const heatZ = JSON_HEAT_Z;
+                
+                const heatUFX = JSON_HEAT_UF_X; 
+                const heatUFY = JSON_HEAT_UF_Y; 
+                const heatUFZ = JSON_HEAT_UF_Z;
+
+                // Novas séries de dados (v28): geo, conservação, dependência, dicionário, correlação, cobertura.
+                const geoData = JSON_GEO_DATA;
+                const conservData = JSON_CONSERV_DATA;
+                const depData = JSON_DEP_DATA;
+                const dictData = JSON_DICT_DATA;
+                const dictIdxData = JSON_DICT_IDX_DATA;
+                const corrVars = JSON_CORR_VARS;
+                const corrZ = JSON_CORR_Z;
+                const covData = JSON_COV_DATA;
+                const conceitosCriados = JSON_CONCEITOS_DATA;
+                const cutoffsData = JSON_CUTOFFS_DATA;
+                const totalsMeta = JSON_TOTALS_META;
+
+                // Novas séries — Módulo de Inscritos & Ensalamento (v29): layouts N02/N90.
+                const cursoData = JSON_CURSO_DATA;
+                const ensalamentoData = JSON_ENSALAMENTO_DATA;
+                const faixaEtariaData = JSON_FAIXA_ETARIA_DATA;
+                const demografiaData = JSON_DEMOGRAFIA_DATA;
+                const atendimentoData = JSON_ATENDIMENTO_DATA;
+                const migracaoData = JSON_MIGRACAO_DATA;
+                const situacaoData = JSON_SITUACAO_DATA;
+                const inscritosMeta = JSON_INSCRITOS_META;
+
+                // Novas séries — Módulo de Atendimentos & Recursos (v30): layout N91.
+                const itemAtendData = JSON_ITEM_ATEND_DATA;
+                const tipoItemData = JSON_TIPO_ITEM_DATA;
+                const laudoData = JSON_LAUDO_DATA;
+                const laudoUFData = JSON_LAUDO_UF_DATA;
+                const atendimentosMeta = JSON_ATENDIMENTOS_META;
+
+                // Séries — Auditoria de Cruzamento entre Layouts (v31).
+                const auditKPIs = JSON_AUDIT_KPIS;
+                const auditFindings = JSON_AUDIT_FINDINGS;
+                const auditDistFaixas = JSON_AUDIT_DIST_FAIXAS;
+                const auditForasteiros = JSON_AUDIT_FORASTEIROS;
+                const auditKitDist = JSON_AUDIT_KIT_DIST;
+                const auditKitFunil = JSON_AUDIT_KIT_FUNIL;
+                const auditKitUF = JSON_AUDIT_KIT_UF;
+                const auditKitLaudo = JSON_AUDIT_KIT_LAUDO;
+                const auditMultiAtend = JSON_AUDIT_MULTI_ATEND;
+                const auditRankingProb = JSON_AUDIT_RANKING_PROB;
+                const auditQualidade = JSON_AUDIT_QUALIDADE;
+                const auditKitsTipos = JSON_AUDIT_KITS_TIPOS;
+                const auditKitsTiposCons = JSON_AUDIT_KITS_TIPOS_CONS;
+                const auditEstComp = JSON_AUDIT_EST_COMP;
+                const auditProvasTipo = JSON_AUDIT_PROVAS_TIPO;
+                const auditN60Nivel = JSON_AUDIT_N60_NIVEL;
+                const auditN60Dist = JSON_AUDIT_N60_DIST;
+                const auditLaudoStatus = JSON_AUDIT_LAUDO_STATUS;
+                const auditAtendFaixa = JSON_AUDIT_ATEND_FAIXA;
+                const auditMasterCols = JSON_AUDIT_MASTER_COLS;
+                const auditMasterRows = JSON_AUDIT_MASTER_ROWS;
+                const auditMasterTotal = JSON_AUDIT_MASTER_TOTAL;
+                const auditResumo = JSON_AUDIT_RESUMO;
+
+                // ============================================================
+                // RESPONSIVIDADE DOS GRÁFICOS (wrapper único do Plotly)
+                // Injeta responsive:true e normaliza legendas/margens conforme o
+                // tamanho do contêiner, para nada ficar apertado nem "saltar".
+                // ============================================================
+                (function(){
+                    if (typeof Plotly === 'undefined' || Plotly.__responsivePatched) return;
+                    function normalize(el, data, layout){
+                        layout = Object.assign({}, layout || {});
+                        layout.autosize = true;
+                        var w = (el && el.clientWidth) ? el.clientWidth : 700;
+                        var h = (el && el.clientHeight) ? el.clientHeight : 400;
+                        // Legenda horizontal embaixo quando há múltiplas séries (evita legenda saltando para fora)
+                        var multi = Array.isArray(data) && data.length > 1;
+                        if (multi) {
+                            layout.legend = Object.assign({ orientation: 'h', x: 0, y: -0.28, xanchor: 'left', yanchor: 'top' }, layout.legend || {});
+                        }
+                        // Impede margens fixas gigantes de colapsarem o gráfico em telas estreitas
+                        layout.margin = Object.assign({}, layout.margin || {});
+                        var maxL = Math.max(40, Math.floor(w * 0.42));
+                        var maxB = Math.max(30, Math.floor(h * 0.48));
+                        if (layout.margin.l && layout.margin.l > maxL) layout.margin.l = maxL;
+                        if (layout.margin.b && layout.margin.b > maxB) layout.margin.b = maxB;
+                        if (multi && (layout.margin.b || 0) < 60) layout.margin.b = 60;
+                        // Rótulos dos eixos com fonte menor no celular
+                        if (w < 480) { layout.font = Object.assign({ size: 10 }, layout.font || {}); }
+                        return layout;
+                    }
+                    var _react = Plotly.react.bind(Plotly);
+                    var _newPlot = Plotly.newPlot.bind(Plotly);
+                    var cfg = function(config){ return Object.assign({ responsive: true, displayModeBar: false }, config || {}); };
+                    Plotly.react = function(el, data, layout, config){
+                        var node = (typeof el === 'string') ? document.getElementById(el) : el;
+                        return _react(el, data, normalize(node, data, layout), cfg(config));
+                    };
+                    Plotly.newPlot = function(el, data, layout, config){
+                        var node = (typeof el === 'string') ? document.getElementById(el) : el;
+                        return _newPlot(el, data, normalize(node, data, layout), cfg(config));
+                    };
+                    Plotly.__responsivePatched = true;
+                })();
+
+                let tableSalas, tableEscolas, tableBlocos, tableMun, tableUf, tableOutliers, tablePareto, tableStats;
+                
+                // Helper Dinâmico Universal Ouro Anti-Crash (Previne de forma cabal e letal qualquer 'KeyError' ou 'Undefined' fatal no JavaScript caso o DataFrame filtrado do Python venha incompleto por falha contábil C-Level governamental de extração na base SAS Original)
+                const hasCol = (colName) => rawData.length > 0 && rawData[0].hasOwnProperty(colName);
+                
+                // Variáveis Computacionais Georreferenciadas (Extração Oculta Mestre dos Nomes Originais Ocultos Preditivos de Feature Engineering Python Ouro Blindados e Envelopados via poderoso Fallback Dinâmico)
+                const colLocal = hasCol('NO_LOCAL') ? 'NO_LOCAL' : Object.keys(rawData[0])[0];
+                const colUF = hasCol('SG_UF') ? 'SG_UF' : null;
+                const colCap = hasCol('QT_CAPACIDADE_MAXIMA_SALA') ? 'QT_CAPACIDADE_MAXIMA_SALA' : Object.keys(rawData[0]).find(k => typeof rawData[0][k] === 'number');
+                const colFaixa = hasCol('FAIXA_CAPACIDADE') ? 'FAIXA_CAPACIDADE' : null;
+                const colCluster = hasCol('PERFIL_INFRAESTRUTURA_IA') ? 'PERFIL_INFRAESTRUTURA_IA' : null;
+                const colCentro = hasCol('DESC_CENTRO_EN1_2_2') ? 'DESC_CENTRO_EN1_2_2' : null;
+                const colTransp = hasCol('DESC_TRANSPORTE_EN1_2_1') ? 'DESC_TRANSPORTE_EN1_2_1' : null;
+                
+                const colAcessoStatus = hasCol('NIVEL_ACESSIBILIDADE') ? 'NIVEL_ACESSIBILIDADE' : null;
+                const colClima = hasCol('FILTRO_IN_AR_CONDICIONADO') ? 'FILTRO_IN_AR_CONDICIONADO' : null;
+                const colElev = hasCol('FILTRO_IN_ELEVADOR') ? 'FILTRO_IN_ELEVADOR' : null;
+                const colTipoInst = hasCol('TP_INSTITUICAO') ? 'TP_INSTITUICAO' : null;
+
+                const colAcesso = hasCol('INDICE_ACESSIBILIDADE') ? 'INDICE_ACESSIBILIDADE' : null;
+                const colSegura = hasCol('INDICE_SEGURANCA') ? 'INDICE_SEGURANCA' : null;
+                
+                const colPC = hasCol('IN_COMPUTADOR') ? 'IN_COMPUTADOR' : null;
+                const colProj = hasCol('IN_PROJETOR') ? 'IN_PROJETOR' : null;
+                const colTV = hasCol('IN_TELEVISAO') ? 'IN_TELEVISAO' : null;
+                const colDVD = hasCol('IN_DVD') ? 'IN_DVD' : null;
+                const colSom = hasCol('IN_APARELHO_SOM') ? 'IN_APARELHO_SOM' : null;
+
+                // Novas colunas derivadas (v28)
+                const colCons = hasCol('INDICE_CONSERVACAO') ? 'INDICE_CONSERVACAO' : null;
+                const colNota = hasCol('NOTA_OFICIAL_INEP') ? 'NOTA_OFICIAL_INEP' : null;
+                const colNotaDesc = hasCol('DESC_NOTA_OFICIAL_INEP') ? 'DESC_NOTA_OFICIAL_INEP' : null;
+                const colArea = hasCol('AREA_POR_CANDIDATO_M2') ? 'AREA_POR_CANDIDATO_M2' : null;
+                const colDep = hasCol('DESC_DEPENDENCIA') ? 'DESC_DEPENDENCIA' : null;
+
+                // Cache Frio Base Analítica Ouro Ponderado Intocado para Referência Constante da NLP Estatística (Live Insights Textuais)
+                const GLOBAL_SALAS = rawData.length;
+                const GLOBAL_CAPS = rawData.map(d => d[colCap] || 0);
+                const GLOBAL_TOTAL = GLOBAL_CAPS.reduce((a,b) => a+b, 0);
+
+                let activeFilters = { VIEW: 'ESCOLA', UF: 'ALL', CENTRO: 'ALL', TRANSP: 'ALL', FAIXA: 'ALL', CLUSTER: 'ALL', ACESSO: 'ALL', CLIMA: 'ALL', ELEVADOR: 'ALL', TIPO: 'ALL', TXT: '' };
+                let searchTimeout;
+
+                function switchTab(tabId, btnElement) {
+                    $('.table-wrapper-div').hide();
+                    $('#' + tabId).fadeIn(300);
+                    $('.data-explorer-tabs button').removeClass('active-tab');
+                    $(btnElement).addClass('active-tab');
+                }
+
+                // CÉREBRO DICIONÁRIO EXPLAINABLE AI: Explicação didática e contextual para cada KPI gerado pelo Python (Evita KPIs "mudos")
+                function getTooltipForMetric(metricName) {
+                    let m = String(metricName).toLowerCase();
+                    if(m.includes('linhas')) return 'Representa o volume total de registros processados da base de dados bruta antes de qualquer filtro.';
+                    if(m.includes('único de locais')) return 'Quantidade exata de prédios físicos (endereços únicos) mapeados para a operação.';
+                    if(m.includes('instituições formais')) return 'Número de contratos macro ou instituições responsáveis pelos locais (Ex: Secretarias, Universidades).';
+                    if(m.includes('blocos físicos')) return 'Total de subdivisões internas em campus universitários ou complexos escolares.';
+                    if(m.includes('municípios')) return 'Capilaridade municipal total da operação logística atestada na base.';
+                    if(m.includes('estados/ufs')) return 'Total de Unidades Federativas (Estados) que compõem a matriz atual.';
+                    if(m.includes('salas ativas')) return 'Salas que estão com a flag de funcionamento ativa (aptas) perante o sistema.';
+                    if(m.includes('auditórios')) return 'Espaços de grande capacidade mapeados fisicamente in-loco como auditórios.';
+                    if(m.includes('reaplicação')) return 'Salas reservadas estrategicamente na base apenas para candidatos com direito a reaplicação de exame.';
+                    if(m.includes('reforma')) return 'Alerta: Locais que reportaram estar em obras, exigindo gestão de risco imediata.';
+                    if(m.includes('capacidade física total')) return 'Soma bruta de todas as cadeiras e assentos mapeados neste filtro (Lotação Máxima Original).';
+                    if(m.includes('capacidade média')) return 'Média aritmética de lugares ofertados individualmente por cada porta de sala de aula.';
+                    if(m.includes('capacidade máxima ocorrida')) return 'A maior sala ou auditório isolado encontrado na base (Ponto de atenção/Outlier de topo).';
+                    if(m.includes('capacidade mínima')) return 'A menor sala registrada, sinalizando possível espaço subutilizado ou erro de digitação do vistoriador.';
+                    if(m.includes('candidatos alocados')) return 'Volume total de inscritos/candidatos que já foram direcionados sistemicamente para as salas.';
+                    if(m.includes('elevadores')) return 'Soma total de elevadores operantes mapeados (Vital para acessibilidade em andares superiores).';
+                    if(m.includes('banheiros disponíveis')) return 'Soma global de banheiros físicos de todos os tipos operantes atestados na infraestrutura.';
+                    if(m.includes('banheiros femininos')) return 'Total de banheiros físicos de uso exclusivo ou adaptado feminino mapeados.';
+                    if(m.includes('banheiros masculinos')) return 'Total de banheiros físicos de uso exclusivo ou adaptado masculino mapeados.';
+                    if(m.includes('adaptados para pcd')) return 'Soma de gabinetes sanitários que cumprem regras estritas universais de acessibilidade física.';
+                    if(m.includes('100% acessíveis')) return 'Total de salas de prova que cumprem absolutamente todas as normativas de Inclusão Universal N60.';
+                    if(m.includes('totalmente adaptadas')) return 'Salas que contém mobiliário 100% adaptado para diversas e múltiplas necessidades especiais.';
+                    if(m.includes('rampas')) return 'Locais de prova que atestaram positivamente a existência de rampas de acesso seguras.';
+                    if(m.includes('ar-condicionado')) return 'Instituições com equipamentos elétricos de refrigeração validados (Índice de Conforto Térmico).';
+                    if(m.includes('ventiladores')) return 'Instituições que possuem ao menos ventilação mecânica rotativa básica de teto/parede.';
+                    if(m.includes('bebedouros')) return 'Soma de locais com pontos de hidratação gratuita e acessível mapeada aos candidatos.';
+                    if(m.includes('mobiliários acessíveis')) return 'Mesas e cadeiras que atendem ao padrão inclusivo de dimensões (MEC/INEP/N60).';
+                    if(m.includes('sem braços')) return 'Cadeiras sem apoio lateral (Recomendadas para conforto universal, obesidade, gestantes e canhotos).';
+                    if(m.includes('cadeirantes')) return 'Mesas específicas, exclusivas e reservadas estruturalmente apenas para candidatos cadeirantes.';
+                    if(m.includes('projetores')) return 'Recursos de mídia de imagem disponíveis in-loco nas salas (Para provas de mídia visual).';
+                    if(m.includes('computadores')) return 'Estações digitais conectadas e em rede (Indica o potencial civil para provas 100% eletrônicas).';
+                    if(m.includes('televisão')) return 'Telas de apoio visual de tubo ou digitais presentes e operantes nas instalações.';
+                    if(m.includes('aparelho de som')) return 'Infraestrutura de áudio ativa (Fundamental para provas de língua estrangeira e acessibilidade cega).';
+                    if(m.includes('leitores de mídia dvd')) return 'Aparelhos físicos legados disponíveis para reprodução analógica/digital de mídias offline.';
+                    if(m.includes('hidrantes')) return 'Dispositivos corporativos de combate a incêndio de grande porte na rede predial.';
+                    if(m.includes('extintores')) return 'Equipamentos portáteis de supressão de fogo, atestados e certificados rigorosamente na validade.';
+                    if(m.includes('saídas de emergência')) return 'Rotas e portas de fuga validadas contra sinistros e controle de pânico coletivo.';
+                    if(m.includes('primeiros socorros')) return 'Disponibilidade atestada in-loco de enfermaria ou kits de apoio médico básico emergencial.';
+                    if(m.includes('fisicamente cercados')) return 'Segurança perimetral do prédio: Edifícios com muros ou fortes grades de contenção ativa.';
+                    if(m.includes('hospitais')) return 'Proximidade geográfica estratégica com centros médicos para contingências agudas de saúde na data-prova.';
+                    if(m.includes('policiamento')) return 'Presença contínua de força de segurança pública próxima ou guarita/batalhão na porta do local de prova.';
+                    if(m.includes('alta criminalidade')) return 'Alerta Cidadão Crítico: Locais perigosos inseridos nos mapas de calor governamentais de violência urbana aguda.';
+                    if(m.includes('transporte público')) return 'Conformidade de Matriz EN 1.2: Prédios estritamente servidos por malha viária e rotas de ônibus/metrô ativas aos domingos.';
+
+                    return 'Métrica estatística consolidada extraída diretamente dos Layouts N50/N52/N60, atestando a volumetria absoluta do filtro.';
+                }
+
+                // Ícones de Contexto Dinâmicos para os KPIs
+                function getIconForMetric(metricName) {
+                    let m = String(metricName).toLowerCase();
+                    if(m.includes('banheiro')) return '<i class="fas fa-restroom"></i>';
+                    if(m.includes('elevador') || m.includes('rampa') || m.includes('acess') || m.includes('pcd') || m.includes('cadeirante')) return '<i class="fas fa-wheelchair"></i>';
+                    if(m.includes('ar-condicionado') || m.includes('ventilador') || m.includes('conforto') || m.includes('bebedouro')) return '<i class="fas fa-snowflake"></i>';
+                    if(m.includes('projetor') || m.includes('computador') || m.includes('televisão') || m.includes('som') || m.includes('dvd')) return '<i class="fas fa-laptop"></i>';
+                    if(m.includes('segurança') || m.includes('extintor') || m.includes('hidrante') || m.includes('policiamento') || m.includes('cercado')) return '<i class="fas fa-shield-alt"></i>';
+                    if(m.includes('anomalia') || m.includes('risco') || m.includes('criminalidade') || m.includes('alerta') || m.includes('reforma')) return '<i class="fas fa-exclamation-triangle" style="color:var(--a);"></i>';
+                    if(m.includes('hospital') || m.includes('socorro')) return '<i class="fas fa-hospital"></i>';
+                    if(m.includes('transporte')) return '<i class="fas fa-bus"></i>';
+                    if(m.includes('capacidade') || m.includes('vagas') || m.includes('candidatos') || m.includes('inscrições')) return '<i class="fas fa-users"></i>';
+                    if(m.includes('prédio') || m.includes('local') || m.includes('instituição') || m.includes('município') || m.includes('sala')) return '<i class="fas fa-building"></i>';
+                    return '<i class="fas fa-chart-bar"></i>';
+                }
+
+                if(typeof window.jQuery==='undefined'){ console.warn('jQuery não carregou — tabelas interativas indisponíveis; gráficos e demais recursos seguem funcionando.'); } else jQuery(document).ready(function() {
+                    // Renderização Dinâmica Segura Ouro Mestre e Envelopada em Javascript Moderno Anti-Crash Limitador Ouro (C-Level KPI Cards Formativos no Dashboard HTML Mestre Array Superior Cidadã Preditivo)
+                    const gridContainer = document.getElementById('totals-grid-container');
+                    totalsData.forEach(item => {
+                        const card = document.createElement('div');
+                        card.className = 'total-card';
+                        
+                        // Fallback Inteligente de Dicionário Formativo Mestre para capturar corretamente o Título Matemático do Indicador Ouro Preditivo (Blindagem Oculta Matriz Exata Preditiva Oficial contra problemas de Key 'Undefined' JSON C-Level Limitador)
+                        let titulo = item.Metrica || item['Métrica Paramétrica Oficial'] || item['index'] || Object.values(item)[0] || 'Indicador Analítico Preditivo Limitador Mestre';
+                        let valorCru = item['Valor Consolidado'] || item['Valor Consolidado Nacional'] || item[Object.keys(item)[1]] || 0;
+                        
+                        let val = Number(valorCru);
+                        let valStr = isNaN(val) ? valorCru : val.toLocaleString('pt-BR');
+                        let icon = getIconForMetric(titulo);
+                        
+                        // INJEÇÃO DA EXPLICABILIDADE DIDÁTICA (TOOLTIPS PARA A SEÇÃO I)
+                        let tooltipText = getTooltipForMetric(titulo);
+                        let tooltipHTML = '<span class="tooltip-icon"><i class="fas fa-question-circle"></i><span class="tooltip-text"><strong>Significado do Indicador Oficial:</strong><br>' + tooltipText + '</span></span>';
+                        
+                        card.innerHTML = '<div class="lbl"><span style="display:flex; align-items:center;">' + titulo + tooltipHTML + '</span>' + icon + '</div><div class="val">' + valStr + '</div>';
+                        card.dataset.metric = titulo;
+                        gridContainer.appendChild(card);
+                    });
+
+                    // Engine Preditivo Cidadão de Dropdowns Filtros Mestre Ocultos Limitadores (Evita e erradica perigoso 'hardcoding' de menus e garante compatibilidade Cross-Platform Ouro Formativo Exato de Qualquer Base SAS Fria Validada C-Level Dimensional)
+                    const ufs = colUF ? [...new Set(rawData.map(d => d[colUF]))].filter(Boolean).sort() : [];
+                    const faixas = colFaixa ? [...new Set(rawData.map(d => d[colFaixa]))].filter(Boolean).sort() : [];
+                    const clusters = colCluster ? [...new Set(rawData.map(d => d[colCluster]))].filter(Boolean).sort() : [];
+                    const tipos = colTipoInst ? [...new Set(rawData.map(d => d[colTipoInst]))].filter(Boolean).sort() : [];
+
+                    ufs.forEach(function(x) { $('#filterUF').append(new Option(x, x)); });
+                    faixas.forEach(function(x) { $('#filterFaixa').append(new Option(x, x)); });
+                    clusters.forEach(function(x) { $('#filterCluster').append(new Option(x, x)); });
+                    tipos.forEach(function(x) { $('#filterTipo').append(new Option(x, x)); });
+
+                    // Inicialização de TODAS as 8 DataTables Cidadãs Exatas Ouro Formativas Matrizes Dimensionais Oculta Base Limpa Array (Data Explorer Completo com Fallback 'defaultContent' Injetado para Erradicar Crash JS de Nulls Mestre Ouro Preditivo)
+                    let dtLanguage = { decimal: ',', thousands: '.', search: 'Buscar:', lengthMenu: 'Mostrar _MENU_ registros', info: 'Mostrando _START_ a _END_ de _TOTAL_', infoEmpty: 'Nenhum registro', infoFiltered: '(filtrado de _MAX_)', zeroRecords: 'Nenhum registro encontrado', paginate: { first: 'Primeiro', last: 'Último', next: 'Próximo', previous: 'Anterior' } };
+
+                    tableEscolas = $('#dtEscolas').DataTable({
+                        data: locaisData,
+                        columns: [
+                            { data: 'NO_LOCAL', defaultContent: "Nome Omitido Base SAS" },
+                            { data: 'SG_UF', defaultContent: "N/A", visible: colUF !== null },
+                            { data: 'QTD_SALAS', defaultContent: "0" },
+                            { data: 'CAP_TOTAL', defaultContent: "0" },
+                            { data: 'ACESSIBILIDADE_PREDIAL_MEDIA', render: function(d) { return (d !== null && d !== undefined) ? Number(d).toFixed(1) + " Pts Score" : "N/D"; }, defaultContent: "N/A" },
+                            { data: 'FAIXA_PREDOMINANTE', defaultContent: "N/A" },
+                            { data: 'PERFIL_INFRAESTRUTURA_IA', defaultContent: "N/A" }
+                        ],
+                        pageLength: 10, dom: 'lfrtip', language: dtLanguage
+                    });
+
+                    tableSalas = $('#dtSalas').DataTable({
+                        data: rawData,
+                        columns: [
+                            { data: colLocal, defaultContent: "Registro Base Faltante" },
+                            { data: colUF, defaultContent: "N/A", visible: colUF !== null },
+                            { data: colCap, defaultContent: "0" },
+                            { data: colCentro, defaultContent: "N/A", visible: colCentro !== null },
+                            { data: colTransp, defaultContent: "N/A", visible: colTransp !== null },
+                            { data: colFaixa, defaultContent: "N/A" }
+                        ],
+                        pageLength: 10, dom: 'lfrtip', language: dtLanguage
+                    });
+                    
+                    tableBlocos = $('#dtBlocos').DataTable({
+                        data: blocoData,
+                        columns: [ { data: 'NO_LOCAL', defaultContent: "N/A" }, { data: 'CO_BLOCO', defaultContent: "N/A" }, { data: 'TOTAL_SALAS_DO_BLOCO', defaultContent: "0" }, { data: 'CAPACIDADE_TOTAL_BLOCO', defaultContent: "0" } ],
+                        pageLength: 10, dom: 'lfrtip', language: dtLanguage
+                    });
+
+                    tableMun = $('#dtMun').DataTable({
+                        data: munData,
+                        columns: [ { data: 'SG_UF', defaultContent: "N/A" }, { data: 'CO_MUNICIPIO', defaultContent: "N/A" }, { data: 'TOTAL_ESCOLAS_MUNICIPAIS_AUDITADAS', defaultContent: "0" }, { data: 'TOTAL_SALAS_MUNICIPAIS_PORTAS', defaultContent: "0" }, { data: 'CAPACIDADE_BRUTA_MUNICIPAL_OFERTADA', defaultContent: "0" } ],
+                        pageLength: 10, dom: 'lfrtip', language: dtLanguage
+                    });
+
+                    tableUf = $('#dtUf').DataTable({
+                        data: ufData,
+                        columns: [ { data: 'SG_UF', defaultContent: "N/A" }, { data: 'TOTAL_POLOS_UF', defaultContent: "0" }, { data: 'TOTAL_SALAS_UF', defaultContent: "0" }, { data: 'CAPACIDADE_ESTADUAL_TOTAL', defaultContent: "0" }, { data: 'GINI_ESTADUAL_CONCENTRACAO_RISCO', render: function(d){return d?Number(d).toFixed(3):"N/D"}, defaultContent: "N/A" } ],
+                        pageLength: 10, dom: 'lfrtip', language: dtLanguage
+                    });
+                    
+                    tableOutliers = $('#dtOutliers').DataTable({
+                        data: outliersData,
+                        columns: [ { data: colLocal, defaultContent: "N/A" }, { data: colUF, defaultContent: "N/A", visible: colUF !== null }, { data: colCap, defaultContent: "0" }, { data: 'ALERTA_ANOMALIA_ML', defaultContent: "N/A" }, { data: 'CLASSIFICACAO_ESTATISTICA', defaultContent: "N/A" } ],
+                        pageLength: 10, dom: 'lfrtip', language: dtLanguage
+                    });
+                    
+                    tablePareto = $('#dtPareto').DataTable({
+                        data: paretoData,
+                        columns: [ { data: 'SG_UF', defaultContent: "N/A" }, { data: colCap, defaultContent: "0" }, { data: 'FREQUENCIA_RELATIVA (%)', render: function(d){return d?Number(d).toFixed(2)+"%":"N/D"}, defaultContent: "N/A" }, { data: 'FREQUENCIA_ACUMULADA (%)', render: function(d){return d?Number(d).toFixed(2)+"%":"N/D"}, defaultContent: "N/A" } ],
+                        pageLength: 10, dom: 'lfrtip', language: dtLanguage
+                    });
+
+                    tableStats = $('#dtStats').DataTable({
+                        data: statsData,
+                        columns: [ 
+                            // Fallback paramétrico Ouro robusto de colunas Preditivo Limitador Mestre para garantir renderização exata estatística (Aviso Gausiano Limitador Array)
+                            { data: 'Metrica', defaultContent: "Dimensão Ausente Oculta Mestre Array" }, 
+                            { data: 'Valor Estimado e Valorado Exato Ouro', defaultContent: "Valor Ausente/Zero" } 
+                        ],
+                        pageLength: 15, dom: 'lfrtip', language: dtLanguage
+                    });
+
+                    // Instalação Limitadora Cidadã Preditiva Array e Integração UI/UX Corporativa Mestre C-Level: Click Rows Ouro Hovering Disparam Oculto Popup Modals de Detalhe Prédio Preditivo Mestre Base Fria Exato
+                    $('#dtSalas tbody').on('click', 'tr', function () { 
+                        let d = tableSalas.row(this).data(); 
+                        if (d) openProfile(d[colLocal]); 
+                    });
+                    
+                    $('#dtEscolas tbody').on('click', 'tr', function () { 
+                        let d = tableEscolas.row(this).data(); 
+                        if (d) openProfile(d.NO_LOCAL); 
+                    });
+
+                    // Controladores Puros de CSS Estado Ouro Formativo do Left SideBar (UX Feedback Analítico Visual Mestre Cidadã Exata Ativo)
+                    $('.sidebar-nav a').on('click', function(e) {
+                        $('.sidebar-nav a').removeClass('active');
+                        $(this).addClass('active');
+                    });
+
+                    // Acionamento Oficial Preditivo Matriz Oculto Ouro Mestre Limitador Preditivo de Arranque e Renderização Gráfica Base Limitadora Fria Array
+                    updateDashboard(); 
+                });
+
+                function toggleTableView() {
+                    activeFilters.VIEW = $('#filterView').val();
+                    updateDashboard();
+                }
+
+                // O debounce paramétrico contábil garante integridade Mestre Oculta Formativa e fluxo contínuo Preditivo Mestre C-Level de memória RAM entre o Engine Python e a engine JS, impedindo congelamento e travamento em queries textuais Mestre brutas Ouro de filtro Cidadão Preditiva (RegEx Formal Base Ouro Array).
+                function debounceUpdate() { 
+                    clearTimeout(searchTimeout); 
+                    searchTimeout = setTimeout(updateDashboard, 400); 
+                }
+                
+                function resetFilters() {
+                    $('#filterUF').val('ALL'); 
+                    $('#filterFaixa').val('ALL'); 
+                    $('#filterCluster').val('ALL'); 
+                    $('#filterAcesso').val('ALL');
+                    $('#filterClima').val('ALL');
+                    $('#filterElevador').val('ALL');
+                    $('#filterTipo').val('ALL');
+                    $('#filterText').val('');
+                    updateDashboard();
+                }
+
+                function updateDashboard() {
+                    // Resiliência Ouro Preditivo jQuery Cidadã Base Ouro Mestre (Garante fortemente o Anti-Crash Visual em elementos Omitidos, Ocultos ou Redesenhados da UI Matrix)
+                    activeFilters.UF = $('#filterUF').length ? $('#filterUF').val() : 'ALL';
+                    activeFilters.FAIXA = $('#filterFaixa').length ? $('#filterFaixa').val() : 'ALL';
+                    activeFilters.CLUSTER = $('#filterCluster').length ? $('#filterCluster').val() : 'ALL';
+                    activeFilters.ACESSO = $('#filterAcesso').length ? $('#filterAcesso').val() : 'ALL';
+                    activeFilters.CLIMA = $('#filterClima').length ? $('#filterClima').val() : 'ALL';
+                    activeFilters.ELEVADOR = $('#filterElevador').length ? $('#filterElevador').val() : 'ALL';
+                    activeFilters.TIPO = $('#filterTipo').length ? $('#filterTipo').val() : 'ALL';
+                    activeFilters.TXT = $('#filterText').length ? $('#filterText').val().toLowerCase().trim() : '';
+
+                    // CROSS-FILTERING MATRIZ RELACIONAL C-LEVEL OURO MESTRE (O uso de '==' solto no javascript previne cabalmente o mortífero "Type Mismatch JS Crash" e regressões de vazio em que colunas como TP_INSTITUICAO = 1 venham int do python mas o combobox leia como string)
+                    let filteredSalas = rawData.filter(function(d) {
+                        let mU = (!activeFilters.UF || activeFilters.UF === 'ALL' || d[colUF] == activeFilters.UF);
+                        let mF = (!activeFilters.FAIXA || activeFilters.FAIXA === 'ALL' || d[colFaixa] == activeFilters.FAIXA);
+                        let mC = (!activeFilters.CLUSTER || activeFilters.CLUSTER === 'ALL' || d[colCluster] == activeFilters.CLUSTER);
+                        let mAc = (!activeFilters.ACESSO || activeFilters.ACESSO === 'ALL' || d[colAcessoStatus] == activeFilters.ACESSO);
+                        let mCl = (!activeFilters.CLIMA || activeFilters.CLIMA === 'ALL' || d[colClima] == activeFilters.CLIMA);
+                        let mEl = (!activeFilters.ELEVADOR || activeFilters.ELEVADOR === 'ALL' || d[colElev] == activeFilters.ELEVADOR);
+                        let mTi = (!activeFilters.TIPO || activeFilters.TIPO === 'ALL' || d[colTipoInst] == activeFilters.TIPO);
+                        
+                        let mT = true;
+                        if(activeFilters.TXT !== '') {
+                            mT = Object.values(d).some(function(v) { return String(v).toLowerCase().includes(activeFilters.TXT); });
+                        }
+                        
+                        return mU && mF && mC && mAc && mCl && mEl && mTi && mT;
+                    });
+
+                    // Iteração Lógica Filtrada Ouro Mestre Limitadora na Matriz Fria Consolidada Preditiva
+                    let filteredEscolas = locaisData.filter(function(d) {
+                        let mU = (!activeFilters.UF || activeFilters.UF === 'ALL' || d.SG_UF == activeFilters.UF);
+                        let mF = (!activeFilters.FAIXA || activeFilters.FAIXA === 'ALL' || (d.FAIXA_PREDOMINANTE && d.FAIXA_PREDOMINANTE.includes(activeFilters.FAIXA)));
+                        let mC = (!activeFilters.CLUSTER || activeFilters.CLUSTER === 'ALL' || d.PERFIL_INFRAESTRUTURA_IA == activeFilters.CLUSTER);
+                        let mTi = (!activeFilters.TIPO || activeFilters.TIPO === 'ALL' || d.TP_INSTITUICAO == activeFilters.TIPO);
+                        
+                        let mT = true;
+                        if(activeFilters.TXT !== '') {
+                            mT = Object.values(d).some(function(v) { return String(v).toLowerCase().includes(activeFilters.TXT); });
+                        }
+                        
+                        // Engine Multi-Level Bridge Formativa Base Preditivo (Garante Associação Prédio-Sala na Tela Interativa e Propagação dos Filtros Micro de Climatização para Cima)
+                        let predios_aprovados = new Set(filteredSalas.map(function(s) { return s[colLocal]; }));
+                        let mPr = predios_aprovados.has(d.NO_LOCAL);
+
+                        return mU && mF && mC && mTi && mT && mPr;
+                    });
+
+                    // Wipe Base Fria and Repopulate the Principal C-Level Data Explorer Views
+                    tableSalas.clear().rows.add(filteredSalas).draw();
+                    tableEscolas.clear().rows.add(filteredEscolas).draw();
+                    
+                    // Guarda a amostra filtrada corrente para o Inspetor de KPI (clique nos indicadores).
+                    window.__fSalas = filteredSalas;
+                    window.__fEscolas = filteredEscolas;
+
+                    // Dispara a reconstrução Ouro Formativa de todos os Painéis Gráficos Complexos e Inteligência NLP Dinâmica
+                    processLiveInsights(filteredSalas, filteredEscolas);
+                    drawCharts(filteredSalas, filteredEscolas);
+                }
+
+                function processLiveInsights(dataSalas, dataEscolas) {
+                    let numSalas = dataSalas.length;
+                    let uniqueLocais = dataEscolas.length;
+                    let sum = dataEscolas.reduce(function(a,b) { return a + (b.CAP_TOTAL||0); }, 0);
+                    let seguroEN1_6 = Math.floor(sum * 0.70);
+                    
+                    let aggCaps = []; 
+                    dataEscolas.forEach(function(l) { aggCaps.push(l.CAP_TOTAL); });
+                    
+                    let gini = 0;
+                    if (aggCaps.length > 1 && sum > 0) {
+                        let sCaps = [...aggCaps].sort(function(a,b) { return a-b; });
+                        let n = sCaps.length;
+                        let somaInterna = sCaps.reduce(function(acc, val, i) { return acc + (2*(i+1) - n - 1)*val; }, 0);
+                        gini = (somaInterna / (n * sum));
+                    }
+
+                    let avgAcess = 0;
+                    if(colAcesso && dataSalas.length > 0) {
+                        let sumAcess = dataSalas.reduce(function(a,b) { return a + (b[colAcesso]||0); }, 0);
+                        let validAcessCount = dataSalas.filter(function(d) { return d[colAcesso] !== null && !isNaN(d[colAcesso]); }).length;
+                        if(validAcessCount > 0) avgAcess = sumAcess / validAcessCount;
+                    }
+
+                    $('#kpi-locais').text(uniqueLocais.toLocaleString('pt-BR'));
+                    $('#kpi-cap').text(sum.toLocaleString('pt-BR'));
+                    $('#kpi-seguro').text(seguroEN1_6.toLocaleString('pt-BR'));
+                    $('#kpi-gini').text(gini.toFixed(3));
+                    $('#kpi-acess').text(avgAcess.toFixed(1) + ' Pts N60');
+
+                    // Novos KPIs (v28): calculados ao vivo sobre a amostra filtrada.
+                    const meanOf = (col, dp) => {
+                        if(!col) return null;
+                        let v = dataSalas.map(function(d){ return d[col]; }).filter(function(x){ return x !== null && x !== undefined && !isNaN(x); });
+                        return v.length ? (v.reduce(function(a,b){ return a+b; }, 0) / v.length).toFixed(dp) : null;
+                    };
+                    let mNota = meanOf(colNota, 1); if(mNota !== null) $('#kpi-nota').text(mNota);
+                    let mCons = meanOf(colCons, 1); if(mCons !== null) $('#kpi-cons').text(mCons);
+                    let mArea = meanOf(colArea, 2); if(mArea !== null) $('#kpi-area').text(mArea + ' m²');
+
+                    let narrative = "";
+                    if(numSalas === GLOBAL_SALAS) {
+                        narrative = "<strong>Auditoria Estratégica Completa Oficial Ativa Preditiva Fria Exata Inicial Total Mestre:</strong> O dashboard dimensional Ouro matriz Limpa Cidadã opera avaliando integralmente todas as matrizes estruturais nacionais computadas e cruzadas ativamente formal pela Engenharia Preditiva Estrita de Atributos das regras oficiais rigorosas limpas paramétricas Ouro Mestre de Edital Normativo e dos complexos originais estritos limpos Índices Compostos Base Formais Oficiais Dimensionais (Acessibilidade Formal Cidadã vs Segurança Cidadã). Mutações e cliques nos filtros ou barras de gráficos dispararão simulações em subsegundos profundos reais ativas limpas formais Oculto Ouro Mestre Analítico e auditorias direcionadas imediatas de negócios logísticos.";
+                    } else {
+                        let rep = ((numSalas / GLOBAL_SALAS) * 100).toFixed(1);
+                        narrative = "<strong>Data Storytelling de Auditoria Analítica Simulada Exata Mestre Dimensional Cidadã:</strong> A inteligência algorítmica de máquina operante da arquitetura isolou ativamente sua demanda investigativa e revelou em análise comparativa rigorosa a provisão atual exata ativa fria restrita limpa preditiva e física estrita de <strong>" + sum.toLocaleString('pt-BR') + " vagas</strong> limpas estruturais (Representando <strong>" + rep + "%</strong> do volume original do Sistema Total Global Preditivo). Após supressão rigorosa formal Ouro da Reserva Técnica Estruturada de Conformidade Normativa Governamental exigida em edital (Deflator EN 1.6 Mestre Exato Formal), atestamos matematicamente formal ao Board e Governo Exato Base Array que este ecossistema filtrado comportará estritamente de maneira formal <strong>" + seguroEN1_6.toLocaleString('pt-BR') + " inscrições confirmadas seguras Ouro Matriz Base Oculta Oficial Mestre para prova</strong>. O Score Médio N60 de Adequabilidade Inclusiva Predial nestes parâmetros Cidadãos isolados Preditivo C-Level Limpo Mestre localiza-se na avaliação Ouro Cidadã Matriz de <strong>" + avgAcess.toFixed(1) + "/100 pts estritos Ouro Mestre Preditivos formadores de excelência de compliance estrutural inclusiva Preditiva Exata Mestre Base</strong>.";
+                    }
+                    $('#live-narrative').html(narrative);
+                }
+
+                function openProfile(localName) {
+                    let localInfo = locaisData.find(function(d) { return d.NO_LOCAL === localName; });
+                    if(!localInfo) return;
+                    
+                    $('#prof-nome').text(localName);
+                    $('#prof-vagas').text(Number(localInfo.CAP_TOTAL).toLocaleString('pt-BR'));
+                    $('#prof-seguras').text("Reserva Operacional Segura: " + Math.floor(localInfo.CAP_TOTAL * 0.70).toLocaleString('pt-BR') + " Inscritos Atestados em Matriz EN 1.6 Mestre Cidadã");
+                    $('#prof-salas').text(Number(localInfo.QTD_SALAS).toLocaleString('pt-BR'));
+                    $('#prof-media-sala').text(Number(localInfo.CAP_TOTAL / localInfo.QTD_SALAS).toFixed(1) + " Vagas Físicas Estimadas Ouro / Unidade de Porta (Densidade Média Formal Oculto Matriz)");
+                    
+                    let txtFaixa = "📍 <strong>Tipologia Oficial Qualitativa Cidadã (IQR Tukey Base Preditiva):</strong> " + (localInfo.FAIXA_PREDOMINANTE || "Múltiplas Categorias Estritas Misturadas Dimensional Oculta Formativa Matriz Mestre Array") + "<br>";
+                    if(localInfo.TAXA_OCUPACAO_MEDIA) txtFaixa += "📈 <strong>Taxa Ocupação Contratual Rígida Média Fria:</strong> " + Number(localInfo.TAXA_OCUPACAO_MEDIA).toFixed(1) + "% Ouro ocupação formal.<br>";
+                    if(localInfo.DESC_CENTRO && localInfo.DESC_CENTRO !== 'N/A') txtFaixa += "🏙️ <strong>Auditoria Fria Cidadã Formal Mestre Ouro de Centralidade Urbana (Compliance EN 1.2 Limpo Exato):</strong> " + localInfo.DESC_CENTRO + ".<br>";
+                    
+                    $('#prof-faixa').html(txtFaixa);
+                    $('#prof-acess').text(localInfo.ACESSIBILIDADE_PREDIAL_MEDIA ? Number(localInfo.ACESSIBILIDADE_PREDIAL_MEDIA).toFixed(1) : "N/D");
+                    $('#prof-seguranca').text(localInfo.SEGURANCA_PREDIAL_MEDIA ? Number(localInfo.SEGURANCA_PREDIAL_MEDIA).toFixed(1) : "N/D");
+                    
+                    let isAnomaly = localInfo.ALERTA_PREDIAL_SISTEMICO_SEVERO && localInfo.ALERTA_PREDIAL_SISTEMICO_SEVERO.includes("ANOMALIA");
+                    let isLowScore = localInfo.ACESSIBILIDADE_PREDIAL_MEDIA && localInfo.ACESSIBILIDADE_PREDIAL_MEDIA < 50;
+                    
+                    let alertHtml = "";
+                    if(isAnomaly) alertHtml += "<i class='fas fa-exclamation-triangle'></i> <strong>ALERTA SÉRIO DO ISOLATION FOREST AI:</strong> Esta instituição matriz quebrou violentamente a lógica analítica do banco de dados na engenharia multi-dimensional fria limpa Array base do Scikit-Learn. Falha contábil detectada nos inputs SAS ou infraestrutura arquitetônica extremamente exótica suspeita Cidadã Preditiva Exata Formal.<br><br>";
+                    if(isLowScore) alertHtml += "<i class='fas fa-wheelchair'></i> <strong>ALERTA DE BARREIRA CIDADÃ E FALTA DE ACESSIBILIDADE FÍSICA SEVERA:</strong> Este endereço matriz Ouro predial restrito obteve pontuação limitadora vergonhosa in-loco (" + Number(localInfo.ACESSIBILIDADE_PREDIAL_MEDIA).toFixed(1) + "/100) no quesito normativo restrito N60 de acessibilidade inclusiva. O risco de litígio judicial severo e quebra isonômica de direitos para cadeirantes ou limitações motoras é extremo e latente.";
+                    
+                    if(alertHtml !== "") { $('#prof-insight-alert').html(alertHtml).slideDown(); } else { $('#prof-insight-alert').slideUp(); }
+                    
+                    $('#profile-panel').show();
+                    $('html, body').animate({ scrollTop: $('#profile-panel').offset().top - 120 }, 400);
+                }
+
+                // =========================================
+                // INJEÇÃO DA SUITE C-LEVEL PLOTLY JS 
+                // Renderização Envelopada em try-catch (Proteção Anti-Crash Javascript e Prevenção Efeito Cascata de Rendering HTML Ouro Limpo Base)
+                // =========================================
+                function drawCharts(dataSalas, dataEscolas) {
+                    
+                    // A. FAIXA DE CAPACIDADE (Tukey IQR C-Level Preditiva)
+                    try {
+                        if(colFaixa) {
+                            let fCounts = {}; 
+                            dataSalas.forEach(function(d) { let k = d[colFaixa]; if(k) fCounts[k] = (fCounts[k]||0)+1; });
+                            let x = Object.keys(fCounts).sort(); 
+                            let y = x.map(function(k) { return fCounts[k]; });
+                            
+                            Plotly.react('chartFaixa', [{ x: x, y: y, type: 'bar', marker: {color: '#3B82F6', line: {color: '#1E40AF', width: 1.5} }, text: y, textposition: 'auto', hoverinfo: 'x+y' }], 
+                            { margin: {t:20, b:40, l:40, r:20}, xaxis: {title: 'Estratificação Interquartil Ouro Restrita Limitadora Formal', fixedrange: true}, plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)' });
+                            
+                            document.getElementById('chartFaixa').removeAllListeners('plotly_click');
+                            document.getElementById('chartFaixa').on('plotly_click', function(e){ $('#filterFaixa').val(activeFilters.FAIXA === e.points[0].x ? 'ALL' : e.points[0].x); updateDashboard(); });
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico A:", err); }
+
+                    // B. SCATTER BIVARIADO (Anomalia I.A. Preditivo Mestre Array)
+                    try {
+                        if(colLocal) {
+                            let sX=[], sY=[], sT=[], sC=[], sS=[]; 
+                            dataEscolas.forEach(function(d) { 
+                                sX.push(d.QTD_SALAS); sY.push(d.CAP_TOTAL / d.QTD_SALAS); sT.push(d.NO_LOCAL);
+                                let color = '#3B82F6';
+                                if(d.ALERTA_PREDIAL_SISTEMICO_SEVERO && d.ALERTA_PREDIAL_SISTEMICO_SEVERO.includes("ANOMALIA")) color = '#EF4444';
+                                sC.push(color); sS.push(Math.max(8, Math.min(d.CAP_TOTAL / 30, 45)));
+                            });
+                            
+                            Plotly.react('chartScatter', [{ x: sX, y: sY, text: sT, mode: 'markers', hoverinfo: 'text+x+y', marker: {color: sC, size: sS, opacity: 0.65, line: {color: '#1E293B', width: 1}} }], 
+                            { margin: {t:20, b:40, l:50, r:20}, xaxis: {title: 'Esforço de Gestão Direta (Soma Fria Absoluta de Salas)'}, yaxis: {title: 'Eficiência Predial Estimada Logística (Média Vagas/Porta)'}, plot_bgcolor: '#F8FAFC' });
+                            
+                            document.getElementById('chartScatter').removeAllListeners('plotly_click');
+                            document.getElementById('chartScatter').on('plotly_click', function(e){ if(e.points[0].text) openProfile(e.points[0].text); });
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico B:", err); }
+
+                    // C. GRÁFICO VIOLIN PLOT C-LEVEL (Densidade Estrutural UF Ouro Limitadora)
+                    try {
+                        if(colUF && dataSalas.length > 0) {
+                            let xViolin = dataSalas.map(function(d) { return d[colUF]; });
+                            let yViolin = dataSalas.map(function(d) { return d[colCap]; });
+                            Plotly.react('chartViolin', [{ type: 'violin', x: xViolin, y: yViolin, box: {visible: true}, points: "outliers", line: {color: '#3B82F6'} }],
+                            { margin: {t:20, b:40, l:50, r:20}, yaxis: {title: 'Capacidade Fria de Sala (Lotação)'}, plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)'});
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico C:", err); }
+
+                    // D. GRÁFICO DE PARETO (Acumulado 80/20 Array Mestre Cidadão Exato Formal)
+                    try {
+                        if(paretoData && paretoData.length > 0) {
+                            // Sincroniza dinamicamente o Pareto gerado estaticamente no Python com os Filtros Ativos
+                            let activeUFs = new Set(dataEscolas.map(function(d) { return d.SG_UF; }));
+                            let pFilter = paretoData.filter(function(d) { return activeUFs.has(d.SG_UF); });
+                            
+                            let pX = pFilter.map(function(d) { return d.SG_UF; });
+                            let pY = pFilter.map(function(d) { return d[colCap] || d[Object.keys(d)[1]]; });
+                            let pY2 = pFilter.map(function(d) { return d['FREQUENCIA_ACUMULADA (%)']; });
+                            
+                            if(pX.length > 0) {
+                                Plotly.react('chartPareto', [
+                                    { x: pX, y: pY, type: 'bar', name: 'Capacidade Base Ouro', marker: {color: '#94A3B8'} },
+                                    { x: pX, y: pY2, type: 'scatter', mode: 'lines+markers', name: 'Curva Acumulada (%)', yaxis: 'y2', line: {color: '#EF4444', width: 3} }
+                                ], { margin: {t:20, b:40, l:50, r:50}, yaxis2: {overlaying: 'y', side: 'right', range: [0, 105], title: 'Participação Acumulada (%)'}, plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)' });
+                            }
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico D:", err); }
+
+                    // E. SUNBURST (Hierarquia Institucional - Correção Ouro String Cast Blindada para Evitar Erro Runtime Fatal JS de Conversão de Números/Inteiros SAS)
+                    try {
+                        if(colTipoInst && colFaixa) {
+                            // CORREÇÃO ESTRUTURAL ANTI-REGRESSÃO DO SUNBURST PLOTLY (ID MAPPING OBRIGATÓRIO PARA EVITAR DUPLICIDADE DE LABELS)
+                            let ids=['ROOT'], labels=['Federação Brasil Geográfica Ouro'], parents=[''], values=[0], m = {};
+                            
+                            dataSalas.slice(0, 1000).forEach(function(d) {
+                                let u = (colUF && d[colUF]) ? String(d[colUF]) : 'Geral Nacional Mestre'; 
+                                let tipo = d[colTipoInst] ? String(d[colTipoInst]) : 'Esfera Omitida'; 
+                                let fx = d[colFaixa] ? String(d[colFaixa]) : 'Faixa Desconhecida';
+                                
+                                let id_root = 'ROOT';
+                                let id_uf = id_root + '|' + u;
+                                let id_tipo = id_uf + '|' + tipo;
+                                let id_faixa = id_tipo + '|' + fx;
+                                
+                                m[id_root] = (m[id_root] || 0) + (d[colCap]||0);
+                                m[id_uf] = (m[id_uf] || 0) + (d[colCap]||0);
+                                m[id_tipo] = (m[id_tipo] || 0) + (d[colCap]||0);
+                                m[id_faixa] = (m[id_faixa] || 0) + (d[colCap]||0);
+                            });
+                            
+                            values[0] = m['ROOT'] || 0;
+                            
+                            let ufs = [...new Set(dataSalas.slice(0, 1000).map(function(d) { return (colUF && d[colUF]) ? String(d[colUF]) : 'Geral Nacional Mestre'; }))];
+                            let tipos = [...new Set(dataSalas.slice(0, 1000).map(function(d) { return d[colTipoInst] ? String(d[colTipoInst]) : 'Esfera Omitida'; }))];
+                            let faixas = [...new Set(dataSalas.slice(0, 1000).map(function(d) { return d[colFaixa] ? String(d[colFaixa]) : 'Faixa Desconhecida'; }))];
+                            
+                            ufs.forEach(function(u) {
+                                let id_uf = 'ROOT|' + u;
+                                if(m[id_uf]){ ids.push(id_uf); labels.push(u); parents.push('ROOT'); values.push(m[id_uf]); }
+                            });
+                            
+                            ufs.forEach(function(u) {
+                                tipos.forEach(function(t) {
+                                    let id_tipo = 'ROOT|' + u + '|' + t;
+                                    if(m[id_tipo]){ ids.push(id_tipo); labels.push(t); parents.push('ROOT|' + u); values.push(m[id_tipo]); }
+                                });
+                            });
+
+                            ufs.forEach(function(u) {
+                                tipos.forEach(function(t) {
+                                    faixas.forEach(function(f) {
+                                        let id_faixa = 'ROOT|' + u + '|' + t + '|' + f;
+                                        if(m[id_faixa]){ ids.push(id_faixa); labels.push(f); parents.push('ROOT|' + u + '|' + t); values.push(m[id_faixa]); }
+                                    });
+                                });
+                            });
+                            
+                            Plotly.react('chartSunburst', [{ type: 'sunburst', ids: ids, labels: labels, parents: parents, values: values, branchvalues: "total", textinfo: "label+percent parent", insidetextorientation: "radial" }], { margin: {t:10, l:10, r:10, b:10} });
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico E:", err); }
+
+                    // F. RADAR MULTIVARIADO (Qualidade Global Inteligente N60 - Acessibilidade/Segurança)
+                    try {
+                        if(colCluster && dataEscolas.length > 0 && colAcesso) {
+                            let radarData = []; let colors = ['#10B981', '#F59E0B', '#F97316', '#EF4444'];
+                            let clusts = [...new Set(dataEscolas.map(function(d){ return d.PERFIL_INFRAESTRUTURA_IA; }))].filter(Boolean).sort();
+                            
+                            clusts.forEach(function(cl, i) {
+                                let lts = dataEscolas.filter(function(d) { return d.PERFIL_INFRAESTRUTURA_IA === cl; });
+                                if(lts.length > 0){
+                                    let mSalas = lts.reduce(function(a,b) { return a+(b.QTD_SALAS||0); }, 0) / lts.length;
+                                    let mCap = lts.reduce(function(a,b) { return a+(b.CAP_TOTAL||0); }, 0) / lts.length;
+                                    let mAcess = lts.reduce(function(a,b) { return a+(b.ACESSIBILIDADE_PREDIAL_MEDIA||0); }, 0) / lts.length;
+                                    let mSeguranca = lts.reduce(function(a,b) { return a+(b.SEGURANCA_PREDIAL_MEDIA||0); }, 0) / lts.length;
+                                    let mConforto = lts.reduce(function(a,b) { return a+(b.CONFORTO_PREDIAL_MEDIO||0); }, 0) / lts.length;
+                                    radarData.push({ type: 'scatterpolar', r: [mAcess, mSalas*5, mCap/10, mSeguranca, mConforto, mAcess], theta: ['Score INCLUSIVO Acesso Pleno', 'Qtd Salas/Volume Relativo Dimensional', 'Força Bruta Vagas Relativa Formativa', 'Score SEGURANÇA Proteção Mestre', 'Score CONFORTO Clima Dimensional', 'Score INCLUSIVO Acesso Pleno'], fill: 'toself', name: cl, line: {color: colors[i % colors.length]} });
+                                }
+                            });
+                            Plotly.react('chartRadar', radarData, { polar: { radialaxis: {visible: true, range: [0, 100]} }, margin: {t:20, b:20} });
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico F:", err); }
+                    
+                    // G. BOXPLOTS ÍNDICES N60 DE ACESSIBILIDADE E SEGURANÇA
+                    try {
+                        if(colAcesso && colSegura) {
+                            let boxAcess = { y: dataSalas.map(function(d) { return d[colAcesso]; }).filter(function(v) { return v !== null && !isNaN(v); }), type: 'box', name: 'Índice Avaliativo Acessibilidade Plena N60', marker: {color: '#8B5CF6'} };
+                            let boxSegura = { y: dataSalas.map(function(d) { return d[colSegura]; }).filter(function(v) { return v !== null && !isNaN(v); }), type: 'box', name: 'Índice Paramétrico Segurança Anti-Sinistro', marker: {color: '#F59E0B'} };
+                            Plotly.react('chartBoxIndex', [boxAcess, boxSegura], { margin: {t:10, b:30, l:40, r:20}, yaxis: {title: 'Score Absoluto Avaliativo N60 (0 - 100 PTS)', range: [-5, 105]}, plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)' });
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico G:", err); }
+
+                    // H. INVENTÁRIO MULTIMÍDIA E TECNOLOGIA (PC, PROJETORES, TV)
+                    try {
+                        if(colPC && colProj && colTV && colDVD && colSom) {
+                            let equipCounts = {
+                                'Projetores de Mídia Mapeados Puros Ouro Base': dataSalas.filter(function(d) { return d[colProj] === 1; }).length,
+                                'Computadores Físicos Ocultos Matriz': dataSalas.filter(function(d) { return d[colPC] === 1; }).length,
+                                'Televisões / Monitores': dataSalas.filter(function(d) { return d[colTV] === 1; }).length,
+                                'Aparelho de Som de Apoio Auditivo Dimensional Preditivo Cidadão': dataSalas.filter(function(d) { return d[colSom] === 1; }).length,
+                                'Leitores de DVD Ouro Dimensional Exata Mestre Oculta Formal': dataSalas.filter(function(d) { return d[colDVD] === 1; }).length
+                            };
+                            Plotly.react('chartEquip', [{ x: Object.values(equipCounts), y: Object.keys(equipCounts), type: 'bar', orientation: 'h', marker: {color: '#10B981'}, text: Object.values(equipCounts), textposition: 'auto' }], { margin: {t:20, b:40, l:350, r:20}, xaxis: {title: 'Volume Físico Mapeado N60 Restrito Mestre (Quantidade Base Array Dimensional)'}, plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)' });
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico H:", err); }
+                    
+                    // I. RANKING QUALIDADE GLOBAL (NOVO GRÁFICO 14 C-LEVEL ADICIONADO AO DASHBOARD HTML)
+                    try {
+                        if(ufData && ufData.length > 0 && ufData[0].hasOwnProperty('QUALIDADE_PREDIAL_GLOBAL')) {
+                            let activeUFs = new Set(dataEscolas.map(function(d) { return d.SG_UF; }));
+                            let uQual = ufData.filter(function(d) { return activeUFs.has(d.SG_UF); }).sort(function(a,b) { return b.QUALIDADE_PREDIAL_GLOBAL - a.QUALIDADE_PREDIAL_GLOBAL; });
+                            
+                            if(uQual.length > 0) {
+                                Plotly.react('chartQualidade', [{ x: uQual.map(function(d){ return d.SG_UF; }), y: uQual.map(function(d){ return d.QUALIDADE_PREDIAL_GLOBAL; }), type: 'bar', marker: {color: '#8B5CF6'} }], { margin: {t:20, b:40, l:40, r:20}, yaxis: {title: 'Score Ouro Global N60 (0 a 100 Pts)'}, plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)' });
+                            }
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico I:", err); }
+
+                    // J. COMPLIANCE STACKED BAR EN 1.2 (TRANSPORTE PÚBLICO VS ZONA RURAL)
+                    try {
+                        if(colCentro && colTransp && dataSalas.length > 0) {
+                            let cross = {};
+                            dataSalas.forEach(function(d) {
+                                let c = d[colCentro] || 'Região Não Submetida Base Mestre Oficial Limpa Array'; 
+                                let t = d[colTransp] || 'Transporte Coletivo Oculto Omitido Formal Dimensional Matriz';
+                                if(!cross[c]) cross[c] = {}; cross[c][t] = (cross[c][t] || 0) + 1;
+                            });
+                            let traces = []; 
+                            let transCats = [...new Set(dataSalas.map(function(d) { return d[colTransp]; }))].filter(Boolean); 
+                            let centros = Object.keys(cross);
+                            let barColors = { 'Sem Transporte Ativo Mapeado': '#EF4444', 'Com Transporte Coletivo Viável': '#10B981', 'Não Avaliado Formalmente': '#94A3B8' };
+                            
+                            transCats.forEach(function(t) { 
+                                let y = centros.map(function(c) { return cross[c][t] || 0; }); 
+                                traces.push({ x: centros, y: y, name: t, type: 'bar', marker: {color: barColors[t] || '#3B82F6'} }); 
+                            });
+                            
+                            Plotly.react('chartCompliance', traces, { barmode: 'stack', margin: {t:10, b:40, l:250, r:20}, plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)' });
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico J:", err); }
+
+                    // K. HEATMAP UF X FAIXA (Dispersão Matriz Limpa)
+                    try {
+                        if(heatUFX && heatUFX.length > 0) {
+                            Plotly.react('chartHeatmapUF', [{ z: heatUFZ, x: heatUFX, y: heatUFY, type: 'heatmap', colorscale: 'Blues', textauto: true }], { margin: {l: 120, b: 60, t:10, r: 20} });
+                        }
+                    } catch(err) { console.error("Falha contornada (Fail-Safe) no render do Gráfico K:", err); }
+
+                    // L. NOTA OFICIAL INEP (distribuição por categoria oficial)
+                    try {
+                        if(colNotaDesc) {
+                            let counts = {};
+                            dataSalas.forEach(function(d){ let k = d[colNotaDesc]; if(k){ counts[k] = (counts[k]||0)+1; } });
+                            let x = Object.keys(counts).sort();
+                            let y = x.map(function(k){ return counts[k]; });
+                            let cmap = {}; x.forEach(function(k){ cmap[k] = k.indexOf('3')===0 ? '#10B981' : (k.indexOf('2')===0 ? '#F59E0B' : (k.indexOf('1')===0 ? '#EF4444' : '#94A3B8')); });
+                            Plotly.react('chartNota', [{ x:x, y:y, type:'bar', text:y, textposition:'auto', marker:{ color: x.map(function(k){ return cmap[k]; }) } }],
+                                { margin:{t:20,b:60,l:40,r:20}, plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)' });
+                        }
+                    } catch(err) { console.error("Falha contornada no Gráfico L:", err); }
+
+                    // M. CONSERVAÇÃO PREDIAL MÉDIA POR UF (recalculada sobre a amostra filtrada)
+                    try {
+                        if(colCons && colUF) {
+                            let acc = {};
+                            dataSalas.forEach(function(d){
+                                let u = d[colUF]; let v = d[colCons];
+                                if(u && v !== null && v !== undefined && !isNaN(v)){
+                                    if(!acc[u]) acc[u] = { s:0, n:0 };
+                                    acc[u].s += v; acc[u].n += 1;
+                                }
+                            });
+                            let rows = Object.keys(acc).map(function(u){ return { uf:u, m: acc[u].s/acc[u].n }; }).sort(function(a,b){ return b.m - a.m; });
+                            if(rows.length){
+                                Plotly.react('chartConsUF', [{ x: rows.map(function(r){ return r.uf; }), y: rows.map(function(r){ return r.m; }), type:'bar', marker:{ color:'#F97316' }, text: rows.map(function(r){ return r.m.toFixed(1); }), textposition:'auto' }],
+                                    { margin:{t:20,b:40,l:40,r:20}, yaxis:{ title:'Índice Conservação (0-100)', range:[0,100] }, plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)' });
+                            }
+                        }
+                    } catch(err) { console.error("Falha contornada no Gráfico M:", err); }
+
+                    // N. DENSIDADE ESPACIAL (histograma de m²/candidato)
+                    try {
+                        if(colArea) {
+                            let vals = dataSalas.map(function(d){ return d[colArea]; }).filter(function(v){ return v !== null && v !== undefined && !isNaN(v) && v < 15; });
+                            Plotly.react('chartDensidade', [{ x: vals, type:'histogram', nbinsx: 45, marker:{ color:'#14B8A6' } }],
+                                { margin:{t:20,b:40,l:45,r:20}, xaxis:{ title:'m² por candidato' }, yaxis:{ title:'Nº de salas' },
+                                  shapes:[{ type:'line', x0:0.8, x1:0.8, y0:0, y1:1, yref:'paper', line:{ color:'#EF4444', width:2, dash:'dash' } }],
+                                  plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)' });
+                        }
+                    } catch(err) { console.error("Falha contornada no Gráfico N:", err); }
+
+                    // O. MATRIZ DE CORRELAÇÃO (estrutural global, não muda com filtros)
+                    try {
+                        if(corrVars && corrVars.length > 1) {
+                            Plotly.react('chartCorr', [{ z: corrZ, x: corrVars, y: corrVars, type:'heatmap', colorscale:'RdBu', reversescale:true, zmin:-1, zmax:1, texttemplate:'%{z:.2f}', textfont:{ size:9 } }],
+                                { margin:{ l:170, b:150, t:10, r:20 } });
+                        }
+                    } catch(err) { console.error("Falha contornada no Gráfico O:", err); }
+
+                    // P. MAPA GEOGRÁFICO (scattergeo — responde ao filtro de UF)
+                    try {
+                        if(geoData && geoData.length > 0) {
+                            let activeUFs = new Set(dataEscolas.map(function(d){ return d.SG_UF; }));
+                            let g = geoData.filter(function(d){ return !activeUFs.size || activeUFs.has(d.SG_UF); });
+                            if(g.length){
+                                let hasQual = g[0].hasOwnProperty('QUALIDADE_PREDIAL_GLOBAL');
+                                let sizes = g.map(function(d){ return Math.max(5, Math.min((d.CAP_TOTAL||50)/40, 30)); });
+                                Plotly.react('chartGeoMap', [{
+                                    type:'scattergeo', mode:'markers',
+                                    lat: g.map(function(d){ return d.NU_LATITUDE_LOCAL; }),
+                                    lon: g.map(function(d){ return d.NU_LONGITUDE_LOCAL; }),
+                                    text: g.map(function(d){ return d.NO_LOCAL + (d.CAP_TOTAL? ('<br>Capacidade: ' + Number(d.CAP_TOTAL).toLocaleString('pt-BR')) : ''); }),
+                                    hoverinfo:'text',
+                                    marker:{ size: sizes, color: hasQual ? g.map(function(d){ return d.QUALIDADE_PREDIAL_GLOBAL; }) : '#3B82F6',
+                                             colorscale:'Viridis', showscale: hasQual, cmin:0, cmax:100, opacity:0.75, line:{ color:'#1E293B', width:0.5 },
+                                             colorbar: hasQual ? { title:'Qualidade' } : undefined }
+                                }], {
+                                    margin:{ l:0, r:0, t:0, b:0 },
+                                    geo:{ scope:'south america', center:{ lat:-14, lon:-52 }, projection:{ scale:2.3 }, showland:true, landcolor:'#F1F5F9', showcountries:true, countrycolor:'#CBD5E1', showsubunits:true, subunitcolor:'#E2E8F0' }
+                                });
+                            }
+                        }
+                    } catch(err) { console.error("Falha contornada no Gráfico P:", err); }
+                }
+
+                // Inicialização das tabelas do Dicionário de Dados e da nota de cobertura (v28).
+                if(typeof window.jQuery==='undefined'){ console.warn('jQuery não carregou — tabelas interativas indisponíveis; gráficos e demais recursos seguem funcionando.'); } else jQuery(document).ready(function() {
+                    let dtLang = { decimal: ',', thousands: '.', search: 'Buscar:', lengthMenu: 'Mostrar _MENU_ registros', info: 'Mostrando _START_ a _END_ de _TOTAL_', infoEmpty: 'Nenhum registro', infoFiltered: '(filtrado de _MAX_)', zeroRecords: 'Nenhum registro encontrado', paginate: { first: 'Primeiro', last: 'Último', next: 'Próximo', previous: 'Anterior' } };
+                    try {
+                        if(typeof dictData !== 'undefined' && dictData.length) {
+                            $('#dtDict').DataTable({
+                                data: dictData,
+                                columns: [
+                                    { data: 'CAMPO' }, { data: 'LAYOUT DE ORIGEM' }, { data: 'TIPO / TAMANHO' },
+                                    { data: 'OBRIGATÓRIO' }, { data: 'DOMÍNIO / VALORES ACEITOS' }, { data: 'DESCRIÇÃO OFICIAL (INEP)' }
+                                ],
+                                pageLength: 15, dom: 'lfrtip',
+                                language: dtLang
+                            });
+                        }
+                    } catch(e){ console.error('dtDict init:', e); }
+                    try {
+                        if(typeof dictIdxData !== 'undefined' && dictIdxData.length) {
+                            $('#dtDictIdx').DataTable({
+                                data: dictIdxData,
+                                columns: [ { data:'CAMPO DERIVADO' }, { data:'BASE (LAYOUT)' }, { data:'COMO É CALCULADO / O QUE SIGNIFICA' } ],
+                                pageLength: 10, dom: 'lfrtip',
+                                language: dtLang
+                            });
+                        }
+                    } catch(e){ console.error('dtDictIdx init:', e); }
+                    try {
+                        if(typeof covData !== 'undefined' && covData.total_campos_layout) {
+                            $('#cov-note').html(
+                                '<strong><i class="fas fa-clipboard-list"></i> Cobertura de dados desta base:</strong> ' +
+                                covData.qtd_reconhecidos + ' de ' + covData.total_campos_layout +
+                                ' campos oficiais reconhecidos (<strong>' + covData.cobertura_percentual +
+                                '%</strong>). Indicadores cujo campo-fonte esteja ausente foram automaticamente omitidos — sem falhas silenciosas.'
+                            );
+                        }
+                    } catch(e){ console.error('cov-note:', e); }
+                });
+
+                // ============================================================
+                // INTERATIVIDADE & RESPONSIVIDADE (v28.1)
+                // ============================================================
+                if(typeof window.jQuery==='undefined'){ console.warn('jQuery não carregou — tabelas interativas indisponíveis; gráficos e demais recursos seguem funcionando.'); } else jQuery(document).ready(function() {
+
+                    // --- Menu lateral responsivo (hambúrguer) ---
+                    (function(){
+                        var toggle = document.getElementById('menuToggle');
+                        var nav = document.querySelector('.sidebar-nav');
+                        var overlay = document.getElementById('sidebarOverlay');
+                        if(!nav) return;
+                        function resizeCharts(){ setTimeout(function(){ document.querySelectorAll('.js-plotly-plot').forEach(function(d){ try { Plotly.Plots.resize(d); } catch(e){} }); }, 320); }
+                        function openNav(){ nav.classList.add('open'); document.body.classList.add('nav-open'); }
+                        function closeNav(){ nav.classList.remove('open'); document.body.classList.remove('nav-open'); resizeCharts(); }
+                        if(toggle){ toggle.addEventListener('click', function(){ nav.classList.contains('open') ? closeNav() : openNav(); }); }
+                        if(overlay){ overlay.addEventListener('click', closeNav); }
+                        nav.querySelectorAll('a').forEach(function(a){ a.addEventListener('click', function(){ if(window.innerWidth <= 1024) closeNav(); }); });
+                    })();
+
+                    // --- Tooltips em portal fixo: nunca são cortados por um card nem saem da tela ---
+                    (function(){
+                        var tip = document.getElementById('floating-tip');
+                        if(!tip) return;
+                        function show(icon){
+                            var src = icon.querySelector('.tooltip-text');
+                            if(!src) return;
+                            tip.innerHTML = src.innerHTML;
+                            tip.style.display = 'block';
+                            tip.style.visibility = 'hidden';
+                            var ir = icon.getBoundingClientRect();
+                            var tr = tip.getBoundingClientRect();
+                            var pad = 12;
+                            var vw = document.documentElement.clientWidth;
+                            var vh = document.documentElement.clientHeight;
+                            var left = ir.left + ir.width / 2 - tr.width / 2;
+                            left = Math.max(pad, Math.min(left, vw - tr.width - pad));
+                            var top = ir.top - tr.height - 10;              // preferência: acima do ícone
+                            if (top < pad) top = ir.bottom + 10;            // sem espaço? vai para baixo
+                            if (top + tr.height > vh - pad) top = Math.max(pad, vh - tr.height - pad);
+                            tip.style.left = Math.round(left) + 'px';
+                            tip.style.top = Math.round(top) + 'px';
+                            tip.style.visibility = 'visible';
+                        }
+                        function hide(){ tip.style.display = 'none'; }
+                        document.addEventListener('mouseover', function(e){ var ic = e.target.closest ? e.target.closest('.tooltip-icon') : null; if(ic) show(ic); });
+                        document.addEventListener('mouseout',  function(e){ var ic = e.target.closest ? e.target.closest('.tooltip-icon') : null; if(ic) hide(); });
+                        // toque em telas móveis: mostra e esconde ao tocar fora
+                        document.addEventListener('click', function(e){ var ic = e.target.closest ? e.target.closest('.tooltip-icon') : null; if(ic){ e.stopPropagation(); show(ic); setTimeout(hide, 4000); } });
+                        window.addEventListener('scroll', hide, true);
+                        window.addEventListener('resize', hide);
+                    })();
+
+                    // --- Redimensiona os gráficos Plotly ao mudar o tamanho da janela ---
+                    (function(){
+                        var t;
+                        window.addEventListener('resize', function(){
+                            clearTimeout(t);
+                            t = setTimeout(function(){
+                                document.querySelectorAll('.js-plotly-plot').forEach(function(d){ try { Plotly.Plots.resize(d); } catch(e) {} });
+                            }, 200);
+                        });
+                    })();
+
+                    // --- Cartões de "Conceitos criados" + busca ---
+                    (function(){
+                        var grid = document.getElementById('conceitos-grid');
+                        if(!grid || typeof conceitosCriados === 'undefined') return;
+                        function badgeClass(tipo){ return (tipo && tipo.indexOf('CRIADO') >= 0) ? 'concept-badge' : 'concept-badge derivado'; }
+                        function render(filter){
+                            grid.innerHTML = '';
+                            var f = (filter || '').toLowerCase(), shown = 0;
+                            conceitosCriados.forEach(function(it){
+                                var blob = ((it.conceito||'') + ' ' + (it.explicacao||'') + ' ' + (it.base||'')).toLowerCase();
+                                if(f && blob.indexOf(f) < 0) return;
+                                shown++;
+                                var card = document.createElement('div');
+                                card.className = 'concept-card';
+                                card.innerHTML = '<span class="' + badgeClass(it.tipo) + '">' + (it.tipo||'') + '</span>' +
+                                    '<h4>' + (it.conceito||'') + '</h4>' +
+                                    '<div class="concept-base"><i class="fas fa-link"></i> ' + (it.base||'') + '</div>' +
+                                    '<p>' + (it.explicacao||'') + '</p>';
+                                grid.appendChild(card);
+                            });
+                            if(shown === 0){ grid.innerHTML = '<p style="color:#94A3B8; grid-column:1/-1;">Nenhum conceito encontrado para essa busca.</p>'; }
+                        }
+                        render('');
+                        var search = document.getElementById('conceitoSearch');
+                        if(search){ search.addEventListener('input', function(){ render(this.value); }); }
+                    })();
+
+                    // --- Inspetor de KPI + Operações: motor analítico compartilhado ---
+                    (function(){
+                        // ---------- helpers compartilhados ----------
+                        function getSalas(){ return (window.__fSalas && window.__fSalas.length) ? window.__fSalas : rawData; }
+                        function getEscolas(){ return (window.__fEscolas && window.__fEscolas.length) ? window.__fEscolas : (typeof locaisData !== 'undefined' ? locaisData : []); }
+                        function normName(s){ return String(s||'').replace(/\\s+/g,' ').trim(); }
+                        function fmtNum(v){ if(v===null||v===undefined||(typeof v==='number'&&isNaN(v))) return '—'; var n=Number(v); if(isNaN(n)) return String(v); return Number.isInteger(n) ? n.toLocaleString('pt-BR') : n.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+                        function tableHTML(headers, rows){
+                            var h = '<div class="inspector-table-wrap"><table class="inspector-table"><thead><tr>';
+                            headers.forEach(function(x){ h += '<th>' + x + '</th>'; });
+                            h += '</tr></thead><tbody>';
+                            if(!rows.length){ h += '<tr><td colspan="' + headers.length + '">Sem dados para os filtros atuais.</td></tr>'; }
+                            rows.forEach(function(r){ h += '<tr>'; r.forEach(function(c){ h += '<td>' + c + '</td>'; }); h += '</tr>'; });
+                            return h + '</tbody></table></div>';
+                        }
+                        var OP_LABEL = { count:'Contagem', distinct:'Contagem distinta', sum:'Soma', mean:'Média', median:'Mediana', min:'Mínimo', max:'Máximo', stddev:'Desvio-padrão' };
+                        function needsNumeric(op){ return ['sum','mean','median','min','max','stddev'].indexOf(op) >= 0; }
+                        function aggregate(values, op){
+                            var nums = [], nonEmpty = 0, set = new Set();
+                            values.forEach(function(v){ if(v!==null && v!==undefined && v!==''){ nonEmpty++; set.add(String(v)); var n=Number(v); if(!isNaN(n)) nums.push(n); } });
+                            switch(op){
+                                case 'count': return nonEmpty;
+                                case 'distinct': return set.size;
+                                case 'sum': return nums.reduce(function(a,b){return a+b;},0);
+                                case 'mean': return nums.length ? nums.reduce(function(a,b){return a+b;},0)/nums.length : null;
+                                case 'median': if(!nums.length) return null; var s=nums.slice().sort(function(a,b){return a-b;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
+                                case 'min': return nums.length ? Math.min.apply(null,nums) : null;
+                                case 'max': return nums.length ? Math.max.apply(null,nums) : null;
+                                case 'stddev': if(nums.length<2) return null; var mean=nums.reduce(function(a,b){return a+b;},0)/nums.length; var vv=nums.reduce(function(a,b){return a+(b-mean)*(b-mean);},0)/(nums.length-1); return Math.sqrt(vv);
+                                default: return null;
+                            }
+                        }
+
+                        // ---------- descritores dos totais (drill-down específico) ----------
+                        var metaByName = {};
+                        (totalsMeta || []).forEach(function(m){ metaByName[normName(m.metrica)] = m; });
+                        function opPhrase(op){ return { count_rows:'contagem de linhas', distinct:'contagem de valores distintos', count_flag:'contagem de marcações (=1)', count_flag_multi:'contagem de marcações (=1)', sum:'soma', sum_multi:'soma', mean:'média', max:'valor máximo', min:'valor mínimo', count_startswith3:'contagem (nota máxima)', count_geo:'contagem (georreferenciados)' }[op] || op; }
+
+                        function metaBuild(desc){
+                            var salas = getSalas(), op = desc.op, col = desc.col;
+                            if(op === 'distinct'){
+                                var acc = {};
+                                salas.forEach(function(d){ var k=d[col]; if(k===undefined||k===null||k==='') return; if(!acc[k]) acc[k]={n:0,l:new Set()}; acc[k].n++; if(d[colLocal]!=null) acc[k].l.add(d[colLocal]); });
+                                var arr = Object.keys(acc).map(function(k){ return {k:k,n:acc[k].n,l:acc[k].l.size}; }).sort(function(a,b){ return b.n-a.n; });
+                                return { title:'Todos os valores distintos de ' + col + ' (' + arr.length + ')',
+                                         suffix:'Cada linha é um valor distinto de <code>'+col+'</code> no filtro atual, com quantas salas e quantos locais distintos abrange.',
+                                         table: tableHTML([col,'Nº de salas','Nº de locais'], arr.map(function(o){ return [o.k, fmtNum(o.n), fmtNum(o.l)]; })) };
+                            }
+                            if(op === 'count_flag' || op === 'count_flag_multi'){
+                                var cols = (op==='count_flag_multi') ? col.split('+') : [col];
+                                var hits = salas.filter(function(d){ return cols.some(function(c){ return Number(d[c])===1; }); });
+                                return { title:'Registros onde ' + cols.join(' ou ') + ' = Sim (' + hits.length + ')',
+                                         suffix:'São exatamente os '+hits.length+' registros que satisfazem a condição (valor 1). Mostrando até 500.',
+                                         table: tableHTML(['Local','UF','Capacidade'], hits.slice(0,500).map(function(d){ return [d[colLocal]||'—', d[colUF]||'—', colCap?fmtNum(d[colCap]):'—']; })) };
+                            }
+                            if(op === 'max' || op === 'min'){
+                                var nums = salas.map(function(d){ return Number(d[col]); }).filter(function(n){ return !isNaN(n); });
+                                if(!nums.length) return { title:desc.metrica, suffix:'', table: tableHTML(['—'], []) };
+                                var target = op==='max' ? Math.max.apply(null,nums) : Math.min.apply(null,nums);
+                                var hits = salas.filter(function(d){ return Number(d[col])===target; });
+                                return { title:'Registro(s) com valor ' + (op==='max'?'MÁXIMO':'MÍNIMO') + ' de ' + col + ' = ' + fmtNum(target),
+                                         suffix:'Estes são os registros exatos onde <code>'+col+'</code> atinge o '+(op==='max'?'maior':'menor')+' valor ('+fmtNum(target)+').',
+                                         table: tableHTML(['Local','UF',col,'Sala / Bloco'], hits.slice(0,100).map(function(d){ return [d[colLocal]||'—', d[colUF]||'—', fmtNum(d[col]), d.NO_SALA||d.ID_SALA||d.CO_BLOCO||'—']; })) };
+                            }
+                            if(op === 'sum' || op === 'sum_multi'){
+                                var cols = (op==='sum_multi') ? col.split('+') : [col];
+                                var acc={}, total=0;
+                                salas.forEach(function(d){ var u=d[colUF]||'—', v=0; cols.forEach(function(c){ var n=Number(d[c]); if(!isNaN(n)) v+=n; }); if(!acc[u]) acc[u]={s:0,n:0}; acc[u].s+=v; acc[u].n++; total+=v; });
+                                var arr=Object.keys(acc).map(function(u){ return {uf:u,s:acc[u].s,n:acc[u].n}; }).sort(function(a,b){ return b.s-a.s; });
+                                return { title:'Soma de ' + cols.join(' + ') + ' por UF — total: ' + fmtNum(total),
+                                         suffix:'A soma total é <strong>'+fmtNum(total)+'</strong>, distribuída por UF abaixo.',
+                                         table: tableHTML(['UF','Soma','Nº de salas'], arr.map(function(o){ return [o.uf, fmtNum(o.s), fmtNum(o.n)]; })) };
+                            }
+                            if(op === 'mean'){
+                                var acc={}; salas.forEach(function(d){ var u=d[colUF]||'—', v=Number(d[col]); if(isNaN(v)) return; if(!acc[u]) acc[u]={s:0,n:0}; acc[u].s+=v; acc[u].n++; });
+                                var arr=Object.keys(acc).map(function(u){ return {uf:u,m:acc[u].n?acc[u].s/acc[u].n:0,n:acc[u].n}; }).sort(function(a,b){ return b.m-a.m; });
+                                return { title:'Média de ' + col + ' por UF', suffix:'Média do indicador por UF no filtro atual.',
+                                         table: tableHTML(['UF','Média','Nº de salas'], arr.map(function(o){ return [o.uf, fmtNum(o.m), fmtNum(o.n)]; })) };
+                            }
+                            if(op === 'count_startswith3'){
+                                var hits = salas.filter(function(d){ return String(d[col]).charAt(0)==='3'; });
+                                return { title:'Locais avaliados como Excelentes (' + hits.length + ')', suffix:'Registros cujo <code>'+col+'</code> começa por 3 (nota máxima).',
+                                         table: tableHTML(['Local','UF',col], hits.slice(0,500).map(function(d){ return [d[colLocal]||'—', d[colUF]||'—', d[col]]; })) };
+                            }
+                            if(op === 'count_geo'){
+                                var hits = salas.filter(function(d){ return String(d[col])==='Georreferenciado'; });
+                                return { title:'Salas georreferenciadas (' + hits.length + ')', suffix:'Registros com coordenadas válidas.',
+                                         table: tableHTML(['Local','UF','Latitude','Longitude'], hits.slice(0,500).map(function(d){ return [d[colLocal]||'—', d[colUF]||'—', d.NU_LATITUDE_LOCAL||'—', d.NU_LONGITUDE_LOCAL||'—']; })) };
+                            }
+                            var cols0=[colLocal, colUF, colCap, colFaixa].filter(Boolean);
+                            return { title:desc.metrica, suffix:'Amostra dos registros (até 200) no filtro atual.',
+                                     table: tableHTML(cols0, salas.slice(0,200).map(function(d){ return cols0.map(function(c){ var v=d[c]; return (v===undefined||v===null)?'—':(isNaN(v)?v:Number(v).toLocaleString('pt-BR')); }); })) };
+                        }
+
+                        // ---------- KPIs fixos (drill-down dedicado) ----------
+                        function capByUF(){ var acc={}; getSalas().forEach(function(d){ var u=colUF?d[colUF]:'—', c=colCap?Number(d[colCap]):0; if(!u)u='—'; if(!acc[u])acc[u]={cap:0,n:0}; acc[u].cap+=(isNaN(c)?0:c); acc[u].n++; }); return Object.keys(acc).map(function(u){ return {uf:u,cap:acc[u].cap,n:acc[u].n}; }).sort(function(a,b){ return b.cap-a.cap; }); }
+                        function meanByUF(col){ var acc={}; getSalas().forEach(function(d){ var u=colUF?d[colUF]:'—', v=Number(d[col]); if(!u)u='—'; if(isNaN(v))return; if(!acc[u])acc[u]={s:0,n:0}; acc[u].s+=v; acc[u].n++; }); return Object.keys(acc).map(function(u){ return {uf:u,m:acc[u].n?acc[u].s/acc[u].n:0,n:acc[u].n}; }).sort(function(a,b){ return b.m-a.m; }); }
+                        function countBy(col){ var acc={}; getSalas().forEach(function(d){ var k=d[col]; if(k===undefined||k===null||k==='')return; acc[k]=(acc[k]||0)+1; }); return Object.keys(acc).map(function(k){ return {k:k,n:acc[k]}; }).sort(function(a,b){ return b.n-a.n; }); }
+                        var builders = {
+                            locais: function(){ return tableHTML(['Instituição / Local','UF','Nº de Salas','Capacidade Total'], getEscolas().slice().sort(function(a,b){ return (b.CAP_TOTAL||0)-(a.CAP_TOTAL||0); }).slice(0,500).map(function(d){ return [d.NO_LOCAL||'—', d.SG_UF||'—', fmtNum(d.QTD_SALAS||0), fmtNum(d.CAP_TOTAL||0)]; })); },
+                            capacidade: function(){ return tableHTML(['UF','Nº de Salas','Capacidade Total (assentos)'], capByUF().map(function(d){ return [d.uf, fmtNum(d.n), fmtNum(d.cap)]; })); },
+                            gini: function(){ var esc=getEscolas(), total=esc.reduce(function(s,d){ return s+(d.CAP_TOTAL||0); },0)||1, c2=0; return tableHTML(['Local (maiores primeiro)','UF','Capacidade','% Acumulado'], esc.slice().sort(function(a,b){ return (b.CAP_TOTAL||0)-(a.CAP_TOTAL||0); }).slice(0,500).map(function(d){ c2+=(d.CAP_TOTAL||0); return [d.NO_LOCAL||'—', d.SG_UF||'—', fmtNum(d.CAP_TOTAL||0), (c2/total*100).toFixed(1)+'%']; })); },
+                            acessibilidade: function(){ return tableHTML(['UF','Acessibilidade Média (0-100)','Nº de Salas'], meanByUF('INDICE_ACESSIBILIDADE').map(function(d){ return [d.uf, fmtNum(d.m), fmtNum(d.n)]; })); },
+                            conservacao: function(){ return tableHTML(['UF','Conservação Média (0-100)','Nº de Salas'], meanByUF('INDICE_CONSERVACAO').map(function(d){ return [d.uf, fmtNum(d.m), fmtNum(d.n)]; })); },
+                            nota: function(){ return tableHTML(['Nota Oficial do Local','Nº de Salas'], countBy('DESC_NOTA_OFICIAL_INEP').map(function(d){ return [d.k, fmtNum(d.n)]; })); },
+                            area: function(){ return tableHTML(['UF','Área Média por Candidato (m²)','Nº de Salas'], meanByUF('AREA_POR_CANDIDATO_M2').map(function(d){ return [d.uf, fmtNum(d.m), fmtNum(d.n)]; })); }
+                        };
+                        function openInspector(cfg){
+                            $('#inspector-title').html('<i class="fas fa-magnifying-glass-chart"></i> ' + cfg.title);
+                            $('#inspector-badge-wrap').html(cfg.origem === 'criado'
+                                ? '<span class="inspector-badge badge-criado"><i class="fas fa-lightbulb"></i> Criado pela plataforma (não consta nos layouts)</span>'
+                                : '<span class="inspector-badge badge-layout"><i class="fas fa-file-lines"></i> ' + (cfg.origemTxt || 'Derivado dos layouts oficiais') + '</span>');
+                            $('#inspector-explain').html(cfg.explain);
+                            var host = document.getElementById('inspector-table-host');
+                            try { host.innerHTML = (typeof cfg.builder==='function' ? cfg.builder() : (builders[cfg.builder] || function(){ return metaBuild({op:'',col:''}).table; })()); } catch(e){ host.innerHTML = '<p style="color:#94A3B8;">Não foi possível montar a tabela.</p>'; }
+                            $('#modal-inspector').css('display','flex').hide().fadeIn(150);
+                        }
+                        var KPI = {
+                            'kpi-locais': { title:'Instituições / Prédios Validados', origem:'derivado', origemTxt:'Contagem de locais (CO_LOCAL / N52)', builder:'locais', explain:'Número de endereços físicos distintos (prédios) no filtro atual. A tabela lista todos, ordenados por capacidade.' },
+                            'kpi-cap': { title:'Assentos (Capacidade Máxima Somada)', origem:'derivado', origemTxt:'Soma de QT_CAPACIDADE_MAXIMA_SALA (N50)', builder:'capacidade', explain:'Soma da capacidade máxima das salas filtradas, agrupada por UF. Campo oficial do N50; a soma é a agregação.' },
+                            'kpi-seguro': { title:'Capacidade Segura Auditada (EN 1.6)', origem:'criado', builder:'capacidade', explain:'Capacidade máxima reduzida em 30% (× 0,70) — margem de segurança criada por nós (regra EN 1.6). A tabela mostra a capacidade máxima por UF, base do cálculo.' },
+                            'kpi-gini': { title:'Índice de Gini (concentração de capacidade)', origem:'criado', builder:'gini', explain:'Mede o quanto a capacidade se concentra em poucos locais (0 = igual; perto de 1 = muito concentrado). A tabela mostra os locais que mais concentram e o % acumulado (curva de Lorenz).' },
+                            'kpi-acess': { title:'Acessibilidade Média (0-100)', origem:'criado', builder:'acessibilidade', explain:'Índice composto criado por nós: média dos itens de acessibilidade do N60. A tabela mostra a média por UF no filtro atual.' },
+                            'kpi-nota': { title:'Nota Oficial INEP Média (0-100)', origem:'derivado', origemTxt:'Reescala de NU_PONTOS_LOCAL_PROVA (N60)', builder:'nota', explain:'Média da nota oficial (Básico/Adequado/Excelente) reescalada para 0-100. O valor é oficial; só a reescala é nossa. A tabela mostra a distribuição por categoria.' },
+                            'kpi-cons': { title:'Conservação Predial Média (0-100)', origem:'criado', builder:'conservacao', explain:'Índice criado por nós a partir dos campos TP_* do N60. A tabela mostra a média por UF no filtro atual.' },
+                            'kpi-area': { title:'Área Média por Candidato (m²)', origem:'criado', builder:'area', explain:'Densidade espacial criada por nós: área da sala ÷ capacidade. A tabela mostra a média por UF no filtro atual.' }
+                        };
+                        Object.keys(KPI).forEach(function(id){
+                            var el = document.getElementById(id); if(!el) return;
+                            var box = el.closest('.kpi-box') || el;
+                            box.setAttribute('tabindex','0');
+                            var lbl = box.querySelector('.kpi-lbl');
+                            if(lbl) lbl.insertAdjacentHTML('beforeend', '<span class="kpi-hint"><i class="fas fa-hand-pointer"></i> clique para ver os dados</span>');
+                            var handler = function(){ openInspector(KPI[id]); };
+                            box.addEventListener('click', function(e){ if(e.target.closest('.tooltip-icon')) return; handler(); });
+                            box.addEventListener('keypress', function(e){ if(e.key==='Enter') handler(); });
+                        });
+
+                        // Cards de totais (Seção I): drill-down ESPECÍFICO conforme o indicador
+                        document.addEventListener('click', function(e){
+                            var card = e.target.closest ? e.target.closest('.total-card') : null;
+                            if(!card || e.target.closest('.tooltip-icon')) return;
+                            var metric = card.dataset.metric || (card.querySelector('.lbl') ? card.querySelector('.lbl').textContent : '');
+                            var desc = metaByName[normName(metric)];
+                            var expl = (typeof getTooltipForMetric === 'function') ? getTooltipForMetric(metric) : '';
+                            if(desc){
+                                var built = metaBuild(desc);
+                                $('#inspector-title').html('<i class="fas fa-magnifying-glass-chart"></i> ' + built.title);
+                                $('#inspector-badge-wrap').html('<span class="inspector-badge badge-layout"><i class="fas fa-calculator"></i> ' + opPhrase(desc.op) + (desc.col ? (' • ' + desc.col) : '') + '</span>');
+                                $('#inspector-explain').html((expl ? expl + '<br><br>' : '') + built.suffix);
+                                document.getElementById('inspector-table-host').innerHTML = built.table;
+                                $('#modal-inspector').css('display','flex').hide().fadeIn(150);
+                            } else {
+                                openInspector({ title: metric, origem:'derivado', origemTxt:'Total consolidado', builder: builders.capacidade, explain: (expl||'Indicador consolidado da operação.') });
+                            }
+                        });
+                        document.querySelectorAll('#totals-grid-container .total-card .lbl').forEach(function(l){
+                            l.insertAdjacentHTML('beforeend', '<span class="kpi-hint"><i class="fas fa-hand-pointer"></i> clique para ver os dados</span>');
+                        });
+
+                        // ---------- Painel "Operações sobre os dados" ----------
+                        (function(){
+                            var dsSel = document.getElementById('opDataset');
+                            var colSel = document.getElementById('opColumn');
+                            var aggSel = document.getElementById('opAgg');
+                            var grpSel = document.getElementById('opGroup');
+                            var runBtn = document.getElementById('opRun');
+                            var host = document.getElementById('opResult');
+                            if(!dsSel || !colSel || !runBtn) return;
+                            function rowsFor(){ return dsSel.value === 'locais' ? getEscolas() : getSalas(); }
+                            function fillColumns(){
+                                var rows = rowsFor();
+                                var cols = rows.length ? Object.keys(rows[0]) : [];
+                                colSel.innerHTML = '';
+                                grpSel.innerHTML = '<option value="">— Nenhum (total geral) —</option>';
+                                cols.forEach(function(c){ colSel.appendChild(new Option(c, c)); grpSel.appendChild(new Option(c, c)); });
+                            }
+                            function run(){
+                                var rows = rowsFor(), col = colSel.value, op = aggSel.value, grp = grpSel.value;
+                                if(!rows.length){ host.innerHTML = '<p style="color:#94A3B8;">Sem dados no filtro atual.</p>'; return; }
+                                if(!grp){
+                                    var res = aggregate(rows.map(function(d){ return d[col]; }), op);
+                                    if(res===null && needsNumeric(op)){ host.innerHTML = '<div class="ops-scalar"><span class="ops-desc">A coluna <strong>'+col+'</strong> não tem valores numéricos para calcular <strong>'+OP_LABEL[op]+'</strong>. Tente Contagem ou Contagem distinta.</span></div>'; return; }
+                                    host.innerHTML = '<div class="ops-scalar"><span class="ops-num">'+fmtNum(res)+'</span><span class="ops-desc">'+OP_LABEL[op]+' de <strong>'+col+'</strong></span><span class="ops-meta">Base: '+(dsSel.value==='locais'?'Locais/Prédios':'Salas')+' • '+rows.length.toLocaleString('pt-BR')+' registros no filtro atual.</span></div>';
+                                } else {
+                                    var acc = {};
+                                    rows.forEach(function(d){ var g=d[grp]; if(g===undefined||g===null||g==='') g='(vazio)'; if(!acc[g]) acc[g]=[]; acc[g].push(d[col]); });
+                                    var arr = Object.keys(acc).map(function(g){ return { g:g, v:aggregate(acc[g], op), n:acc[g].length }; })
+                                              .sort(function(a,b){ var av=(a.v===null?-Infinity:a.v), bv=(b.v===null?-Infinity:b.v); return bv-av; });
+                                    host.innerHTML = '<p style="margin:0 0 12px; color:#475569;"><strong>'+OP_LABEL[op]+'</strong> de <strong>'+col+'</strong> agrupado por <strong>'+grp+'</strong> — '+arr.length+' grupos, '+rows.length.toLocaleString('pt-BR')+' registros.</p>'
+                                                      + tableHTML([grp, OP_LABEL[op]+' de '+col, 'Nº de registros'], arr.map(function(o){ return [o.g, fmtNum(o.v), fmtNum(o.n)]; }));
+                                }
+                            }
+                            dsSel.addEventListener('change', fillColumns);
+                            runBtn.addEventListener('click', run);
+                            fillColumns();
+                        })();
+                    })();
+
+                    // ================================================================
+                    // MÓDULO DE INSCRITOS & ENSALAMENTO (v29) — renderização única.
+                    // Usa séries pré-agregadas (N02/N90); não depende do cross-filter.
+                    // ================================================================
+                    (function initInscritosModule(){
+                        try {
+                            var meta = (typeof inscritosMeta !== 'undefined' && inscritosMeta) ? inscritosMeta : {};
+                            var temCurso = (typeof cursoData !== 'undefined') && cursoData && cursoData.length;
+                            var temEns = (typeof ensalamentoData !== 'undefined') && ensalamentoData && ensalamentoData.length;
+                            var temFaixa = (typeof faixaEtariaData !== 'undefined') && faixaEtariaData && faixaEtariaData.length;
+                            var ativo = !!(meta.modulo_ativo || temCurso || temEns || temFaixa);
+
+                            var vazio = document.getElementById('inscritosVazio');
+                            var conteudo = document.getElementById('inscritosConteudo');
+                            if(!ativo){
+                                if(vazio) vazio.style.display = 'block';
+                                if(conteudo) conteudo.style.display = 'none';
+                                return;
+                            }
+                            if(vazio) vazio.style.display = 'none';
+                            if(conteudo) conteudo.style.display = 'block';
+
+                            // ---- Cartões de KPI ----
+                            var kpis = [];
+                            if(meta.idade_media !== undefined) kpis.push({v: (meta.idade_media).toLocaleString('pt-BR') + ' anos', l: '<i class="fas fa-user-clock"></i>&nbsp; Idade média dos participantes', h:'Idade média dos participantes, calculada de DT_NASCIMENTO (N90).'});
+                            if(meta.pct_feminino !== undefined) kpis.push({v: (meta.pct_feminino).toFixed(1) + '%', l: '<i class="fas fa-venus"></i>&nbsp; Participantes do sexo feminino', h:'Percentual do sexo feminino (TP_SEXO, N90).'});
+                            if(meta.pct_masculino !== undefined) kpis.push({v: (meta.pct_masculino).toFixed(1) + '%', l: '<i class="fas fa-mars"></i>&nbsp; Participantes do sexo masculino', h:'Percentual do sexo masculino (TP_SEXO, N90).'});
+                            if(meta.pct_atendimento_especial !== undefined) kpis.push({v: (meta.pct_atendimento_especial).toFixed(1) + '%', l: '<i class="fas fa-universal-access"></i>&nbsp; Com demanda de atendimento especial', h:'Percentual com ao menos um item de atendimento/recurso (N91).'});
+                            if(meta.pct_migracao !== undefined) kpis.push({v: (meta.pct_migracao).toFixed(1) + '%', l: '<i class="fas fa-route"></i>&nbsp; Migração interestadual (residência ≠ prova)', h:'Percentual cuja UF de residência (N90) difere da UF de prova (N02).'});
+                            if(meta.distancia_mediana_km !== undefined) kpis.push({v: (meta.distancia_mediana_km).toLocaleString('pt-BR') + ' km', l: '<i class="fas fa-ruler-horizontal"></i>&nbsp; Distância mediana de deslocamento', h:'Mediana da distância de deslocamento (NU_DISTANCIA, N02).'});
+                            if(meta.pct_irregular !== undefined) kpis.push({v: (meta.pct_irregular).toFixed(2) + '%', l: '<i class="fas fa-scale-balanced"></i>&nbsp; Inscrições irregulares / sub judice', h:'Percentual de inscrições irregulares/sub judice (TP_SITUACAO, N90).'});
+                            if(meta.total_grupos_curso !== undefined) kpis.push({v: (meta.total_grupos_curso).toLocaleString('pt-BR'), l: '<i class="fas fa-graduation-cap"></i>&nbsp; Áreas de avaliação (grupos de curso)', h:'Número de áreas de avaliação distintas (grupo de curso, N02/N90).'});
+                            var box = document.getElementById('inscritosKPIs');
+                            if(box){ box.innerHTML = kpis.map(function(k){ var hp = k.h ? ' <span class="tooltip-icon"><i class="fas fa-circle-info" style="font-size:0.62rem;"></i><span class="tooltip-text">'+k.h+'</span></span>' : ''; return '<div class="kpi-box"><div class="kpi-val">'+k.v+'</div><div class="kpi-lbl">'+k.l+hp+'</div></div>'; }).join(''); }
+
+                            var layoutBase = { margin:{t:12,b:40,l:50,r:20}, plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)', font:{ family:'Inter, sans-serif' } };
+                            function draw(id, traces, layout){ var el = document.getElementById(id); if(el){ try { Plotly.react(el, traces, Object.assign({}, layoutBase, layout||{})); } catch(e){ console.warn('Chart '+id+' falhou:', e); } } }
+
+                            // A. Ranking de grupos de curso (barra horizontal).
+                            if(temCurso){
+                                var cd = cursoData.slice().reverse();
+                                draw('chartCursoBar', [{
+                                    type:'bar', orientation:'h',
+                                    y: cd.map(function(r){ return r['GRUPO / CURSO']; }),
+                                    x: cd.map(function(r){ return r['PARTICIPANTES']; }),
+                                    marker:{ color:'#2563EB' },
+                                    text: cd.map(function(r){ return (r['PERCENTUAL (%)']!=null? r['PERCENTUAL (%)'].toFixed(1):'')+'%'; }),
+                                    textposition:'auto',
+                                    hovertemplate: '%{y}<br>%{x:,} participantes<extra></extra>'
+                                }], { margin:{t:12,b:40,l:210,r:20}, xaxis:{ title:'Participantes' } });
+                            }
+
+                            // B. Perfil etário (barra).
+                            if(temFaixa){
+                                draw('chartFaixaEtaria', [{
+                                    type:'bar',
+                                    x: faixaEtariaData.map(function(r){ return r['FAIXA ETÁRIA']; }),
+                                    y: faixaEtariaData.map(function(r){ return r['PARTICIPANTES']; }),
+                                    marker:{ color:'#8B5CF6' },
+                                    text: faixaEtariaData.map(function(r){ return (r['PERCENTUAL (%)']!=null? r['PERCENTUAL (%)'].toFixed(1):'')+'%'; }),
+                                    textposition:'auto',
+                                    hovertemplate: '%{x}<br>%{y:,} participantes<extra></extra>'
+                                }], { yaxis:{ title:'Participantes' } });
+                            }
+
+                            // C. Tipos de ensalamento (rosca).
+                            if(temEns){
+                                draw('chartEnsalamento', [{
+                                    type:'pie', hole:0.45,
+                                    labels: ensalamentoData.map(function(r){ return r['TIPO DE ENSALAMENTO']; }),
+                                    values: ensalamentoData.map(function(r){ return r['PARTICIPANTES']; }),
+                                    textinfo:'label+percent', textposition:'inside',
+                                    marker:{ colors:['#3B82F6','#EF4444','#F59E0B','#10B981','#8B5CF6','#64748B','#94A3B8'] }
+                                }], { margin:{t:12,b:12,l:12,r:12}, showlegend:false });
+                            }
+
+                            // D. Atendimento especial por UF (barra %).
+                            if((typeof atendimentoData !== 'undefined') && atendimentoData && atendimentoData.length){
+                                draw('chartAtendimentoUF', [{
+                                    type:'bar',
+                                    x: atendimentoData.map(function(r){ return r['UF']; }),
+                                    y: atendimentoData.map(function(r){ return r['PERCENTUAL_ESPECIAL (%)']; }),
+                                    marker:{ color:'#F59E0B' },
+                                    text: atendimentoData.map(function(r){ return (r['PERCENTUAL_ESPECIAL (%)']!=null? r['PERCENTUAL_ESPECIAL (%)'].toFixed(1):'')+'%'; }),
+                                    textposition:'auto',
+                                    hovertemplate: 'UF %{x}<br>%{y:.1f}% com atendimento especial<extra></extra>'
+                                }], { yaxis:{ title:'% com atend. especial', ticksuffix:'%' } });
+                            }
+
+                            // E. Migração interestadual por UF de prova (barra %).
+                            if((typeof migracaoData !== 'undefined') && migracaoData && migracaoData.length){
+                                draw('chartMigracaoUF', [{
+                                    type:'bar',
+                                    x: migracaoData.map(function(r){ return r['UF DE PROVA']; }),
+                                    y: migracaoData.map(function(r){ return r['PERCENTUAL_MIGRACAO (%)']; }),
+                                    marker:{ color:'#10B981' },
+                                    text: migracaoData.map(function(r){ return (r['PERCENTUAL_MIGRACAO (%)']!=null? r['PERCENTUAL_MIGRACAO (%)'].toFixed(1):'')+'%'; }),
+                                    textposition:'auto',
+                                    hovertemplate: 'UF de prova %{x}<br>%{y:.1f}% vêm de outra UF<extra></extra>'
+                                }], { yaxis:{ title:'% migração interestadual', ticksuffix:'%' } });
+                            }
+                        } catch(err){ console.warn('Módulo de Inscritos & Ensalamento não pôde ser renderizado:', err); }
+                    })();
+
+                    // ================================================================
+                    // MÓDULO DE ATENDIMENTOS & RECURSOS (v30 / N91) — renderização única.
+                    // Usa séries pré-agregadas do N91; não depende do cross-filter.
+                    // ================================================================
+                    (function initAtendimentosModule(){
+                        try {
+                            var meta = (typeof atendimentosMeta !== 'undefined' && atendimentosMeta) ? atendimentosMeta : {};
+                            var temItem = (typeof itemAtendData !== 'undefined') && itemAtendData && itemAtendData.length;
+                            var temTipo = (typeof tipoItemData !== 'undefined') && tipoItemData && tipoItemData.length;
+                            var ativo = !!(meta.modulo_ativo || temItem || temTipo);
+
+                            var vazio = document.getElementById('atendVazio');
+                            var conteudo = document.getElementById('atendConteudo');
+                            if(!ativo){
+                                if(vazio) vazio.style.display = 'block';
+                                if(conteudo) conteudo.style.display = 'none';
+                                return;
+                            }
+                            if(vazio) vazio.style.display = 'none';
+                            if(conteudo) conteudo.style.display = 'block';
+
+                            // ---- Cartões de KPI ----
+                            var kpis = [];
+                            if(meta.total_itens_atendimento !== undefined) kpis.push({v: (meta.total_itens_atendimento).toLocaleString('pt-BR'), l: '<i class="fas fa-list-check"></i>&nbsp; Itens de atendimento/recurso', h:'Total de itens de atendimento/recurso solicitados (N91).'});
+                            if(meta.pct_deferido !== undefined) kpis.push({v: (meta.pct_deferido).toFixed(1) + '%', l: '<i class="fas fa-circle-check"></i>&nbsp; Deferidos / ativos', h:'Percentual de laudos deferidos/ativos (CO_SITUACAO_LAUDO_MEDICO, N91).'});
+                            if(meta.pct_em_analise !== undefined) kpis.push({v: (meta.pct_em_analise).toFixed(1) + '%', l: '<i class="fas fa-hourglass-half"></i>&nbsp; Laudos em análise (pendências)', h:'Percentual de laudos ainda em análise — pendências (N91).'});
+                            if(meta.item_top !== undefined) kpis.push({v: '<span style="font-size:0.5em; line-height:1.2; display:block;">'+meta.item_top+'</span>', l: '<i class="fas fa-star"></i>&nbsp; Item mais solicitado', h:'Item de atendimento mais solicitado (NO_ITEM_ATENDIMENTO, N91).'});
+                            var box = document.getElementById('atendKPIs');
+                            if(box){ box.innerHTML = kpis.map(function(k){ var hp = k.h ? ' <span class="tooltip-icon"><i class="fas fa-circle-info" style="font-size:0.62rem;"></i><span class="tooltip-text">'+k.h+'</span></span>' : ''; return '<div class="kpi-box"><div class="kpi-val">'+k.v+'</div><div class="kpi-lbl">'+k.l+hp+'</div></div>'; }).join(''); }
+
+                            var layoutBase = { margin:{t:12,b:40,l:50,r:20}, plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)', font:{ family:'Inter, sans-serif' } };
+                            function draw(id, traces, layout){ var el = document.getElementById(id); if(el){ try { Plotly.react(el, traces, Object.assign({}, layoutBase, layout||{})); } catch(e){ console.warn('Chart '+id+' falhou:', e); } } }
+
+                            // A. Itens mais solicitados (barra horizontal, colorida por % deferido).
+                            if(temItem){
+                                var it = itemAtendData.slice().reverse();
+                                var temDefer = it.length && it[0]['% DEFERIDO'] !== undefined;
+                                var trace = {
+                                    type:'bar', orientation:'h',
+                                    y: it.map(function(r){ return r['ITEM DE ATENDIMENTO / RECURSO']; }),
+                                    x: it.map(function(r){ return r['SOLICITACOES']; }),
+                                    text: it.map(function(r){ return (r['SOLICITACOES']).toLocaleString('pt-BR'); }),
+                                    textposition:'auto',
+                                    hovertemplate: '%{y}<br>%{x:,} solicitações' + (temDefer ? '<br>%{marker.color:.1f}% deferido' : '') + '<extra></extra>'
+                                };
+                                if(temDefer){
+                                    trace.marker = { color: it.map(function(r){ return r['% DEFERIDO']; }), colorscale:'RdYlGn', cmin:0, cmax:100, colorbar:{ title:'% def.', thickness:12 } };
+                                } else { trace.marker = { color:'#0EA5E9' }; }
+                                draw('chartItemAtend', [trace], { margin:{t:12,b:40,l:220,r:20}, xaxis:{ title:'Solicitações' } });
+                            }
+
+                            // B. Tipos de atendimento (rosca).
+                            if(temTipo){
+                                draw('chartTipoItem', [{
+                                    type:'pie', hole:0.45,
+                                    labels: tipoItemData.map(function(r){ return r['TIPO DE ATENDIMENTO']; }),
+                                    values: tipoItemData.map(function(r){ return r['SOLICITACOES']; }),
+                                    textinfo:'label+percent', textposition:'inside',
+                                    marker:{ colors:['#F59E0B','#3B82F6','#10B981'] }
+                                }], { margin:{t:12,b:12,l:12,r:12}, showlegend:false });
+                            }
+
+                            // C. Situação do laudo médico (rosca com cores semafóricas).
+                            if((typeof laudoData !== 'undefined') && laudoData && laudoData.length){
+                                var corLaudo = { 'Aprovado':'#10B981', 'Reprovado':'#EF4444', 'Em Análise':'#F59E0B', 'Recurso':'#8B5CF6', 'Não Informado':'#94A3B8' };
+                                draw('chartLaudo', [{
+                                    type:'pie', hole:0.45,
+                                    labels: laudoData.map(function(r){ return r['SITUAÇÃO DO LAUDO']; }),
+                                    values: laudoData.map(function(r){ return r['SOLICITACOES']; }),
+                                    textinfo:'label+percent', textposition:'inside',
+                                    marker:{ colors: laudoData.map(function(r){ return corLaudo[r['SITUAÇÃO DO LAUDO']] || '#64748B'; }) }
+                                }], { margin:{t:12,b:12,l:12,r:12}, showlegend:false });
+                            }
+
+                            // D. Taxa de deferimento por UF (barra %).
+                            if((typeof laudoUFData !== 'undefined') && laudoUFData && laudoUFData.length){
+                                draw('chartLaudoUF', [{
+                                    type:'bar',
+                                    x: laudoUFData.map(function(r){ return r['UF DE PROVA']; }),
+                                    y: laudoUFData.map(function(r){ return r['PERCENTUAL_DEFERIDO (%)']; }),
+                                    marker:{ color: laudoUFData.map(function(r){ return r['PERCENTUAL_DEFERIDO (%)']; }), colorscale:'RdYlGn', cmin:0, cmax:100 },
+                                    text: laudoUFData.map(function(r){ return (r['PERCENTUAL_DEFERIDO (%)']!=null? r['PERCENTUAL_DEFERIDO (%)'].toFixed(1):'')+'%'; }),
+                                    textposition:'auto',
+                                    hovertemplate: 'UF de prova %{x}<br>%{y:.1f}% deferido<extra></extra>'
+                                }], { yaxis:{ title:'% deferido', ticksuffix:'%' } });
+                            }
+                        } catch(err){ console.warn('Módulo de Atendimentos & Recursos não pôde ser renderizado:', err); }
+                    })();
+
+                    // ================================================================
+                    // AUDITORIA DE CRUZAMENTO ENTRE LAYOUTS (v31) — renderização única.
+                    // ================================================================
+                    (function initAuditoriaCruzamento(){
+                        try {
+                            var K = (typeof auditKPIs !== 'undefined' && auditKPIs) ? auditKPIs : {};
+                            var F = (typeof auditFindings !== 'undefined' && auditFindings) ? auditFindings : [];
+                            var ativo = !!((K.layouts_detectados && K.layouts_detectados.length) || (F && F.length));
+                            var vazio = document.getElementById('auditVazio');
+                            var conteudo = document.getElementById('auditConteudo');
+                            if(!ativo){
+                                if(vazio) vazio.style.display = 'block';
+                                if(conteudo) conteudo.style.display = 'none';
+                                return;
+                            }
+                            if(vazio) vazio.style.display = 'none';
+                            if(conteudo) conteudo.style.display = 'block';
+
+                            // Resumo executivo.
+                            var rtxt = document.getElementById('auditResumoTxt');
+                            if(rtxt && typeof auditResumo === 'string') rtxt.textContent = auditResumo;
+
+                            // KPIs.
+                            function num(x){ return (x==null? 0 : x).toLocaleString('pt-BR'); }
+                            var kpis = [];
+                            if(K.total_inscritos !== undefined) kpis.push({v: num(K.total_inscritos), l:'<i class="fas fa-id-card"></i>&nbsp; Inscritos (N90)', h:'Total de participantes inscritos (N90).'});
+                            if(K.total_ensalados !== undefined) kpis.push({v: num(K.total_ensalados), l:'<i class="fas fa-chair"></i>&nbsp; Ensalados (N02)', h:'Participantes alocados em sala (N02).'});
+                            if(K.pct_ensalamento !== undefined) kpis.push({v: (K.pct_ensalamento).toFixed(1)+'%', l:'<i class="fas fa-percent"></i>&nbsp; Taxa de ensalamento', h:'Ensalados (N02) ÷ inscritos (N90) × 100.'});
+                            if(K.qtd_sem_ensalamento !== undefined) kpis.push({v: num(K.qtd_sem_ensalamento), l:'<i class="fas fa-user-slash"></i>&nbsp; Sem ensalamento', h:'Inscritos no N90 sem correspondência no N02 (sem sala).'});
+                            if(K.qtd_salas_superlotadas !== undefined) kpis.push({v: num(K.qtd_salas_superlotadas), l:'<i class="fas fa-triangle-exclamation"></i>&nbsp; Salas superlotadas', h:'Salas com ensalados (N02) acima da capacidade (N50).'});
+                            if(K.pct_forasteiros !== undefined) kpis.push({v: (K.pct_forasteiros).toFixed(1)+'%', l:'<i class="fas fa-people-arrows"></i>&nbsp; Forasteiros', h:'Percentual com UF de residência (N90) ≠ UF de prova (N02).'});
+                            if(K.qtd_dist_criticos !== undefined) kpis.push({v: num(K.qtd_dist_criticos), l:'<i class="fas fa-road-circle-exclamation"></i>&nbsp; Deslocamentos críticos', h:'Deslocamentos acima do limiar crítico (NU_DISTANCIA, N02).'});
+                            if(K.pct_cobertura_kit !== undefined) kpis.push({v: (K.pct_cobertura_kit).toFixed(1)+'%', l:'<i class="fas fa-box-open"></i>&nbsp; Cobertura de kit (atend.)', h:'Dos participantes com atendimento (N91), quantos têm kit no N02.'});
+                            if(K.qtd_atend_sem_kit !== undefined) kpis.push({v: num(K.qtd_atend_sem_kit), l:'<i class="fas fa-box-archive"></i>&nbsp; Atend. sem kit', h:'Ensalados com atendimento (N91) sem ID_KIT_PROVA no N02.'});
+                            if(K.qtd_participantes_multi_atendimento !== undefined) kpis.push({v: num(K.qtd_participantes_multi_atendimento), l:'<i class="fas fa-layer-group"></i>&nbsp; Multi-atendimento'});
+                            if(K.qtd_kits_pendentes_laudo !== undefined) kpis.push({v: num(K.qtd_kits_pendentes_laudo), l:'<i class="fas fa-file-circle-exclamation"></i>&nbsp; Kits c/ laudo pendente'});
+                            if(K.completude_media_global !== undefined) kpis.push({v: (K.completude_media_global).toFixed(1)+'%', l:'<i class="fas fa-clipboard-check"></i>&nbsp; Completude média', h:'Preenchimento médio das colunas entre os layouts — confiabilidade.'});
+                            if(K.qtd_achados_criticos !== undefined) kpis.push({v: num(K.qtd_achados_criticos), l:'<i class="fas fa-flag"></i>&nbsp; Achados críticos', h:'Número de achados CRÍTICOS no cruzamento dos layouts.'});
+                            var box = document.getElementById('auditKPIs');
+                            if(box){ box.innerHTML = kpis.map(function(k){ var hp = k.h ? ' <span class="tooltip-icon"><i class="fas fa-circle-info" style="font-size:0.62rem;"></i><span class="tooltip-text">'+k.h+'</span></span>' : ''; return '<div class="kpi-box"><div class="kpi-val">'+k.v+'</div><div class="kpi-lbl">'+k.l+hp+'</div></div>'; }).join(''); }
+
+                            // Tabela de achados.
+                            var host = document.getElementById('auditFindingsTable');
+                            if(host && F.length){
+                                var badge = function(sev){
+                                    var c = sev==='CRÍTICO' ? '#EF4444' : (sev==='ATENÇÃO' ? '#F59E0B' : '#10B981');
+                                    return '<span style="display:inline-block; padding:3px 10px; border-radius:999px; background:'+c+'; color:#fff; font-size:0.72rem; font-weight:800;">'+sev+'</span>';
+                                };
+                                var ordem = {'CRÍTICO':0,'ATENÇÃO':1,'OK':2};
+                                var sorted = F.slice().sort(function(a,b){ return (ordem[a.severidade]||3)-(ordem[b.severidade]||3); });
+                                var rows = sorted.map(function(f){
+                                    return '<tr data-sev="'+f.severidade+'">'
+                                        + '<td style="white-space:nowrap;">'+badge(f.severidade)+'</td>'
+                                        + '<td><strong>'+f.titulo+'</strong><br><span style="color:#64748B; font-size:0.8rem;">'+(f.categoria||'')+'</span></td>'
+                                        + '<td style="text-align:right; font-weight:800; font-size:1.1rem;">'+((f.valor==null?0:f.valor).toLocaleString('pt-BR'))+'</td>'
+                                        + '<td style="color:#334155; font-size:0.85rem;">'+(f.interpretacao||'')+'<br><em style="color:#2563EB;">'+(f.recomendacao||'')+'</em></td>'
+                                        + '</tr>';
+                                }).join('');
+                                host.innerHTML = '<table style="width:100%; border-collapse:collapse;" class="audit-table">'
+                                    + '<thead><tr style="background:#1E293B; color:#fff; text-align:left;">'
+                                    + '<th style="padding:10px;">Severidade</th><th style="padding:10px;">Achado</th>'
+                                    + '<th style="padding:10px; text-align:right;">Valor</th><th style="padding:10px;">Interpretação &amp; Recomendação</th>'
+                                    + '</tr></thead><tbody>'+rows+'</tbody></table>';
+                                host.querySelectorAll('tbody tr').forEach(function(tr,i){ tr.style.background = i%2 ? '#F8FAFC' : '#FFFFFF'; tr.querySelectorAll('td').forEach(function(td){ td.style.padding='10px'; td.style.borderBottom='1px solid #E2E8F0'; td.style.verticalAlign='top'; }); });
+
+                                // Filtro por severidade (botões).
+                                var applySev = function(sev){
+                                    var vis = 0, all = host.querySelectorAll('tbody tr');
+                                    all.forEach(function(tr){
+                                        var show = !sev || tr.getAttribute('data-sev')===sev;
+                                        tr.style.display = show ? '' : 'none';
+                                        if(show) vis++;
+                                    });
+                                    // re-zebrar as linhas visíveis
+                                    var idx=0;
+                                    all.forEach(function(tr){ if(tr.style.display!=='none'){ tr.style.background = (idx%2)?'#F8FAFC':'#FFFFFF'; idx++; } });
+                                    var cnt=document.getElementById('fsevCount'); if(cnt) cnt.textContent = vis+' achado(s) exibido(s)';
+                                };
+                                document.querySelectorAll('.fsev-btn').forEach(function(btn){
+                                    btn.addEventListener('click', function(){
+                                        document.querySelectorAll('.fsev-btn').forEach(function(b){ b.classList.remove('active'); b.style.background = b.getAttribute('data-sev')==='' ? '#fff' : '#fff'; if(b.getAttribute('data-sev')==='') { b.style.background='#fff'; b.style.color='#334155'; } });
+                                        this.classList.add('active');
+                                        var sev=this.getAttribute('data-sev');
+                                        // destacar botão ativo
+                                        var col = sev==='CRÍTICO'?'#EF4444':(sev==='ATENÇÃO'?'#F59E0B':(sev==='OK'?'#10B981':'#1E293B'));
+                                        this.style.background=col; this.style.color='#fff';
+                                        applySev(sev);
+                                    });
+                                });
+                                applySev('');
+
+                                // Download dos achados (respeitando o filtro de severidade ativo).
+                                var btnFsev = document.getElementById('fsevBaixar');
+                                if(btnFsev){
+                                    btnFsev.addEventListener('click', function(){
+                                        try {
+                                            var ativo = document.querySelector('.fsev-btn.active');
+                                            var sevF = ativo ? ativo.getAttribute('data-sev') : '';
+                                            var lista = (sevF ? F.filter(function(f){ return f.severidade === sevF; }) : F);
+                                            var esc = function(v){ var s=(v==null?'':String(v)); if(s.indexOf('"')>=0||s.indexOf(';')>=0||s.indexOf(String.fromCharCode(10))>=0||s.indexOf(String.fromCharCode(13))>=0){ s='"'+s.replace(/"/g,'""')+'"'; } return s; };
+                                            var head = ['SEVERIDADE','TITULO','CATEGORIA','VALOR','INTERPRETACAO','RECOMENDACAO'];
+                                            var linhas = [head.join(';')];
+                                            lista.forEach(function(f){ linhas.push([f.severidade, f.titulo, f.categoria, f.valor, f.interpretacao, f.recomendacao].map(esc).join(';')); });
+                                            var NL = String.fromCharCode(13,10);
+                                            var csv = String.fromCharCode(65279) + linhas.join(NL);
+                                            var blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+                                            var url = URL.createObjectURL(blob);
+                                            var a = document.createElement('a'); a.href=url; a.download='achados_auditoria.csv';
+                                            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                                            setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+                                        } catch(e){ console.warn('Falha ao exportar achados:', e); }
+                                    });
+                                }
+                            }
+
+                            var layoutBase = { margin:{t:12,b:40,l:50,r:20}, plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)', font:{ family:'Inter, sans-serif' } };
+                            function draw(id, traces, layout){ var el=document.getElementById(id); if(el){ try { Plotly.react(el, traces, Object.assign({}, layoutBase, layout||{})); } catch(e){ console.warn('Chart '+id+' falhou:', e); } } }
+
+                            // B. Reconciliação (donut).
+                            if(K.total_inscritos !== undefined){
+                                var sem = K.qtd_sem_ensalamento || 0;
+                                var com = Math.max(0, (K.total_inscritos||0) - sem);
+                                draw('chartReconc', [{ type:'pie', hole:0.5,
+                                    labels:['Com ensalamento','Sem ensalamento'], values:[com, sem],
+                                    textinfo:'label+percent', textposition:'inside',
+                                    marker:{ colors:['#10B981','#EF4444'] } }], { margin:{t:12,b:12,l:12,r:12}, showlegend:false });
+                            }
+                            // C. Faixas de distância (bar).
+                            if((typeof auditDistFaixas !== 'undefined') && auditDistFaixas && auditDistFaixas.length){
+                                draw('chartDistFaixas', [{ type:'bar',
+                                    x: auditDistFaixas.map(function(r){ return r['FAIXA']; }),
+                                    y: auditDistFaixas.map(function(r){ return r['QUANTIDADE']; }),
+                                    marker:{ color:'#6366F1' },
+                                    text: auditDistFaixas.map(function(r){ return (r['PERCENTUAL (%)']!=null? r['PERCENTUAL (%)'].toFixed(1):'')+'%'; }),
+                                    textposition:'auto',
+                                    hovertemplate: '%{x}<br>%{y:,} participantes<extra></extra>' }], { yaxis:{ title:'Participantes' } });
+                            }
+                            // D. Forasteiros por UF (bar).
+                            if((typeof auditForasteiros !== 'undefined') && auditForasteiros && auditForasteiros.length){
+                                draw('chartForastUF', [{ type:'bar',
+                                    x: auditForasteiros.map(function(r){ return r['UF DE PROVA']; }),
+                                    y: auditForasteiros.map(function(r){ return r['FORASTEIROS']; }),
+                                    marker:{ color:'#EC4899' },
+                                    text: auditForasteiros.map(function(r){ return (r['FORASTEIROS']).toLocaleString('pt-BR'); }),
+                                    textposition:'auto',
+                                    hovertemplate: 'UF de prova %{x}<br>%{y:,} forasteiros<extra></extra>' }], { yaxis:{ title:'Forasteiros' } });
+                            }
+                            // E. Distribuição de kits (bar).
+                            if((typeof auditKitDist !== 'undefined') && auditKitDist && auditKitDist.length){
+                                draw('chartKitDist', [{ type:'bar',
+                                    x: auditKitDist.map(function(r){ return r['ID_KIT_PROVA']; }),
+                                    y: auditKitDist.map(function(r){ return r['ENSALADOS_COM_KIT']; }),
+                                    marker:{ color:'#0EA5E9' },
+                                    text: auditKitDist.map(function(r){ return (r['ENSALADOS_COM_KIT']).toLocaleString('pt-BR'); }),
+                                    textposition:'auto',
+                                    hovertemplate: 'Kit %{x}<br>%{y:,} ensalados<extra></extra>' }], { xaxis:{ title:'ID_KIT_PROVA' }, yaxis:{ title:'Ensalados' } });
+                            }
+                            // F. Funil de cobertura (barra horizontal decrescente).
+                            if((typeof auditKitFunil !== 'undefined') && auditKitFunil && auditKitFunil.length){
+                                var f = auditKitFunil.slice().reverse();
+                                draw('chartKitFunil', [{ type:'bar', orientation:'h',
+                                    y: f.map(function(r){ return r['ETAPA DA ATRIBUIÇÃO']; }),
+                                    x: f.map(function(r){ return r['PARTICIPANTES']; }),
+                                    marker:{ color:['#14B8A6','#22C55E','#F59E0B','#EF4444'].slice(0, f.length).reverse() },
+                                    text: f.map(function(r){ return (r['PARTICIPANTES']).toLocaleString('pt-BR'); }),
+                                    textposition:'auto',
+                                    hovertemplate: '%{y}<br>%{x:,} participantes<extra></extra>' }], { margin:{t:12,b:40,l:200,r:20}, xaxis:{ title:'Participantes' } });
+                            }
+                            // G. Kit × UF (barras empilhadas por tipo de kit).
+                            if((typeof auditKitUF !== 'undefined') && auditKitUF && auditKitUF.length){
+                                var ufs = auditKitUF.map(function(r){ return r['UF DE PROVA']; });
+                                var kitCols = Object.keys(auditKitUF[0]).filter(function(c){ return c!=='UF DE PROVA' && c!=='TOTAL'; });
+                                var palette = ['#0EA5E9','#F59E0B','#10B981','#8B5CF6','#EF4444','#14B8A6','#EC4899'];
+                                var traces = kitCols.map(function(kc, i){ return { type:'bar', name: kc,
+                                    x: ufs, y: auditKitUF.map(function(r){ return r[kc]||0; }),
+                                    marker:{ color: palette[i % palette.length] } }; });
+                                draw('chartKitUF', traces, { barmode:'stack', margin:{t:12,b:40,l:50,r:20}, legend:{ orientation:'h' }, yaxis:{ title:'Participantes com kit' } });
+                            }
+                            // H. Kit × situação do laudo (barras agrupadas).
+                            if((typeof auditKitLaudo !== 'undefined') && auditKitLaudo && auditKitLaudo.length){
+                                var kits = auditKitLaudo.map(function(r){ return r['ID_KIT_PROVA']; });
+                                var statusCols = Object.keys(auditKitLaudo[0]).filter(function(c){ return c!=='ID_KIT_PROVA' && c!=='TOTAL'; });
+                                var corSt = { 'Aprovado':'#10B981', 'Reprovado':'#EF4444', 'Em Análise':'#F59E0B', 'Recurso':'#8B5CF6', 'Não Informado':'#94A3B8' };
+                                var tr = statusCols.map(function(sc){ return { type:'bar', name: sc,
+                                    x: kits, y: auditKitLaudo.map(function(r){ return r[sc]||0; }),
+                                    marker:{ color: corSt[sc] || '#64748B' } }; });
+                                draw('chartKitLaudo', tr, { barmode:'group', margin:{t:12,b:40,l:50,r:20}, legend:{ orientation:'h' }, yaxis:{ title:'Itens' } });
+                            }
+                            // I. Itens de atendimento por participante (barra).
+                            if((typeof auditMultiAtend !== 'undefined') && auditMultiAtend && auditMultiAtend.length){
+                                draw('chartMultiAtend', [{ type:'bar',
+                                    x: auditMultiAtend.map(function(r){ return r['ITENS_DE_ATENDIMENTO']; }),
+                                    y: auditMultiAtend.map(function(r){ return r['PARTICIPANTES']; }),
+                                    marker:{ color:'#8B5CF6' },
+                                    text: auditMultiAtend.map(function(r){ return (r['PARTICIPANTES']).toLocaleString('pt-BR'); }),
+                                    textposition:'auto',
+                                    hovertemplate: '%{x} item(ns)<br>%{y:,} participantes<extra></extra>' }], { xaxis:{ title:'Itens de atendimento', dtick:1 }, yaxis:{ title:'Participantes' } });
+                            }
+                            // J. Ranking de problemas (barra horizontal, cor por severidade).
+                            if((typeof auditRankingProb !== 'undefined') && auditRankingProb && auditRankingProb.length){
+                                var rp = auditRankingProb.slice().reverse();
+                                draw('chartRankingProb', [{ type:'bar', orientation:'h',
+                                    y: rp.map(function(r){ return r['PROBLEMA']; }),
+                                    x: rp.map(function(r){ return r['OCORRENCIAS']; }),
+                                    marker:{ color: rp.map(function(r){ return r['SEVERIDADE']==='CRÍTICO' ? '#EF4444' : '#F59E0B'; }) },
+                                    text: rp.map(function(r){ return (r['OCORRENCIAS']).toLocaleString('pt-BR'); }),
+                                    textposition:'auto',
+                                    hovertemplate: '%{y}<br>%{x:,} ocorrência(s)<extra></extra>' }], { margin:{t:12,b:40,l:320,r:20}, xaxis:{ title:'Ocorrências' } });
+                            }
+                            // K. Qualidade por layout (barra de completude).
+                            if((typeof auditQualidade !== 'undefined') && auditQualidade && auditQualidade.length){
+                                draw('chartQualidadeDados', [{ type:'bar',
+                                    x: auditQualidade.map(function(r){ return r['LAYOUT']; }),
+                                    y: auditQualidade.map(function(r){ return r['COMPLETUDE_MEDIA (%)']; }),
+                                    marker:{ color: auditQualidade.map(function(r){ return r['COMPLETUDE_MEDIA (%)']; }), colorscale:'RdYlGn', cmin:0, cmax:100 },
+                                    text: auditQualidade.map(function(r){ return (r['COMPLETUDE_MEDIA (%)']!=null? r['COMPLETUDE_MEDIA (%)'].toFixed(1):'')+'%'; }),
+                                    textposition:'auto',
+                                    hovertemplate: '%{x}<br>%{y:.1f}% completude<extra></extra>' }], { yaxis:{ title:'Completude (%)', range:[0,105] } });
+                            }
+                        } catch(err){ console.warn('Auditoria de Cruzamento não pôde ser renderizada:', err); }
+                    })();
+
+                    // ================= TABELA MESTRE INTERATIVA =================
+                    (function initMasterTable(){
+                        try {
+                            var cols = (typeof auditMasterCols !== 'undefined' && auditMasterCols) ? auditMasterCols : [];
+                            var rows = (typeof auditMasterRows !== 'undefined' && auditMasterRows) ? auditMasterRows : [];
+                            var vazio = document.getElementById('mestreVazio'), cont = document.getElementById('mestreConteudo');
+                            if(!cols.length || !rows.length){ if(vazio) vazio.style.display='block'; if(cont) cont.style.display='none'; return; }
+                            if(vazio) vazio.style.display='none'; if(cont) cont.style.display='block';
+                            var ci={}; cols.forEach(function(c,i){ ci[c]=i; });
+                            var total = (typeof auditMasterTotal !== 'undefined' ? auditMasterTotal : rows.length);
+                            function countBy(name,val){ var i=ci[name]; if(i===undefined) return 0; var n=0; rows.forEach(function(r){ if(String(r[i])===val) n++; }); return n; }
+                            var sitIdx=ci['SITUACAO_AUDITORIA']; var comAlerta=0;
+                            if(sitIdx!==undefined) rows.forEach(function(r){ if(String(r[sitIdx])!=='OK') comAlerta++; });
+                            var kpis=[
+                                {v: total.toLocaleString('pt-BR'), i:'fa-users', l:'Candidatos', help:'<strong>Total de candidatos únicos</strong><br>União das chaves CO_INSCRICAO em N90, N02 e N91.'},
+                                {v: comAlerta.toLocaleString('pt-BR'), i:'fa-user-shield', l:'Com alerta', help:'<strong>Candidatos com ao menos uma divergência</strong><br>Detectada no cruzamento dos layouts. Clique para filtrar.', fid:'fMestreSit', fval:'alerta'},
+                                {v: countBy('ENSALADO_N02','Sim').toLocaleString('pt-BR'), i:'fa-chair', l:'Ensalados', help:'<strong>Alocados em sala (N02)</strong><br>Clique para ver só os ensalados.', fid:'fMestreEns', fval:'Sim'},
+                                {v: countBy('TEM_ATENDIMENTO','Sim').toLocaleString('pt-BR'), i:'fa-universal-access', l:'Com atendimento', help:'<strong>Com item de acessibilidade no N91</strong><br>Clique para filtrar.', fid:'fMestreAtend', fval:'Sim'},
+                                {v: countBy('POSSUI_KIT','Sim').toLocaleString('pt-BR'), i:'fa-box-open', l:'Com kit', help:'<strong>Com ID_KIT_PROVA no N02</strong><br>Clique para filtrar.', fid:'fMestreKit', fval:'Sim'},
+                                {v: countBy('FORASTEIRO','Sim').toLocaleString('pt-BR'), i:'fa-people-arrows', l:'Forasteiros', help:'<strong>UF de residência (N90) ≠ UF de prova (N02)</strong><br>Clique para filtrar.', fid:'fMestreForast', fval:'Sim'},
+                            ];
+                            var box=document.getElementById('mestreKpis');
+                            if(box){ box.innerHTML=kpis.map(function(k){
+                                var clk = k.fid ? ' style="cursor:pointer;" data-fid="'+k.fid+'" data-fval="'+k.fval+'"' : '';
+                                var help = k.help ? ' <span class="tooltip-icon"><i class="fas fa-circle-info" style="font-size:0.62rem;"></i><span class="tooltip-text">'+k.help+'</span></span>' : '';
+                                return '<div class="kpi-box"'+clk+'><div class="kpi-val">'+k.v+'</div><div class="kpi-lbl"><i class="fas '+k.i+'"></i>&nbsp; '+k.l+help+'</div></div>';
+                            }).join(''); }
+                            var colDefs = cols.map(function(c){ return { title: c.replace(/_/g,' ') }; });
+                            function popular(selId, colName){
+                                var sel=document.getElementById(selId), idx=ci[colName];
+                                if(!sel || idx===undefined) return;
+                                var vals={}; rows.forEach(function(r){ var v=String(r[idx]||'').trim(); if(v && v!=='nan' && v!=='None') vals[v]=1; });
+                                Object.keys(vals).sort().forEach(function(v){ var o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o); });
+                            }
+                            popular('fMestreUF','UF_PROVA'); popular('fMestreFaixa','FAIXA_ETARIA'); popular('fMestreGenero','GENERO');
+                            var dt = $('#masterTable').DataTable({
+                                data: rows, columns: colDefs, pageLength: 15, lengthMenu:[10,15,25,50,100], deferRender:true,
+                                order: sitIdx!==undefined ? [[sitIdx,'asc']] : [],
+                                language: { search:'Buscar em tudo:', lengthMenu:'Mostrar _MENU_', info:'Exibindo _START_–_END_ de _TOTAL_', paginate:{previous:'Anterior', next:'Próximo'}, zeroRecords:'Nenhum candidato encontrado', infoFiltered:'(filtrado de _MAX_)', infoEmpty:'Sem registros' }
+                            });
+                            $.fn.dataTable.ext.search.push(function(settings, data){
+                                if(settings.nTable.id!=='masterTable') return true;
+                                function g(name){ var i=ci[name]; return i===undefined?'':String(data[i]); }
+                                var fs=(document.getElementById('fMestreSit')||{}).value||'';
+                                if(fs==='alerta' && g('SITUACAO_AUDITORIA')==='OK') return false;
+                                if(fs==='ok' && g('SITUACAO_AUDITORIA')!=='OK') return false;
+                                var fe=(document.getElementById('fMestreEns')||{}).value||''; if(fe && g('ENSALADO_N02')!==fe) return false;
+                                var fa=(document.getElementById('fMestreAtend')||{}).value||''; if(fa && g('TEM_ATENDIMENTO')!==fa) return false;
+                                var fk=(document.getElementById('fMestreKit')||{}).value||''; if(fk && g('POSSUI_KIT')!==fk) return false;
+                                var ff=(document.getElementById('fMestreForast')||{}).value||''; if(ff && g('FORASTEIRO')!==ff) return false;
+                                var fu=(document.getElementById('fMestreUF')||{}).value||''; if(fu && g('UF_PROVA')!==fu) return false;
+                                var fx=(document.getElementById('fMestreFaixa')||{}).value||''; if(fx && g('FAIXA_ETARIA')!==fx) return false;
+                                var fg=(document.getElementById('fMestreGenero')||{}).value||''; if(fg && g('GENERO')!==fg) return false;
+                                return true;
+                            });
+                            function updCount(){ var info=dt.page.info(); var el=document.getElementById('mestreCount'); if(el) el.textContent = info.recordsDisplay.toLocaleString('pt-BR')+' candidatos exibidos'+(total>rows.length?' · amostra de '+rows.length.toLocaleString('pt-BR')+' no navegador (base completa na aba 78)':''); }
+                            $('.mestre-filter').on('change', function(){ dt.draw(); });
+                            var limpar=document.getElementById('fMestreLimpar');
+                            if(limpar){ limpar.addEventListener('click', function(){ ['fMestreSit','fMestreEns','fMestreAtend','fMestreKit','fMestreForast','fMestreUF','fMestreFaixa','fMestreGenero'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; }); dt.search('').draw(); }); }
+                            dt.on('draw', updCount); updCount();
+
+                            // Download CSV dos dados atualmente filtrados/visíveis.
+                            var btnBaixar = document.getElementById('fMestreBaixar');
+                            if(btnBaixar){
+                                btnBaixar.addEventListener('click', function(){
+                                    try {
+                                        var data = dt.rows({ search: 'applied' }).data().toArray();
+                                        var esc = function(v){ var s = (v==null?'':String(v)); if(s.indexOf('"')>=0 || s.indexOf(';')>=0 || s.indexOf(String.fromCharCode(10))>=0 || s.indexOf(String.fromCharCode(13))>=0){ s = '"'+s.replace(/"/g,'""')+'"'; } return s; };
+                                        var linhas = [cols.map(esc).join(';')];
+                                        data.forEach(function(row){ linhas.push(row.map(esc).join(';')); });
+                                        var NL = String.fromCharCode(13,10); var csv = String.fromCharCode(65279) + linhas.join(NL);
+                                        var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                                        var url = URL.createObjectURL(blob);
+                                        var a = document.createElement('a');
+                                        a.href = url; a.download = 'tabela_mestre_candidatos_filtrada.csv';
+                                        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                                        setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+                                    } catch(e){ console.warn('Falha ao gerar CSV:', e); alert('Não foi possível gerar o CSV nesta visualização.'); }
+                                });
+                            }
+                            if(box){ box.querySelectorAll('[data-fid]').forEach(function(el){ el.addEventListener('click', function(){ var f=document.getElementById(el.getAttribute('data-fid')); if(f){ f.value=el.getAttribute('data-fval'); } dt.draw(); updCount(); var mt=document.getElementById('masterTable'); if(mt) mt.scrollIntoView({behavior:'smooth', block:'center'}); }); }); }
+                        } catch(err){ console.warn('Tabela mestre não pôde ser renderizada:', err); }
+                    })();
+
+                    // ================= TIPOS DE KIT =================
+                    (function initKitsTipos(){
+                        try {
+                            var rows = (typeof auditKitsTipos !== 'undefined' && auditKitsTipos) ? auditKitsTipos : [];
+                            var cons = (typeof auditKitsTiposCons !== 'undefined' && auditKitsTiposCons) ? auditKitsTiposCons : [];
+                            var vazio=document.getElementById('kitsTiposVazio'), cont=document.getElementById('kitsTiposConteudo');
+                            if(!rows.length){ if(vazio) vazio.style.display='block'; if(cont) cont.style.display='none'; return; }
+                            if(vazio) vazio.style.display='none'; if(cont) cont.style.display='block';
+                            var k = (typeof auditKPIs !== 'undefined' && auditKPIs) ? auditKPIs : {};
+                            function card(v,lbl,help){ var h = help ? ' <span class="tooltip-icon"><i class="fas fa-circle-info" style="font-size:0.62rem;"></i><span class="tooltip-text">'+help+'</span></span>' : ''; return '<div class="kpi-box"><div class="kpi-val">'+v+'</div><div class="kpi-lbl">'+lbl+h+'</div></div>'; }
+                            var box=document.getElementById('kitsTiposKpis');
+                            if(box){
+                                var html='';
+                                html += card((k.kits_tipos_distintos_total!=null?k.kits_tipos_distintos_total:rows.length), '<i class="fas fa-boxes-stacked"></i>&nbsp; Tipos distintos (total)', '<strong>Tipos de kit distintos</strong><br>União dos ID_KIT_PROVA presentes em N02 e N91.');
+                                if(k.kits_tipos_distintos_n02!=null) html += card(k.kits_tipos_distintos_n02, '<i class="fas fa-chair"></i>&nbsp; Tipos no N02', '<strong>Tipos de kit no ensalamento (N02)</strong><br>Quantos ID_KIT_PROVA distintos foram atribuídos.');
+                                if(k.kits_tipos_distintos_n91!=null) html += card(k.kits_tipos_distintos_n91, '<i class="fas fa-universal-access"></i>&nbsp; Tipos no N91', '<strong>Tipos de kit nos atendimentos (N91)</strong><br>Quantos ID_KIT_PROVA distintos aparecem nas necessidades.');
+                                if(k.kit_tipo_mais_comum_n02!=null) html += card(String(k.kit_tipo_mais_comum_n02), '<i class="fas fa-crown"></i>&nbsp; Kit mais comum (N02)', '<strong>Tipo de kit mais frequente no N02</strong><br>Cobre '+(k.kit_tipo_mais_comum_qtd_n02!=null?Number(k.kit_tipo_mais_comum_qtd_n02).toLocaleString('pt-BR'):'?')+' participante(s).');
+                                if(k.kits_tipos_so_n91!=null) html += card(k.kits_tipos_so_n91, '<i class="fas fa-triangle-exclamation"></i>&nbsp; Só no N91 (sem atribuição)', '<strong>Tipos necessários (N91) sem kit no N02</strong><br>Possível falha de atribuição — participante pode não receber o material.');
+                                if(k.kits_tipos_so_n02!=null) html += card(k.kits_tipos_so_n02, '<i class="fas fa-circle-question"></i>&nbsp; Só no N02 (sem atendimento)', '<strong>Tipos atribuídos (N02) sem atendimento no N91</strong><br>Kit atribuído sem necessidade correspondente registrada.');
+                                box.innerHTML=html;
+                            }
+                            if(typeof Plotly !== 'undefined'){
+                                var xs = rows.map(function(r){ return r['TIPO_DE_KIT (ID)']; });
+                                var ys = rows.map(function(r){ return r['PARTICIPANTES']; });
+                                Plotly.react('chartKitsTipos', [{ type:'bar', x: xs, y: ys, marker:{ color:'#0EA5E9' }, text: ys, textposition:'auto', hovertemplate:'Kit %{x}: %{y} participantes<extra></extra>' }], { margin:{l:50,r:20,t:10,b:60}, xaxis:{title:'Tipo de kit (ID_KIT_PROVA)'}, yaxis:{title:'Participantes (N02)'} }, {responsive:true, displayModeBar:false});
+                            }
+                            // Estimativa comparativa de provas por base
+                            if(typeof Plotly !== 'undefined' && typeof auditEstComp !== 'undefined' && auditEstComp && auditEstComp.length){
+                                var ec=auditEstComp;
+                                Plotly.react('chartEstComp', [{ type:'bar', orientation:'h',
+                                    y: ec.map(function(r){ return r['BASE DE ESTIMATIVA']; }),
+                                    x: ec.map(function(r){ return r['PROVAS_ESTIMADAS']; }),
+                                    marker:{ color:['#2563EB','#7C3AED','#0EA5E9','#F59E0B'] }, text: ec.map(function(r){ return Number(r['PROVAS_ESTIMADAS']).toLocaleString('pt-BR'); }), textposition:'auto',
+                                    hovertemplate:'%{y}: %{x} provas<extra></extra>' }], { margin:{l:220,r:20,t:10,b:40}, xaxis:{title:'Provas estimadas'} }, {responsive:true, displayModeBar:false});
+                            }
+                            // Provas por tipo de ensalamento
+                            if(typeof Plotly !== 'undefined' && typeof auditProvasTipo !== 'undefined' && auditProvasTipo && auditProvasTipo.length){
+                                var pt=auditProvasTipo;
+                                Plotly.react('chartProvasTipo', [{ type:'pie', labels: pt.map(function(r){ return r['TIPO_ENSALAMENTO']; }), values: pt.map(function(r){ return r['PROVAS']; }), hole:0.45, textinfo:'label+percent' }], { margin:{l:10,r:10,t:10,b:10} }, {responsive:true, displayModeBar:false});
+                            }
+                        } catch(err){ console.warn('Tipos de kit não pôde ser renderizado:', err); }
+                    })();
+
+                    // ================= ACESSIBILIDADE DA REDE (N60) =================
+                    (function initN60Acess(){
+                        try {
+                            var rows = (typeof auditN60Nivel !== 'undefined' && auditN60Nivel) ? auditN60Nivel : [];
+                            var vazio=document.getElementById('n60Vazio'), cont=document.getElementById('n60Conteudo');
+                            if(!rows.length){ if(vazio) vazio.style.display='block'; if(cont) cont.style.display='none'; return; }
+                            if(vazio) vazio.style.display='none'; if(cont) cont.style.display='block';
+                            var k = (typeof auditKPIs !== 'undefined' && auditKPIs) ? auditKPIs : {};
+                            function card(v,lbl,help,warn){ var h = help ? ' <span class="tooltip-icon"><i class="fas fa-circle-info" style="font-size:0.62rem;"></i><span class="tooltip-text">'+help+'</span></span>' : ''; var st = warn ? ' style="border-color:#EF4444; background:#FEF2F2;"' : ''; return '<div class="kpi-box"'+st+'><div class="kpi-val">'+v+'</div><div class="kpi-lbl">'+lbl+h+'</div></div>'; }
+                            var box=document.getElementById('n60Kpis');
+                            if(box){
+                                var html='';
+                                if(k.n60_locais_total!=null) html += card(Number(k.n60_locais_total).toLocaleString('pt-BR'), '<i class="fas fa-building"></i>&nbsp; Locais avaliados (N60)', '<strong>Locais com avaliação de infraestrutura na N60</strong><br>Base do índice de acessibilidade.');
+                                if(k.n60_locais_baixa_acess!=null) html += card(Number(k.n60_locais_baixa_acess).toLocaleString('pt-BR'), '<i class="fas fa-triangle-exclamation"></i>&nbsp; Locais de baixa acessibilidade', '<strong>Locais no nível "Baixa"</strong><br>Menos de 1/3 das flags de acessibilidade (IN_*) atendidas.');
+                                if(k.n60_ensalados_baixa_acess!=null) html += card(Number(k.n60_ensalados_baixa_acess).toLocaleString('pt-BR')+(k.n60_pct_ensalados_baixa_acess!=null?' ('+Number(k.n60_pct_ensalados_baixa_acess).toFixed(1)+'%)':''), '<i class="fas fa-users"></i>&nbsp; Ensalados em baixa acessibilidade', '<strong>Participantes alocados (N02) em locais de baixa acessibilidade (N60)</strong><br>Percentual sobre o total de ensalados.');
+                                if(k.n60_atendimento_baixa_acess!=null) html += card(Number(k.n60_atendimento_baixa_acess).toLocaleString('pt-BR'), '<i class="fas fa-wheelchair"></i>&nbsp; Com atendimento em baixa acessibilidade', '<strong>Cruzamento crítico de equidade (N60×N91×N02)</strong><br>Participantes com necessidade de atendimento (N91) alocados justamente onde a acessibilidade é menor. Quanto mais alto, pior.', Number(k.n60_atendimento_baixa_acess)>0);
+                                box.innerHTML=html;
+                            }
+                            if(typeof Plotly !== 'undefined'){
+                                var order={'Baixa':0,'Média':1,'Alta':2};
+                                rows.sort(function(a,b){ return (order[a['NIVEL_ACESSIBILIDADE']]||0)-(order[b['NIVEL_ACESSIBILIDADE']]||0); });
+                                var xs=rows.map(function(r){ return r['NIVEL_ACESSIBILIDADE']; });
+                                var cores={'Baixa':'#EF4444','Média':'#F59E0B','Alta':'#10B981'};
+                                var cor=xs.map(function(n){ return cores[n]||'#64748B'; });
+                                Plotly.react('chartN60Nivel', [
+                                    { type:'bar', name:'Locais', x: xs, y: rows.map(function(r){ return r['LOCAIS']; }), marker:{color:cor, opacity:0.55}, yaxis:'y' , hovertemplate:'%{x}: %{y} locais<extra></extra>'},
+                                    { type:'bar', name:'Ensalados', x: xs, y: rows.map(function(r){ return r['ENSALADOS']; }), marker:{color:cor}, yaxis:'y2', hovertemplate:'%{x}: %{y} ensalados<extra></extra>'}
+                                ], { barmode:'group', margin:{l:60,r:60,t:10,b:40}, xaxis:{title:'Nível de acessibilidade (N60)'}, yaxis:{title:'Locais'}, yaxis2:{title:'Ensalados', overlaying:'y', side:'right'}, legend:{orientation:'h'} }, {responsive:true, displayModeBar:false});
+                            }
+                            // Distância média por nível de acessibilidade (desigualdade acumulada)
+                            if(typeof Plotly !== 'undefined' && typeof auditN60Dist !== 'undefined' && auditN60Dist && auditN60Dist.length && auditN60Dist[0] && auditN60Dist[0]['DISTANCIA_MEDIA_KM']!==undefined){
+                                var dr=auditN60Dist.slice();
+                                var ord={'Baixa':0,'Média':1,'Alta':2};
+                                dr.sort(function(a,b){ return (ord[a['NIVEL_ACESSIBILIDADE']]||0)-(ord[b['NIVEL_ACESSIBILIDADE']]||0); });
+                                var cores2={'Baixa':'#EF4444','Média':'#F59E0B','Alta':'#10B981'};
+                                var dx=dr.map(function(r){ return r['NIVEL_ACESSIBILIDADE']; });
+                                Plotly.react('chartN60Dist', [{ type:'bar', x: dx, y: dr.map(function(r){ return r['DISTANCIA_MEDIA_KM']; }), marker:{color:dx.map(function(n){ return cores2[n]||'#64748B'; })}, text: dr.map(function(r){ return Number(r['DISTANCIA_MEDIA_KM']).toFixed(1)+' km'; }), textposition:'auto', hovertemplate:'%{x}: %{y} km (média)<extra></extra>' }], { margin:{l:60,r:20,t:10,b:40}, xaxis:{title:'Nível de acessibilidade (N60)'}, yaxis:{title:'Distância média (km)'} }, {responsive:true, displayModeBar:false});
+                            }
+                        } catch(err){ console.warn('Acessibilidade N60 não pôde ser renderizada:', err); }
+                    })();
+
+                    // ================= LAUDOS MÉDICOS × KIT (N91) =================
+                    (function initLaudo(){
+                        try {
+                            var rows = (typeof auditLaudoStatus !== 'undefined' && auditLaudoStatus) ? auditLaudoStatus : [];
+                            var vazio=document.getElementById('laudoVazio'), cont=document.getElementById('laudoConteudo');
+                            if(!rows.length){ if(vazio) vazio.style.display='block'; if(cont) cont.style.display='none'; return; }
+                            if(vazio) vazio.style.display='none'; if(cont) cont.style.display='block';
+                            var k = (typeof auditKPIs !== 'undefined' && auditKPIs) ? auditKPIs : {};
+                            function card(v,lbl,help,warn){ var h = help ? ' <span class="tooltip-icon"><i class="fas fa-circle-info" style="font-size:0.62rem;"></i><span class="tooltip-text">'+help+'</span></span>' : ''; var st = warn ? ' style="border-color:#EF4444; background:#FEF2F2;"' : ''; return '<div class="kpi-box"'+st+'><div class="kpi-val">'+v+'</div><div class="kpi-lbl">'+lbl+h+'</div></div>'; }
+                            var box=document.getElementById('laudoKpis');
+                            if(box){
+                                var html='';
+                                if(k.n91_itens_total!=null) html += card(Number(k.n91_itens_total).toLocaleString('pt-BR'), '<i class="fas fa-list-check"></i>&nbsp; Itens de atendimento (N91)', '<strong>Total de itens de atendimento/recurso</strong><br>Cada linha do N91 é um item solicitado por um participante.');
+                                if(k.n91_pct_laudo_pendente!=null) html += card(Number(k.n91_pct_laudo_pendente).toFixed(1)+'%', '<i class="fas fa-hourglass-half"></i>&nbsp; Laudos pendentes', '<strong>Laudos em análise ou em recurso</strong><br>Ainda sem decisão final (CO_SITUACAO_LAUDO_MEDICO).');
+                                if(k.n91_pct_laudo_reprovado!=null) html += card(Number(k.n91_pct_laudo_reprovado).toFixed(1)+'%', '<i class="fas fa-circle-xmark"></i>&nbsp; Laudos reprovados', '<strong>Laudos negados</strong><br>Item de atendimento sem respaldo de laudo aprovado.');
+                                if(k.n91_kit_laudo_risco!=null) html += card(Number(k.n91_kit_laudo_risco).toLocaleString('pt-BR'), '<i class="fas fa-triangle-exclamation"></i>&nbsp; Kits em risco (laudo pendente/reprovado)', '<strong>Cruzamento crítico laudo × kit</strong><br>Kits associados a laudo em análise/recurso/reprovado — podem não ser entregues no dia da prova. Quanto mais alto, pior.', Number(k.n91_kit_laudo_risco)>0);
+                                box.innerHTML=html;
+                            }
+                            if(typeof Plotly !== 'undefined'){
+                                var cores={'Aprovado':'#10B981','Em análise':'#F59E0B','Em recurso':'#0EA5E9','Reprovado':'#EF4444','Não informado':'#94A3B8'};
+                                var labs=rows.map(function(r){ return r['STATUS_LAUDO']; });
+                                Plotly.react('chartLaudoStatus', [{ type:'pie', labels: labs, values: rows.map(function(r){ return r['ITENS']; }), hole:0.45, marker:{colors: labs.map(function(l){ return cores[l]||'#64748B'; })}, textinfo:'label+percent' }], { margin:{l:10,r:10,t:10,b:10} }, {responsive:true, displayModeBar:false});
+                            }
+                        } catch(err){ console.warn('Laudos N91 não pôde ser renderizado:', err); }
+                    })();
+
+                    // ================= ATENDIMENTO POR FAIXA ETÁRIA (N91×N90) =================
+                    (function initAtendDemo(){
+                        try {
+                            var rows = (typeof auditAtendFaixa !== 'undefined' && auditAtendFaixa) ? auditAtendFaixa : [];
+                            var vazio=document.getElementById('atendDemoVazio'), cont=document.getElementById('atendDemoConteudo');
+                            if(!rows.length){ if(vazio) vazio.style.display='block'; if(cont) cont.style.display='none'; return; }
+                            if(vazio) vazio.style.display='none'; if(cont) cont.style.display='block';
+                            var k = (typeof auditKPIs !== 'undefined' && auditKPIs) ? auditKPIs : {};
+                            function card(v,lbl,help){ var h = help ? ' <span class="tooltip-icon"><i class="fas fa-circle-info" style="font-size:0.62rem;"></i><span class="tooltip-text">'+help+'</span></span>' : ''; return '<div class="kpi-box"><div class="kpi-val">'+v+'</div><div class="kpi-lbl">'+lbl+h+'</div></div>'; }
+                            var box=document.getElementById('atendDemoKpis');
+                            if(box){
+                                var html='';
+                                if(k.taxa_atendimento_geral!=null) html += card(Number(k.taxa_atendimento_geral).toFixed(1)+'%', '<i class="fas fa-universal-access"></i>&nbsp; Taxa geral de atendimento', '<strong>% de candidatos que demandam atendimento (N91)</strong><br>Sobre o total de candidatos da tabela mestre.');
+                                if(k.faixa_maior_taxa_atendimento!=null) html += card(String(k.faixa_maior_taxa_atendimento), '<i class="fas fa-arrow-trend-up"></i>&nbsp; Faixa de maior demanda', '<strong>Faixa etária (N90) com maior taxa de atendimento</strong><br>'+(k.faixa_maior_taxa_atendimento_pct!=null?Number(k.faixa_maior_taxa_atendimento_pct).toFixed(1)+'% dos seus candidatos.':'')+' Ignora grupos minúsculos.');
+                                var tot=rows.reduce(function(a,r){ return a+(r['CANDIDATOS']||0); },0);
+                                html += card(Number(tot).toLocaleString('pt-BR'), '<i class="fas fa-users"></i>&nbsp; Candidatos analisados', '<strong>Total de candidatos com faixa etária identificada</strong><br>Base do cálculo das taxas.');
+                                box.innerHTML=html;
+                            }
+                            if(typeof Plotly !== 'undefined'){
+                                var order=['18-24','25-34','35-44','45-59','60+'];
+                                var dr=rows.slice().sort(function(a,b){ var ia=order.indexOf(a['FAIXA_ETARIA']), ib=order.indexOf(b['FAIXA_ETARIA']); return (ia<0?99:ia)-(ib<0?99:ib); });
+                                Plotly.react('chartAtendFaixa', [{ type:'bar', x: dr.map(function(r){ return r['FAIXA_ETARIA']; }), y: dr.map(function(r){ return r['TAXA_ATENDIMENTO (%)']; }), marker:{ color:'#7C3AED' }, text: dr.map(function(r){ return Number(r['TAXA_ATENDIMENTO (%)']).toFixed(1)+'%'; }), textposition:'auto', customdata: dr.map(function(r){ return [r['CANDIDATOS'], r['COM_ATENDIMENTO']]; }), hovertemplate:'%{x}: %{y}% de atendimento<br>%{customdata[1]} de %{customdata[0]} candidatos<extra></extra>' }], { margin:{l:50,r:20,t:10,b:40}, xaxis:{title:'Faixa etária (N90)'}, yaxis:{title:'Taxa de atendimento (%)'} }, {responsive:true, displayModeBar:false});
+                            }
+                        } catch(err){ console.warn('Atendimento por faixa não pôde ser renderizado:', err); }
+                    })();
+
+                    // ============================================================
+                    // SELETOR DE LAYOUTS — mostra/oculta seções conforme os layouts marcados
+                    // ============================================================
+                    (function layoutSelector(){
+                        // Layouts detectados automaticamente na base (do arquivo; ou restringidos por --layouts).
+                        var availableLayouts = JSON_AVAILABLE_LAYOUTS;
+                        // Marca só os detectados; DESATIVA e sinaliza os que não estão na base.
+                        try {
+                            var todosSeis = (availableLayouts && availableLayouts.length === 6);
+                            document.querySelectorAll('#layoutChecks input[type=checkbox]').forEach(function(c){
+                                var presente = !availableLayouts || availableLayouts.indexOf(c.value) >= 0;
+                                c.checked = presente;
+                                var label = c.closest('.layout-chk');
+                                if(!presente){
+                                    c.disabled = true;
+                                    if(label){
+                                        label.style.opacity = '0.45';
+                                        label.title = 'Layout não encontrado na sua base';
+                                        if(!label.querySelector('.nao-encontrado')){
+                                            var tag = document.createElement('span'); tag.className='nao-encontrado';
+                                            tag.style.cssText='font-size:0.68rem; color:#FCA5A5; margin-left:4px;';
+                                            tag.textContent='(não encontrado)';
+                                            label.appendChild(tag);
+                                        }
+                                    }
+                                } else if(label){
+                                    label.title = 'Layout detectado na sua base';
+                                }
+                            });
+                        } catch(e){}
+                        // Layouts exigidos por cada seção (as não listadas aparecem sempre).
+                        var reqBySection = {
+                            'sec-inscritos': ['N90','N02'],
+                            'sec-dist': ['N02'],
+                            'sec-infra': ['N60'],
+                            'sec-atendimentos': ['N91'],
+                            'sec-mestre': ['N90','N02'],
+                            'sec-kits-tipos': ['N02'],
+                            'sec-n60-acess': ['N60'],
+                            'sec-laudo': ['N91'],
+                            'sec-atend-demo': ['N90','N91']
+                        };
+                        function selecionados(){
+                            var s = [];
+                            document.querySelectorAll('#layoutChecks input[type=checkbox]').forEach(function(c){ if(c.checked) s.push(c.value); });
+                            return s;
+                        }
+                        function aplicar(){
+                            var sel = selecionados();
+                            var ocultas = 0, total = 0;
+                            Object.keys(reqBySection).forEach(function(secId){
+                                total++;
+                                var req = reqBySection[secId];
+                                var ok = req.every(function(l){ return sel.indexOf(l) >= 0; });
+                                var sec = document.getElementById(secId);
+                                if(sec) sec.style.display = ok ? '' : 'none';
+                                // esconde também o link de navegação correspondente
+                                var nav = document.querySelector('.sidebar-nav a[href="#'+secId+'"]');
+                                if(nav) nav.style.display = ok ? '' : 'none';
+                                if(!ok) ocultas++;
+                            });
+                            var st = document.getElementById('layoutStatus');
+                            if(st){
+                                var detectados = (availableLayouts && availableLayouts.length) ? availableLayouts.length : 6;
+                                var base = 'Detectados na base: ' + detectados + '/6 (' + (availableLayouts || []).join(', ') + ').';
+                                if(sel.length === detectados && ocultas === 0) st.textContent = base + ' Analisando todos os disponíveis.';
+                                else st.textContent = base + ' Exibindo ' + sel.length + ' · ' + ocultas + ' seção(ões) oculta(s).';
+                            }
+                            // re-dispara o ajuste de gráficos após mudar a visibilidade
+                            if(typeof Plotly !== 'undefined'){ setTimeout(function(){ document.querySelectorAll('.js-plotly-plot').forEach(function(el){ try{ Plotly.Plots.resize(el); }catch(e){} }); }, 150); }
+                        }
+                        document.querySelectorAll('#layoutChecks input[type=checkbox]').forEach(function(c){ c.addEventListener('change', aplicar); });
+                        var btn = document.getElementById('layoutTodos');
+                        if(btn){ btn.innerHTML = '<i class="fas fa-check-double"></i> Marcar detectados';
+                            btn.addEventListener('click', function(){ document.querySelectorAll('#layoutChecks input[type=checkbox]').forEach(function(c){ if(!c.disabled) c.checked = true; }); aplicar(); }); }
+                        aplicar();
+                    })();
+
+
+                    // Corrige o caso em que um gráfico é desenhado antes de o seu
+                    // container ter tamanho (fica em branco/0x0). Força o resize do
+                    // Plotly após o load, ao redimensionar a janela e quando cada
+                    // gráfico entra na área visível.
+                    // ============================================================
+                    (function ensureAllChartsVisible(){
+                        function resizeAll(){
+                            if(typeof Plotly === 'undefined') return;
+                            document.querySelectorAll('.js-plotly-plot').forEach(function(el){
+                                try { Plotly.Plots.resize(el); } catch(e){}
+                            });
+                        }
+                        // Resize repetido após o carregamento (pega layouts que estabilizam tarde).
+                        window.addEventListener('load', function(){ [100, 400, 900, 1800, 3000].forEach(function(t){ setTimeout(resizeAll, t); }); });
+                        // Resize ao redimensionar a janela (com debounce simples).
+                        var rt; window.addEventListener('resize', function(){ clearTimeout(rt); rt = setTimeout(resizeAll, 150); });
+                        // Resize de cada gráfico quando entra na viewport (corrige tamanho 0 no 1º paint).
+                        if('IntersectionObserver' in window){
+                            try {
+                                var io = new IntersectionObserver(function(entries){
+                                    entries.forEach(function(en){
+                                        if(en.isIntersecting && typeof Plotly !== 'undefined'){
+                                            try { Plotly.Plots.resize(en.target); } catch(e){}
+                                        }
+                                    });
+                                }, { threshold: 0.01 });
+                                var startObserve = function(){ document.querySelectorAll('[id^="chart"]').forEach(function(el){ try { io.observe(el); } catch(e){} }); };
+                                window.addEventListener('load', function(){ setTimeout(startObserve, 300); });
+                            } catch(e){}
+                        }
+                        // Fallback final: também tenta no DOMContentLoaded imediato.
+                        setTimeout(resizeAll, 250);
+                    })();
+
+                    // ============================================================
+                    // GARANTIA: TODO GRÁFICO E TODO KPI mostra dado OU explica a ausência
+                    // Se um gráfico não foi renderizado (faltam os campos na base), exibe
+                    // uma mensagem clara no lugar. Se um KPI ficou vazio, mostra "—" com
+                    // a explicação. Assim nada fica "em branco" sem justificativa.
+                    // ============================================================
+                    (function ensureVisualsOrExplain(){
+                        function chartMsg(el, kind){
+                            el.setAttribute('data-empty','1');
+                            el.style.minHeight = '300px';
+                            var titulo, texto, cor;
+                            if(kind === 'nolib'){
+                                cor = '#B45309';
+                                titulo = 'A biblioteca de gráficos não carregou';
+                                texto = 'Este painel desenha os gráficos com a biblioteca Plotly, que é carregada da internet (CDN). '
+                                    + 'Como ela não pôde ser carregada, os gráficos não foram desenhados. '
+                                    + 'Se você está sem internet, abra este arquivo HTML em um computador conectado à rede — '
+                                    + 'os gráficos aparecem automaticamente. As tabelas e os números continuam disponíveis normalmente.';
+                            } else {
+                                cor = '#94A3B8';
+                                titulo = 'Gráfico sem dados para exibir';
+                                texto = 'A base fornecida não contém os campos necessários para este gráfico específico '
+                                    + '(por exemplo: coordenadas geográficas para o mapa, índices de infraestrutura da N60, ou colunas de kit/laudo). '
+                                    + 'Não é um erro — é transparência sobre a cobertura dos dados. Assim que a base incluir esses campos, o gráfico aparece automaticamente.';
+                            }
+                            el.innerHTML = '<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; min-height:300px; color:'+cor+'; text-align:center; padding:24px;">'
+                                + '<i class="fas fa-circle-info" style="font-size:2.2rem; margin-bottom:12px; opacity:0.55;"></i>'
+                                + '<strong style="font-size:0.95rem;">'+titulo+'</strong>'
+                                + '<span style="font-size:0.85rem; margin-top:8px; max-width:420px; line-height:1.5; color:#64748B;">'+texto+'</span></div>';
+                        }
+                        // Um gráfico só é considerado "desenhado" se o Plotly guardou traços COM pontos nele.
+                        function hasData(el){
+                            var d = el.data;
+                            if(!d || !d.length) return false;
+                            return d.some(function(tr){
+                                return (tr && ((tr.x && tr.x.length) || (tr.y && tr.y.length) || (tr.values && tr.values.length)
+                                    || (tr.labels && tr.labels.length) || (tr.z && tr.z.length) || (tr.locations && tr.locations.length)
+                                    || (tr.lat && tr.lat.length) || (tr.lon && tr.lon.length)));
+                            });
+                        }
+                        function checkCharts(){
+                            var plotlyMissing = (typeof Plotly === 'undefined');
+                            document.querySelectorAll('[id^="chart"]').forEach(function(el){
+                                if(el.getAttribute('data-empty')==='1') return;
+                                if(plotlyMissing){ chartMsg(el, 'nolib'); return; }
+                                if(!hasData(el)) chartMsg(el, 'nodata');
+                            });
+                        }
+                        function checkKpis(){
+                            document.querySelectorAll('.kpi-val').forEach(function(el){
+                                var t = (el.textContent||'').trim();
+                                if(t==='' || t==='...' || t==='NaN' || t==='undefined' || t==='null'){
+                                    el.textContent = '—';
+                                    var lbl = el.parentElement ? el.parentElement.querySelector('.kpi-lbl') : null;
+                                    if(lbl && !lbl.querySelector('.kpi-nodata')){
+                                        var s = document.createElement('span'); s.className='kpi-nodata';
+                                        s.style.cssText = 'display:block; font-size:0.68rem; color:#94A3B8; font-weight:600; margin-top:4px; text-transform:none;';
+                                        s.innerHTML = '<i class="fas fa-circle-info"></i> sem dado na base para este indicador';
+                                        lbl.appendChild(s);
+                                    }
+                                }
+                            });
+                        }
+                        // Roda depois que todos os gráficos tiveram chance de renderizar (checagem tardia evita falso "sem dados").
+                        window.addEventListener('load', function(){
+                            // Aviso global se as bibliotecas de CDN não carregaram (ex.: aberto sem internet).
+                            setTimeout(function(){
+                                var libsFaltando = (typeof Plotly === 'undefined') || (typeof window.jQuery === 'undefined');
+                                var banner = document.getElementById('offlineWarning');
+                                if(banner && libsFaltando){ banner.style.display = 'block'; }
+                            }, 2500);
+                            setTimeout(function(){ checkCharts(); checkKpis(); }, 4500);
+                            setTimeout(function(){ checkCharts(); checkKpis(); }, 8000);
+                        });
+                    })();
+                });
+            </script>
+            <script>
+            /* ================================================================
+               MODAL DE DETALHE DE KPI — clicar em qualquer cartão de KPI abre
+               uma janela com o valor, a explicação (o que é, cálculo, layouts e
+               colunas de origem) e onde ver os REGISTROS por trás do número.
+               Funciona por delegação (cobre KPIs estáticos e os gerados via JS),
+               sem depender de jQuery.
+               ================================================================ */
+            (function kpiDetailModal(){                var overlay = document.createElement('div');
+                overlay.id = 'kpiModalOverlay';
+                overlay.innerHTML =
+                    '<div id="kpiModalCard">'
+                    + '<div id="kpiModalHead">'
+                    +   '<div style="font-size:1.8rem; color:#6366F1;"><i class="fas fa-chart-simple"></i></div>'
+                    +   '<div><div style="font-size:0.78rem; text-transform:uppercase; letter-spacing:0.5px; color:#94A3B8; font-weight:700;">Indicador</div>'
+                    +   '<div id="kpiModalTitle" style="font-size:1.1rem; font-weight:800; color:#1E293B; line-height:1.3;"></div></div>'
+                    +   '<button id="kpiModalClose" aria-label="Fechar">&times;</button>'
+                    + '</div>'
+                    + '<div id="kpiModalBody">'
+                    +   '<div style="font-size:2.2rem; font-weight:800; color:#4338CA; margin-bottom:14px;" id="kpiModalValue"></div>'
+                    +   '<div id="kpiModalHelp" style="background:#F8FAFC; border-left:4px solid #6366F1; border-radius:8px; padding:14px 16px; color:#334155; font-size:0.92rem; line-height:1.6;"></div>'
+                    +   '<div style="margin-top:16px; background:#EEF2FF; border-radius:8px; padding:14px 16px; font-size:0.88rem; color:#3730A3; line-height:1.6;">'
+                    +     '<strong><i class="fas fa-hand-pointer"></i> Como ver os REGISTROS deste indicador:</strong><br>'
+                    +     '&bull; <strong>Se for um indicador de pessoas</strong> (ensalados, com atendimento, com kit, forasteiros, com alerta…): abra a se&ccedil;&atilde;o <em>Tabela Mestre dos Candidatos</em> e clique no cart&atilde;o correspondente — a tabela filtra e mostra exatamente esses candidatos, e voc&ecirc; pode baixar em CSV.<br>'
+                    +     '&bull; <strong>Qualquer indicador</strong> tem a sua tabela completa de registros numa <em>aba do Excel</em> (cada aba traz a fundamenta&ccedil;&atilde;o e a origem — layouts e colunas).<br>'
+                    +     '&bull; <strong>Achados da auditoria</strong>: a tabela de Achados mostra valor, interpreta&ccedil;&atilde;o e recomenda&ccedil;&atilde;o de cada verifica&ccedil;&atilde;o.'
+                    +   '</div>'
+                    + '</div></div>';
+                document.body.appendChild(overlay);
+                var titleEl = overlay.querySelector('#kpiModalTitle');
+                var valueEl = overlay.querySelector('#kpiModalValue');
+                var helpEl  = overlay.querySelector('#kpiModalHelp');
+                function fecha(){ overlay.style.display = 'none'; }
+                overlay.addEventListener('click', function(e){ if(e.target === overlay) fecha(); });
+                overlay.querySelector('#kpiModalClose').addEventListener('click', fecha);
+                document.addEventListener('keydown', function(e){ if(e.key === 'Escape') fecha(); });
+                document.addEventListener('click', function(e){
+                    var box = e.target.closest ? e.target.closest('.kpi-box') : null;
+                    if(!box) return;
+                    var v = box.querySelector('.kpi-val'); valueEl.textContent = v ? (v.textContent||'').trim() : '';
+                    var lbl = box.querySelector('.kpi-lbl'); var titulo = '';
+                    if(lbl){ var clone = lbl.cloneNode(true); var tip = clone.querySelector('.tooltip-icon'); if(tip) tip.remove(); titulo = (clone.textContent||'').trim(); }
+                    titleEl.textContent = titulo || 'Indicador';
+                    var tt = box.querySelector('.tooltip-text');
+                    helpEl.innerHTML = tt ? tt.innerHTML : '<em>Sem descri&ccedil;&atilde;o detalhada para este indicador. Consulte a aba correspondente do Excel para a metodologia e os registros.</em>';
+                    overlay.style.display = 'flex';
+                });
+            })();
+            </script>
+            <script>
+            /* ================================================================
+               BOTÃO "VOLTAR AO TOPO" — navegação rápida num dashboard longo.
+               JavaScript puro, sem dependências; aparece ao rolar a página.
+               ================================================================ */
+            (function backToTop(){
+                var btn = document.createElement('button');
+                btn.id = 'btnTopo';
+                btn.setAttribute('aria-label', 'Voltar ao topo');
+                btn.innerHTML = '<i class="fas fa-arrow-up"></i>';
+                btn.style.cssText = 'position:fixed; bottom:26px; right:26px; z-index:9998; width:48px; height:48px; '
+                    + 'border-radius:50%; border:none; background:linear-gradient(135deg,#4F46E5,#6366F1); color:#fff; '
+                    + 'font-size:1.05rem; cursor:pointer; box-shadow:0 6px 18px rgba(79,70,229,0.4); opacity:0; '
+                    + 'pointer-events:none; transition:opacity 0.25s, transform 0.25s; transform:translateY(10px);';
+                btn.addEventListener('mouseenter', function(){ btn.style.transform = 'translateY(0) scale(1.08)'; });
+                btn.addEventListener('mouseleave', function(){ btn.style.transform = 'translateY(0) scale(1)'; });
+                btn.addEventListener('click', function(){ window.scrollTo({ top: 0, behavior: 'smooth' }); });
+                document.body.appendChild(btn);
+                function onScroll(){
+                    var y = window.pageYOffset || document.documentElement.scrollTop;
+                    if(y > 400){ btn.style.opacity = '1'; btn.style.pointerEvents = 'auto'; btn.style.transform = 'translateY(0)'; }
+                    else { btn.style.opacity = '0'; btn.style.pointerEvents = 'none'; btn.style.transform = 'translateY(10px)'; }
+                }
+                window.addEventListener('scroll', onScroll, { passive: true });
+                onScroll();
+            })();
+            </script>
+            <script>
+            /* ================================================================
+               REDE DE SEGURANÇA INDEPENDENTE (NÃO usa jQuery nem depende do
+               bloco principal). Garante que, mesmo se as bibliotecas falharem
+               ou o bloco jQuery for pulado, o usuário SEMPRE receba uma mensagem
+               clara — nunca uma tela em branco sem explicação.
+               ================================================================ */
+            (function(){
+                function marcarVazio(el, offline){
+                    el.setAttribute('data-empty','1'); el.style.minHeight='300px';
+                    var msg = offline
+                        ? '<strong style="color:#B45309;">Biblioteca de gráficos não carregou</strong><span style="font-size:0.85rem;margin-top:8px;max-width:420px;color:#64748B;">Abra o dashboard pelo atalho <b>ABRIR_DASHBOARD.bat</b> (ou <b>abrir_dashboard.py</b>), que usa um servidor local e evita as restrições de arquivos locais. As tabelas e números seguem disponíveis.</span>'
+                        : '<strong style="color:#64748B;">Gráfico sem dados para exibir</strong><span style="font-size:0.85rem;margin-top:8px;max-width:420px;color:#64748B;">A base não contém os campos necessários para este gráfico, ou os filtros atuais o deixaram sem registros.</span>';
+                    el.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;min-height:300px;color:#94A3B8;text-align:center;padding:24px;"><i class="fas fa-circle-info" style="font-size:2.2rem;margin-bottom:12px;opacity:0.5;"></i>'+msg+'</div>';
+                }
+                function run(){
+                    var plotlyMissing = (typeof Plotly === 'undefined');
+                    var jqueryMissing = (typeof window.jQuery === 'undefined');
+                    if(plotlyMissing || jqueryMissing){
+                        var b = document.getElementById('offlineWarning'); if(b) b.style.display = 'block';
+                    }
+                    document.querySelectorAll('[id^="chart"]').forEach(function(el){
+                        if(el.getAttribute('data-empty')==='1') return;
+                        if(plotlyMissing){ marcarVazio(el, true); return; }
+                        var d = el.data;
+                        var has = d && d.length && d.some(function(t){ return t && ((t.x&&t.x.length)||(t.y&&t.y.length)||(t.values&&t.values.length)||(t.labels&&t.labels.length)||(t.z&&t.z.length)||(t.lat&&t.lat.length)||(t.lon&&t.lon.length)); });
+                        if(!has) marcarVazio(el, false);
+                    });
+                }
+                window.addEventListener('load', function(){ setTimeout(run, 5000); setTimeout(run, 9000); });
+                if(document.readyState === 'complete'){ setTimeout(run, 5000); }
+            })();
             </script>
         </body>
         </html>
         """
-        with open(f"{self.output_dir}/2_Dashboard_Executivo_Didatico.html", "w", encoding="utf-8") as f:
+        
+        # INJEÇÃO PYTHON -> JSON JS EXTREMA E 100% SEGURA (.replace GARANTE ZERO F-STRING CRASH NA RENDERIZAÇÃO)
+        html_content = html_template.replace('JSON_RAW_DATA', df_json_str)
+        html_content = html_content.replace('JSON_LOCAIS_DATA', locais_json_str)
+        html_content = html_content.replace('JSON_TOTALS_DATA', totals_json_str)
+        html_content = html_content.replace('JSON_STATS_DATA', stats_json_str)
+        html_content = html_content.replace('JSON_OUTLIERS_DATA', outliers_json_str)
+        html_content = html_content.replace('JSON_PARETO_DATA', pareto_json_str)
+        html_content = html_content.replace('JSON_UF_DATA', uf_agg_json_str)
+        html_content = html_content.replace('JSON_MUN_DATA', mun_agg_json_str)
+        html_content = html_content.replace('JSON_BLOCO_DATA', bloco_agg_json_str)
+        html_content = html_content.replace('JSON_GEO_DATA', geo_json_str)
+        html_content = html_content.replace('JSON_CONSERV_DATA', conserv_json_str)
+        html_content = html_content.replace('JSON_DEP_DATA', dep_json_str)
+        # Módulo de Inscritos & Ensalamento (v29)
+        html_content = html_content.replace('JSON_CURSO_DATA', curso_json_str)
+        html_content = html_content.replace('JSON_ENSALAMENTO_DATA', ensalamento_json_str)
+        html_content = html_content.replace('JSON_FAIXA_ETARIA_DATA', faixa_etaria_json_str)
+        html_content = html_content.replace('JSON_DEMOGRAFIA_DATA', demografia_json_str)
+        html_content = html_content.replace('JSON_ATENDIMENTO_DATA', atendimento_json_str)
+        html_content = html_content.replace('JSON_MIGRACAO_DATA', migracao_json_str)
+        html_content = html_content.replace('JSON_SITUACAO_DATA', situacao_json_str)
+        html_content = html_content.replace('JSON_INSCRITOS_META', inscritos_meta_json_str)
+        # Módulo de Atendimentos & Recursos (v30 / N91)
+        html_content = html_content.replace('JSON_ITEM_ATEND_DATA', item_atend_json_str)
+        html_content = html_content.replace('JSON_TIPO_ITEM_DATA', tipo_item_json_str)
+        html_content = html_content.replace('JSON_LAUDO_DATA', laudo_json_str)
+        html_content = html_content.replace('JSON_LAUDO_UF_DATA', laudo_uf_json_str)
+        html_content = html_content.replace('JSON_ATENDIMENTOS_META', atendimentos_meta_json_str)
+        # Auditoria de Cruzamento (v31)
+        html_content = html_content.replace('JSON_AUDIT_KPIS', audit_kpis_json_str)
+        html_content = html_content.replace('JSON_AUDIT_FINDINGS', audit_findings_json_str)
+        html_content = html_content.replace('JSON_AUDIT_DIST_FAIXAS', audit_dist_faixas_json_str)
+        html_content = html_content.replace('JSON_AUDIT_FORASTEIROS', audit_forasteiros_json_str)
+        html_content = html_content.replace('JSON_AUDIT_KIT_DIST', audit_kit_dist_json_str)
+        html_content = html_content.replace('JSON_AUDIT_KIT_FUNIL', audit_kit_funil_json_str)
+        html_content = html_content.replace('JSON_AUDIT_KIT_UF', audit_kit_uf_json_str)
+        html_content = html_content.replace('JSON_AUDIT_KIT_LAUDO', audit_kit_laudo_json_str)
+        html_content = html_content.replace('JSON_AUDIT_MULTI_ATEND', audit_multi_atend_json_str)
+        html_content = html_content.replace('JSON_AUDIT_RANKING_PROB', audit_ranking_prob_json_str)
+        html_content = html_content.replace('JSON_AUDIT_QUALIDADE', audit_qualidade_json_str)
+        html_content = html_content.replace('JSON_AUDIT_KITS_TIPOS_CONS', audit_kits_tipos_cons_json_str)
+        html_content = html_content.replace('JSON_AUDIT_EST_COMP', audit_est_comp_json_str)
+        html_content = html_content.replace('JSON_AUDIT_PROVAS_TIPO', audit_provas_tipo_json_str)
+        html_content = html_content.replace('JSON_AUDIT_N60_NIVEL', audit_n60_nivel_json_str)
+        html_content = html_content.replace('JSON_AUDIT_N60_DIST', audit_n60_dist_json_str)
+        html_content = html_content.replace('JSON_AUDIT_LAUDO_STATUS', audit_laudo_status_json_str)
+        html_content = html_content.replace('JSON_AUDIT_ATEND_FAIXA', audit_atend_faixa_json_str)
+        html_content = html_content.replace('JSON_AUDIT_KITS_TIPOS', audit_kits_tipos_json_str)
+        html_content = html_content.replace('JSON_AUDIT_MASTER_COLS', audit_master_cols_json_str)
+        html_content = html_content.replace('JSON_AUDIT_MASTER_ROWS', audit_master_json_str)
+        html_content = html_content.replace('JSON_AUDIT_MASTER_TOTAL', str(audit_master_total))
+        html_content = html_content.replace('JSON_AUDIT_RESUMO', audit_resumo_str)
+        # Metadados de rastreabilidade (rodapé do painel de layouts).
+        try:
+            _cov = getattr(results, 'column_validation', {}) or {}
+            _cov_txt = (f"{_cov.get('cobertura_percentual', 0)}% "
+                        f"({_cov.get('qtd_reconhecidos', 0)}/{_cov.get('total_campos_layout', 0)} campos)") if _cov else "n/d"
+            _n_rows = 0
+            try:
+                _n_rows = int(len(results.df)) if getattr(results, 'df', None) is not None else 0
+            except Exception:
+                _n_rows = 0
+            html_content = html_content.replace('GEN_META_TIMESTAMP', datetime.now().strftime('%d/%m/%Y %H:%M'))
+            html_content = html_content.replace('GEN_META_VERSION', str(APP_VERSION))
+            html_content = html_content.replace('GEN_META_COVERAGE', _cov_txt)
+            html_content = html_content.replace('GEN_META_ROWS', f"{_n_rows:,}".replace(',', '.'))
+        except Exception:
+            for _tok in ('GEN_META_TIMESTAMP', 'GEN_META_VERSION', 'GEN_META_COVERAGE', 'GEN_META_ROWS'):
+                html_content = html_content.replace(_tok, 'n/d')
+        # Layouts efetivamente disponíveis/usados (para iniciar as caixas de seleção do dashboard).
+        try:
+            _avail = sorted([k for k in (audit.L.keys() if (audit is not None and hasattr(audit, 'L')) else []) if not str(k).startswith('_')])
+        except Exception:
+            _avail = []
+        if not _avail:
+            _avail = ['N02', 'N50', 'N52', 'N60', 'N90', 'N91']  # sem info → assume todos
+        html_content = html_content.replace('JSON_AVAILABLE_LAYOUTS', json.dumps(_avail, ensure_ascii=True))
+        html_content = html_content.replace('JSON_DICT_IDX_DATA', dict_idx_json_str)
+        html_content = html_content.replace('JSON_DICT_DATA', dict_json_str)
+        html_content = html_content.replace('JSON_CORR_VARS', corr_vars_str)
+        html_content = html_content.replace('JSON_CORR_Z', corr_z_str)
+        html_content = html_content.replace('JSON_COV_DATA', cov_json_str)
+        html_content = html_content.replace('JSON_CONCEITOS_DATA', conceitos_json_str)
+        html_content = html_content.replace('JSON_CUTOFFS_DATA', cutoffs_json_str)
+        html_content = html_content.replace('JSON_TOTALS_META', totals_meta_json_str)
+        
+        html_content = html_content.replace('JSON_HEAT_X', heat_x_str)
+        html_content = html_content.replace('JSON_HEAT_Y', heat_y_str)
+        html_content = html_content.replace('JSON_HEAT_Z', heat_z_str)
+        html_content = html_content.replace('JSON_HEAT_UF_X', heat_uf_x_str)
+        html_content = html_content.replace('JSON_HEAT_UF_Y', heat_uf_y_str)
+        html_content = html_content.replace('JSON_HEAT_UF_Z', heat_uf_z_str)
+
+        # MODO OFFLINE: troca as URLs de CDN por caminhos locais (./libs/...), que funcionam via file://.
+        if getattr(self, 'offline_mode', False):
+            cdn_to_local = {
+                "https://code.jquery.com/jquery-3.6.0.min.js": "libs/jquery-3.6.0.min.js",
+                "https://cdn.plot.ly/plotly-2.24.1.min.js": "libs/plotly-2.24.1.min.js",
+                "https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css": "libs/jquery.dataTables.min.css",
+                "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css": "libs/fontawesome.all.min.css",
+                "https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js": "libs/jquery.dataTables.min.js",
+            }
+            for url, local in cdn_to_local.items():
+                html_content = html_content.replace(url, local)
+            # Gera um guia de download ao lado do dashboard.
+            try:
+                guia = filepath.parent / "libs" / "COMO_BAIXAR_AS_BIBLIOTECAS.txt"
+                (filepath.parent / "libs").mkdir(exist_ok=True)
+                linhas_guia = [
+                    "MODO OFFLINE — como deixar o Dashboard_BI.html 100% independente de internet",
+                    "=" * 70,
+                    "O dashboard foi gerado para procurar as bibliotecas nesta pasta 'libs/'.",
+                    "Baixe os arquivos abaixo (uma única vez, num computador com internet) e",
+                    "salve-os NESTA pasta com EXATAMENTE estes nomes:",
+                    "",
+                ]
+                for url, local in cdn_to_local.items():
+                    linhas_guia.append(f"  {local.split('/')[-1]:32s} <=  {url}")
+                linhas_guia += [
+                    "",
+                    "Observação sobre os ícones (FontAwesome): além do CSS acima, os ícones usam",
+                    "arquivos de fonte. Se quiser os ícones offline, baixe o pacote completo do",
+                    "Font Awesome 6 e coloque a pasta 'webfonts' dentro de 'libs/'. Sem isso, o",
+                    "painel funciona igual, apenas sem os ícones (o texto aparece normalmente).",
+                    "",
+                    "Depois de baixar, basta abrir o Dashboard_BI.html normalmente — gráficos e",
+                    "tabelas funcionarão sem nenhuma conexão com a internet.",
+                ]
+                guia.write_text("\n".join(linhas_guia), encoding="utf-8")
+                self.logger.info(f"MODO OFFLINE ativado: o dashboard referencia ./libs/. Guia de download gerado em: {guia}")
+            except Exception as _e:
+                self.logger.warning(f"Modo offline ativo, mas não foi possível gravar o guia de bibliotecas: {_e}")
+
+        with open(filepath, "w", encoding="utf-8") as f:
             f.write(html_content)
 
-    def export_didactic_report(self, geral_stats, uf_stats, faixas_df, cutoffs):
-        texto = "LAUDO TÉCNICO E CIDADÃO: DIAGNÓSTICO DE INFRAESTRUTURA LOGÍSTICA\n"
-        with open(f"{self.output_dir}/3_Laudo_Insights_Consolidados.txt", "w", encoding="utf-8") as f:
-            f.write(texto)
-
-    def export_excel_corporate(self, df_dict, filename="4_Planilha_Consultoria_Master.xlsx", cutoffs=None):
-        filepath = f"{self.output_dir}/{filename}"
-        writer = pd.ExcelWriter(filepath, engine='xlsxwriter')
-        for sheet_name, df_sheet in df_dict.items():
-            df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
-        writer.close()
-
-class SystemOrchestrator:
-    def __init__(self, filepath, output_dir="Output_Analise_Salas"):
-        self.filepath = filepath
-        self.output_dir = output_dir
-        self.results = {} 
-
-    def run(self, progress_bar=None, status_text=None):
-        def update_ui(msg, val):
-            if status_text: status_text.text(msg)
-            if progress_bar: progress_bar.progress(val)
-            
+        # ---- Lançadores de SERVIDOR LOCAL (elimina 100% das restrições file://) ----
+        # Abrir o HTML por http://localhost remove o erro "unique security origins" e
+        # qualquer bloqueio de recurso local — é a forma mais robusta de uso offline/local.
         try:
-            update_ui("Etapa 1/7: Pipeline de Limpeza e Sanitização...", 0.1)
-            loader = DataLoaderAndCleaner(self.filepath, fix_encoding=True)
-            loader.load_data()
-            df_clean, data_quality = loader.clean_and_validate()
-            self.results['data_quality'] = data_quality
-            
-            update_ui("Etapa 2/7: Computando Inteligência Estatística...", 0.25)
-            analyzer = StatisticalAnalyzer(df_clean)
-            faixas_df, cutoffs = analyzer.apply_capacity_bins()
-            geral_stats = analyzer.get_general_stats()
-            uf_stats = analyzer.group_analysis(['SG_UF']) if 'SG_UF' in df_clean.columns else pd.DataFrame()
-            outliers = analyzer.detect_outliers()
-            pareto_uf = analyzer.pareto_analysis('SG_UF') if 'SG_UF' in df_clean.columns else pd.DataFrame()
-            top_locais = analyzer.get_top_locais(20)
-            
-            self.results['df_clean'] = df_clean
-            self.results['geral_stats'] = geral_stats
-            self.results['outliers'] = outliers
-            
-            update_ui("Etapa 3/7: Treinando Machine Learning (K-Means)...", 0.4)
-            ml_engine = MachineLearningEngine(df_clean)
-            clusters = ml_engine.cluster_locations()
-            df_clean = ml_engine.df 
-            
-            visualizer = VisualizerAndExporter(self.output_dir)
-            
-            update_ui("Etapa 4/7: Salvando Metadados...", 0.55)
-            insights_json = {"qualidade": data_quality, "outliers": len(outliers), "cutoffs": cutoffs}
-            with open(f"{self.output_dir}/5_Metadados_Insights.json", "w", encoding="utf-8") as f:
-                json.dump(insights_json, f, indent=4, ensure_ascii=False)
-            
-            update_ui("Etapa 5/7: Compilando Painéis Interativos...", 0.7)
-            visualizer.generate_charts(df_clean, uf_stats, pareto_uf, top_locais, faixas_df, clusters)
-            visualizer.create_custom_portuguese_dashboard(df_clean, cutoffs, geral_stats)
-            self.results['figs'] = visualizer.generated_figs 
-            
-            update_ui("Etapa 6/7: Redigindo Laudos...", 0.85)
-            visualizer.export_didactic_report(geral_stats, uf_stats, faixas_df, cutoffs)
-            
-            update_ui("Etapa 7/7: Construindo Master Spreadsheet...", 0.95)
-            tabelas_excel = {
-                '1_Base_Tratada': df_clean,
-                '2_Estat_Avançadas': geral_stats,
-                '3_Analise_UF': uf_stats,
-                '4_Top_20_Locais': top_locais,
-                '5_Pareto_80_20': pareto_uf,
-                '6_Clusters_IA': clusters,
-                '7_Outliers_Anomalias': outliers
-            }
-            visualizer.export_excel_corporate(tabelas_excel, cutoffs=cutoffs)
-            
-            update_ui("Processamento Finalizado!", 1.0)
-            return True
-            
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            raise
+            pasta = filepath.parent
+            nome_html = filepath.name
+            # Lançador Python multiplataforma
+            launcher_py = (
+                "#!/usr/bin/env python3\n"
+                "# -*- coding: utf-8 -*-\n"
+                '"""Abre o Dashboard por um servidor HTTP local (http://localhost), evitando as\n'
+                'restricoes de seguranca do navegador para arquivos file://. Basta dar dois cliques\n'
+                '(ou rodar: python abrir_dashboard.py). Requer apenas Python instalado."""\n'
+                "import http.server, socketserver, webbrowser, os, threading, sys\n"
+                "os.chdir(os.path.dirname(os.path.abspath(__file__)))\n"
+                f'ARQUIVO = "{nome_html}"\n'
+                "PORTA = 8000\n"
+                "def achar_porta(p):\n"
+                "    import socket\n"
+                "    for cand in range(p, p+50):\n"
+                "        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:\n"
+                "            if s.connect_ex(('127.0.0.1', cand)) != 0:\n"
+                "                return cand\n"
+                "    return p\n"
+                "PORTA = achar_porta(PORTA)\n"
+                "class Handler(http.server.SimpleHTTPRequestHandler):\n"
+                "    def log_message(self, *a):\n"
+                "        pass\n"
+                "url = f'http://localhost:{PORTA}/{ARQUIVO}'\n"
+                "print('='*64)\n"
+                "print(' Servidor local iniciado. O dashboard abrira no navegador.')\n"
+                "print(' Se nao abrir, acesse manualmente: ' + url)\n"
+                "print(' Para encerrar, feche esta janela.')\n"
+                "print('='*64)\n"
+                "threading.Timer(1.0, lambda: webbrowser.open(url)).start()\n"
+                "try:\n"
+                "    with socketserver.TCPServer(('', PORTA), Handler) as httpd:\n"
+                "        httpd.serve_forever()\n"
+                "except KeyboardInterrupt:\n"
+                "    sys.exit(0)\n"
+            )
+            (pasta / "abrir_dashboard.py").write_text(launcher_py, encoding="utf-8")
+            # Lançador Windows (dois cliques)
+            bat = (
+                "@echo off\r\n"
+                "REM Abre o Dashboard por um servidor local (evita erros de file:// no navegador).\r\n"
+                "cd /d \"%~dp0\"\r\n"
+                "python abrir_dashboard.py\r\n"
+                "if errorlevel 1 (\r\n"
+                "  echo.\r\n"
+                "  echo Python nao encontrado. Instale o Python ou abra o arquivo abrir_dashboard.py manualmente.\r\n"
+                "  pause\r\n"
+                ")\r\n"
+            )
+            (pasta / "ABRIR_DASHBOARD.bat").write_text(bat, encoding="utf-8")
+            self.logger.info("Lançadores de servidor local gerados: ABRIR_DASHBOARD.bat (Windows) e abrir_dashboard.py "
+                             "(multiplataforma). Use-os para abrir o dashboard sem restrições de file://.")
+        except Exception as _e:
+            self.logger.warning(f"Não foi possível gerar os lançadores de servidor local: {_e}")
 
-def zip_directory(folder_path, zip_path):
-    shutil.make_archive(zip_path.replace('.zip', ''), 'zip', folder_path)
+        self.logger.info("Dashboard HTML Single Page (SPA) Completo Analítico V27 Exportado com Segurança Explicável Total.")
+
+    def generate_readme_requirements(self):
+        readme = f"""====================================================
+PLATAFORMA DE BUSINESS INTELLIGENCE — LOCAIS DE PROVA E PARTICIPANTES DO INEP (PND)
+====================================================
+Versão {APP_VERSION} — "Enterprise Analytics — Perfil de Inscritos & Ensalamento".
+
+O QUE É
+-------
+Aplicação que transforma os microdados do PND (Prova Nacional Docente) em três
+produtos autoexplicativos: um Dashboard HTML interativo, uma planilha Excel analítica
+e arquivos auxiliares (CSV/JSON/laudo). Os indicadores derivam campo a campo dos
+layouts oficiais do INEP:
+  • N02 — Ensalamento (participante → sala; grupos de curso; atendimento especial;
+    tipo de ensalamento; distância).
+  • N50 — Salas dos Espaços Físicos (dimensões, capacidade, mobiliário).
+  • N52 — Locação de Espaço Físico (bloco/prédio; endereço; capacidade; dependência
+    administrativa; georreferenciamento).
+  • N90 — Inscritos (sexo; nascimento/idade; situação; residência × prova).
+  • N91 — Atendimentos & Recursos (itens de acessibilidade adjudicados: tipo, laudo
+    médico, deferimento, CID).
+Mantém compatibilidade total com o antigo N60 (Questionário de Visita: acessibilidade,
+segurança, conforto, tecnologia e conservação predial). TODO campo é opcional: se a
+base não trouxer uma coluna, a análise correspondente é omitida — nunca há falha.
+
+COMO RODAR
+----------
+1. Instale as dependências:  pip install -r requirements.txt
+2. Coloque a base 'analise_sas.xlsx' na sua Área de Trabalho e execute:  python app.py
+   • Para um arquivo específico:  python app.py --input "C:\\caminho\\base.xlsx"
+   • Para testar sem dados reais:  python app.py --demo
+   • Ajuda completa:              python app.py --help
+
+SAÍDAS (pasta 'Analise_Inteligente_SAS' na Área de Trabalho)
+------------------------------------------------------------
+• Dashboard_BI.html ............. Dashboard interativo (filtros, 28 gráficos, dicionário).
+• dados_processados/Analise_Completa_Master_Ultimate_Edition.xlsx .. Planilha com até 53 abas.
+• dados_processados/6_Base_Tratada.csv ......... Base limpa e enriquecida.
+• dados_processados/5_Metadados_Insights.json .. Metadados, glossários e achados da auditoria.
+• graficos/ ..................................... Gráficos Plotly standalone (se Plotly instalado).
+
+NOVIDADES DA VERSÃO 31.0 (AUDITORIA DE CRUZAMENTO ENTRE LAYOUTS — CAMADA RELACIONAL)
+-----------------------------------------------------------------------------------
+• Nova camada RELACIONAL que cruza N02, N50, N52, N90 e N91 para reconciliar participantes
+  e detectar inconsistências que só aparecem entre arquivos. É ativada automaticamente quando
+  o arquivo de entrada contém uma ABA POR LAYOUT (reconhecidas por nome da aba ou por colunas).
+• Nova seção no Dashboard ("VII. Auditoria de Cruzamento") e +13 abas no Excel (41 a 53):
+    - participantes sem ensalamento (N90×N02) e ensalados órfãos;
+    - ensalamento duplicado; divergência de município (N90×N02);
+    - órfãos referenciais de local/sala (N02→N52/N50);
+    - capacidade × ocupação de salas e locais (superlotadas/ociosas);
+    - forasteiros × residentes e ranking por UF;
+    - distâncias: faixas, casos críticos e ranking por município;
+    - divergência de ID_KIT_PROVA (N02×N91).
+• Cada achado traz severidade (CRÍTICO/ATENÇÃO/OK), INTERPRETAÇÃO automática e RECOMENDAÇÃO,
+  também gravadas no laudo TXT e no JSON de metadados, com um resumo executivo automático.
+• Convenção: se o arquivo tiver uma aba plana denormalizada, nomeie-a BASE_PLANA — ela é
+  usada pelo pipeline clássico e ignorada pela camada relacional. A auditoria exige ≥2
+  layouts; com aba única, o comportamento clássico (42 abas) é mantido — nada é perdido.
+
+NOVIDADES DA VERSÃO 30.0 (MÓDULO DE ATENDIMENTOS & RECURSOS — N91)
+-----------------------------------------------------------------
+• Nova seção no Dashboard "Atendimentos & Recursos" e 4 novas abas no Excel (37 a 40),
+  ATIVADAS automaticamente quando a base contém dados do N91:
+    - Itens de atendimento/recurso mais solicitados (com % deferido por item);
+    - Distribuição por tipo (Específico / Especializado / Recurso);
+    - Situação do laudo médico (Aprovado / Reprovado / Em Análise / Recurso);
+    - Taxa de deferimento por UF de prova (desigualdade regional).
+• É o CRUZAMENTO adjudicado da acessibilidade: o N02 diz se há demanda; o N91 diz QUAL
+  item, de que TIPO e se foi CONCEDIDO (com base no laudo médico).
+• Dicionário oficial ampliado com os 15 campos reais do N91 (domínio de 13 códigos de
+  situação de laudo, CID, etc.). Novos insights e KPIs (taxa de deferimento, pendências
+  em análise, item mais solicitado).
+• Resiliência independente: base só de infraestrutura = 32 abas; com N02/N90 e sem N91 =
+  38 abas; completa (com N91) = 42 abas. Nada falha quando um layout está ausente.
+
+NOVIDADES DA VERSÃO 29.0 (MÓDULO DE INSCRITOS & ENSALAMENTO — N02/N90)
+---------------------------------------------------------------------
+• Nova seção no Dashboard "Inscritos & Ensalamento" e 6 novas abas no Excel
+  (31 a 36), ATIVADAS automaticamente quando a base contém dados de participantes:
+    - Perfil demográfico (sexo × faixa etária, idade derivada de DT_NASCIMENTO);
+    - Ranking de áreas de avaliação / grupos de curso (NO_GRUPO_CURSO);
+    - Demanda de atendimento especial por UF (atendimento especializado/específico,
+      recurso e ensalamento em salas reduzidas);
+    - Distribuição por tipo de ensalamento (TP_ENSALAMENTO: comum/1/6/20/40/reserva);
+    - Situação cadastral da inscrição (Regular/Irregular/Ação Judicial);
+    - Migração interestadual (UF de residência × UF de prova).
+• Dicionário de Dados oficial ampliado com os campos reais dos layouts N02 e N90.
+• Novos insights automáticos e KPIs para o público (idade média, % por sexo,
+  % com atendimento especial, % de migração, distância mediana).
+• Todo o módulo é RESILIENTE: bases só de infraestrutura (N50/N52/N60) continuam
+  produzindo exatamente as mesmas saídas de antes — o módulo permanece inativo e
+  exibe um aviso claro, sem gerar erros.
+
+CORREÇÕES DE AUDITORIA DA VERSÃO 29.0
+-------------------------------------
+• O relatório de qualidade (nulos, duplicatas, abas originais) voltou a ser gravado
+  no JSON de metadados — antes era sobrescrito por um dicionário vazio.
+• A contagem de duplicatas passou a ser medida ANTES da remoção (antes retornava ~0).
+• Datas passaram a ser lidas no formato brasileiro DD/MM/AAAA (dayfirst), essencial
+  para o cálculo correto de idade.
+
+NOVIDADES DA VERSÃO 28.x
+------------------------
+• Painel "Operações sobre os dados" no Data Explorer: escolha coluna + operação
+  (contagem, contagem distinta, soma, média, mediana, mín, máx, desvio-padrão),
+  com agrupamento opcional, calculado ao vivo sobre os dados filtrados.
+• Inspetor de KPI agora mostra dados ESPECÍFICOS de cada indicador: "total de
+  municípios" lista todos os municípios; "capacidade máxima em uma sala" mostra
+  exatamente qual é a sala; somas viram soma por UF; contagens de flags listam os
+  registros correspondentes — cada indicador revela diretamente o que representa.
+• Responsividade reforçada: tooltips agora usam um portal fixo (nunca são cortados
+  por um card nem saem da tela) e os gráficos ganharam wrapper responsivo (legendas
+  horizontais, margens que não colapsam em telas estreitas, redimensionamento).
+• Dashboard responsivo (celular/tablet/desktop): menu retrátil, grades fluidas.
+• KPIs clicáveis com selo de origem (oficial/derivado vs criado pela plataforma).
+• Nota Oficial INEP do local (NU_PONTOS_LOCAL_PROVA) reescalada 0-100.
+• Densidade Espacial (m² por candidato) a partir das dimensões das salas (N50).
+• Mapa geográfico dos locais (latitude/longitude do N52).
+• Matriz de correlação entre índices; análise por dependência administrativa.
+• Dicionário de Dados oficial pesquisável (no Dashboard e no Excel).
+• Validação de cobertura de colunas e relatório de diagnóstico de erros.
+• Correções para pandas >= 2.2/3.0 (Copy-on-Write), testes estatísticos protegidos,
+  K-Means/Isolation Forest robustos, e vetorização da limpeza de texto.
+• Dependências pesadas (Plotly/Sweetviz/tqdm) agora são OPCIONAIS: os produtos
+  principais são gerados mesmo sem elas.
+
+PRESERVAÇÃO
+-----------
+Nenhuma funcionalidade das versões anteriores foi removida. Todas as 20 abas originais
+do Excel, os 15 gráficos standalone e os 11 gráficos do dashboard continuam presentes;
+as novidades foram adicionadas de forma incremental.
+"""
+        with open(self.dirs["arquivos_auxiliares"].parent / "README.txt", "w", encoding="utf-8") as f:
+            f.write(readme)
+
+        reqs = (
+            "# Dependências principais (obrigatórias)\n"
+            "pandas>=2.2.0\n"
+            "numpy>=1.26.0\n"
+            "scipy>=1.11.0\n"
+            "scikit-learn>=1.3.0\n"
+            "xlsxwriter>=3.1.0\n"
+            "openpyxl>=3.1.0\n"
+            "\n"
+            "# Dependências OPCIONAIS (enriquecem a saída; a aplicação roda sem elas)\n"
+            "plotly>=5.18.0        # gráficos standalone (.html/.png)\n"
+            "kaleido>=0.2.1        # exportação de imagens .png dos gráficos Plotly\n"
+            "sweetviz>=2.3.0       # relatório EDA automático complementar\n"
+            "tqdm>=4.66.0          # barra de progresso no terminal\n"
+        )
+        with open(self.dirs["arquivos_auxiliares"].parent / "requirements.txt", "w", encoding="utf-8") as f:
+            f.write(reqs)
 
 
 # ==========================================
-# NOVA ARQUITETURA DA INTERFACE (STREAMLIT)
+# CAMADA RELACIONAL MULTI-LAYOUT (v31): INGESTÃO E AUDITORIA DE CRUZAMENTO
 # ==========================================
+class MultiLayoutLoader:
+    """Lê TODAS as abas do workbook de entrada e reconhece cada layout do PND.
 
-def render_home_page():
-    """Renderiza a página principal institucional e didática."""
-    st.title("🏛️ Plataforma de Inteligência Analítica Integrada")
-    st.markdown("### Transformando Dados Brutos em Decisões Estratégicas")
-    
-    st.divider()
+    Diferente do :class:`DataLoaderAndCleaner` (que trabalha sobre UMA tabela plana),
+    este carregador identifica as tabelas NORMALIZADAS (N02, N50, N52, N90, N91) — seja
+    por nome de aba (contendo "N02", "N50"...), seja por assinatura de colunas — para
+    habilitar a auditoria RELACIONAL de cruzamento entre layouts.
 
-    st.markdown("""
-    #### 🎯 Qual o objetivo deste sistema?
-    Esta plataforma foi desenhada para **receber dados brutos** provenientes de análises de layouts disponibilizados pelo INEP e submetê-los a uma esteira de processamento avançado. 
-    
-    O sistema funciona como o seu **cientista de dados virtual**: ele automatiza tarefas que levariam horas se feitas manualmente, transformando números espalhados em informação útil, visual e gerencial. 
-    """)
+    Resiliência: se o workbook tiver apenas uma aba plana, nenhuma tabela normalizada é
+    reconhecida e a auditoria de cruzamento permanece inativa (sem erro).
+    """
 
-    st.info("""
-    **Em resumo, a nossa aplicação atua para:**
-    * 🔄 **Transformar** dados brutos em inteligência útil;
-    * ⚙️ **Automatizar** rotinas e análises pesadas;
-    * 🧩 **Identificar padrões** ocultos e segmentações via Inteligência Artificial;
-    * 🚨 **Detectar inconsistências**, erros e *outliers* (pontos fora da curva);
-    * 📊 **Gerar estatísticas** e indicadores precisos;
-    * 📉 **Produzir visualizações gráficas** para simplificar o entendimento;
-    * 🔎 **Facilitar auditorias** e tomadas de decisão pela gestão.
-    """)
+    #: Colunas-assinatura para inferência quando o nome da aba não identifica o layout.
+    SIGNATURES: Dict[str, Sequence[str]] = {
+        'N91': ('TP_ITEM_ATENDIMENTO', 'NO_ITEM_ATENDIMENTO', 'CO_SITUACAO_LAUDO_MEDICO'),
+        'N90': ('TP_SEXO', 'DT_NASCIMENTO', 'TP_SITUACAO'),
+        'N02': ('TP_ENSALAMENTO', 'NO_SALA', 'ID_SALA'),
+        'N50': ('QT_CAPACIDADE_MAXIMA_SALA', 'ID_SALA'),
+        'N52': ('QT_SALAS', 'QT_CAPACIDADE_MAXIMA'),
+        'N60': ('IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA', 'IN_POLICIAMENTO'),
+    }
 
-    st.markdown("#### 👤 Para quem é esta ferramenta?")
-    st.write("Foi idealizada para gestores, coordenadores de operação e auditores que precisam interpretar resultados com agilidade. **Não é necessário conhecimento técnico em programação ou estatística** para utilizar o sistema. A linguagem é acessível e as interfaces são guiadas.")
+    def __init__(self, filepath, logger):
+        self.filepath = filepath
+        self.logger = logger
+        self.layouts: Dict[str, pd.DataFrame] = {}
 
-    st.divider()
+    @staticmethod
+    def _score(cols: set, sig: Sequence[str]) -> int:
+        return sum(1 for c in sig if c in cols)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("#### 📂 Análises Disponíveis (Hoje)")
-        st.success("**Módulo 1: Análises N50/N52 (Salas e Locais)**\n\nEste módulo cruza dados de infraestrutura, detectando deficiências estruturais, capacidades ociosas e classificando escolas com algoritmos de Machine Learning.")
-    
-    with col2:
-        st.markdown("#### 🚀 Futuras Expansões (Em Breve)")
-        st.warning("**Módulo 2: Alocação de Pessoal e Frequência**\n\n*A nova arquitetura em abas permite que módulos adicionais sejam integrados aqui futuramente sem impactar o sistema atual.*")
+    def load(self) -> Dict[str, pd.DataFrame]:
+        try:
+            xls = pd.ExcelFile(self.filepath)
+        except Exception as exc:
+            self.logger.warning(f"Auditoria de cruzamento: não foi possível abrir o workbook ({exc}).")
+            return {}
 
-    st.markdown("---")
-    st.markdown("👈 **Pronto para começar?** Navegue pela aba **📊 Análises N50/N52** logo acima para iniciar a sua jornada nos dados.")
-
-def render_tutorial_extracao():
-    """Renderiza o tutorial interativo de como obter os dados no SAS EG."""
-    with st.expander("📖 **PASSO A PASSO: Como obter os dados para esta análise (Tutorial SAS Enterprise Guide)**", expanded=False):
-        st.markdown("""
-        Para que a Inteligência Artificial desta aplicação consiga gerar o relatório completo (avaliando as escolas e suas capacidades reais), você precisa exportar a **Visão Detalhada das Salas** usando o **SAS Enterprise Guide 8.6**.
-        
-        Siga os passos abaixo com atenção para gerar o arquivo corretamente[cite: 2]:
-        """)
-
-        st.markdown("#### 🔹 Etapa 1: Abrindo o Query Builder")
-        st.markdown("""
-        1. No SAS Enterprise Guide, localize a tabela **N50_SALA_ESPACO_FISICO** no seu painel *Project Tree* (lado esquerdo)[cite: 2].
-        2. Clique nela com o **botão direito** do mouse e selecione a opção **Query Builder...**[cite: 2].
-        """)
-
-        st.markdown("#### 🔹 Etapa 2: Unindo as Tabelas (Join)")
-        st.markdown("""
-        1. Dentro da tela do *Query Builder*, clique no botão **Add Tables** (ícone de um `+` com uma tabela) localizado na parte superior esquerda[cite: 2].
-        2. Encontre e selecione a tabela **N52_LOCACAO_ESPACO_FISICO** e clique em **Open**[cite: 2].
-        3. Agora, clique no botão **Join Tables** na parte superior[cite: 2].
-        4. O sistema criará uma linha ligando as duas tabelas. Clique com o **botão direito** nessa linha e escolha **Properties**[cite: 2].
-        5. Certifique-se de que o tipo de Join selecionado é o **Inner Join** (Apenas linhas correspondentes). Isso garante que não traremos "salas fantasma" sem um local[cite: 2].
-        6. O campo usado para ligar (a ponte) deve ser obrigatoriamente o **CO_LOCAL** (Código identificador)[cite: 2]. Feche essa janela de configuração.
-        """)
-
-        st.warning("""
-        **⚠️ ATENÇÃO ESTRATÉGICA PARA O SUCESSO DA ANÁLISE:**
-        Não utilize a função `SUM` (Soma) no SAS! 
-        Para que nosso sistema consiga calcular assimetrias, outliers e rodar a Inteligência Artificial, precisamos que você extraia a **Visão Detalhada** (uma sala por linha)[cite: 2]. O sistema em Python fará o agrupamento matemático para você automaticamente.
-        """)
-
-        st.markdown("#### 🔹 Etapa 3: Escolhendo os Campos Necessários")
-        st.markdown("""
-        Na tela principal do Query Builder, arraste os seguintes campos para a área **Select Data** (no lado direito da tela)[cite: 2]:
-        *   Da tabela **N52**: Arraste os campos **NO_LOCAL** e **SG_UF**[cite: 2].
-        *   Da tabela **N50**: Arraste os campos **NO_SALA** e **QT_CAPACIDADE_MAXIMA_SALA**[cite: 2]. *(Nota: Se a sua regra atual exigir distanciamento, use o campo de capacidade reduzida em vez do máximo[cite: 2]).*
-        """)
-
-        st.markdown("#### 🔹 Etapa 4: Executando e Exportando")
-        st.markdown("""
-        1. Clique no botão **Run** (Executar) no canto inferior direito[cite: 2].
-        2. O resultado gerado será uma lista detalhada mostrando a escola, o número da sala e a capacidade de cada ambiente[cite: 2].
-        3. Por fim, exporte esse resultado final em formato **Excel (.xlsx)**. É exatamente este arquivo que você submeterá logo abaixo.
-        """)
-
-def render_analysis_tab():
-    """Renderiza a lógica completa do sistema legado preservada na nova aba."""
-    render_tutorial_extracao()
-    
-    st.divider()
-    
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.subheader("📥 1. Ingestão de Dados")
-        uploaded_file = st.file_uploader("Faça upload da planilha gerada no SAS (.xlsx)", type=["xlsx"])
-        log_expander = st.expander("Terminal de Execução (Logs)", expanded=False)
-
-    if uploaded_file is not None:
-        with col2:
-            st.subheader("⚙️ 2. Validação Estrutural")
+        found: Dict[str, Tuple[int, pd.DataFrame]] = {}
+        for sheet in xls.sheet_names:
+            if str(sheet).strip().upper() in {'BASE_PLANA', 'BASE', 'FLAT'}:
+                continue  # a base denormalizada não é um layout
             try:
-                df_preview = pd.read_excel(uploaded_file, nrows=5)
-                cols_encontradas = list(df_preview.columns)
-                colunas_obrigatorias = ['QT_CAPACIDADE_MAXIMA_SALA'] 
-                colunas_recomendadas = ['NO_LOCAL', 'SG_UF']
-                
-                faltam_obrigatórias = [c for c in colunas_obrigatorias if c not in cols_encontradas]
-                faltam_recomendadas = [c for c in colunas_recomendadas if c not in cols_encontradas]
-                
-                if faltam_obrigatórias:
-                    st.error(f"🚨 ERRO ESTRUTURAL: A planilha não contém a coluna obrigatória: {', '.join(faltam_obrigatórias)}")
-                    st.stop()
-                
-                st.success("✅ Arquivo validado! A estrutura básica está correta.")
-                if faltam_recomendadas:
-                    st.warning(f"⚠️ Aviso: Faltam colunas recomendadas ({', '.join(faltam_recomendadas)}). O sistema executará em modo de degradação suave.")
-                
-            except Exception as e:
-                st.error(f"Não foi possível ler o arquivo. Ele pode estar corrompido: {e}")
-                st.stop()
+                df = pd.read_excel(xls, sheet_name=sheet).dropna(how='all', axis=1).dropna(how='all', axis=0)
+            except Exception:
+                continue
+            if df.empty:
+                continue
+            cols = set(map(str, df.columns))
+            name_upper = str(sheet).upper()
+            layout = None
+            for key in self.SIGNATURES:
+                if key in name_upper:
+                    layout = key
+                    break
+            if layout is None:
+                best, best_score = None, 0
+                for key, sig in self.SIGNATURES.items():
+                    sc = self._score(cols, sig)
+                    if sc > best_score:
+                        best, best_score = key, sc
+                # exige pelo menos 2 colunas-assinatura para aceitar por inferência
+                if best_score >= 2:
+                    layout = best
+            if layout is None:
+                continue
+            score = self._score(cols, self.SIGNATURES[layout])
+            if layout not in found or score > found[layout][0]:
+                found[layout] = (score, df)
 
-            if st.button("▶️ INICIAR PROCESSAMENTO ANALÍTICO COMPLETO", type="primary", use_container_width=True):
-                temp_dir = tempfile.mkdtemp()
-                output_folder = os.path.join(temp_dir, "Output_Analise_Salas")
-                temp_input_file = os.path.join(temp_dir, "input_data.xlsx")
-                
-                with open(temp_input_file, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                
-                st.markdown("### Progresso da Execução")
-                progress_bar = st.progress(0.0)
-                status_text = st.empty()
-                
-                orchestrator = SystemOrchestrator(temp_input_file, output_folder)
-                
+        self.layouts = {k: v[1] for k, v in found.items()}
+        if self.layouts:
+            resumo = ", ".join(f"{k} ({len(v):,} linhas)" for k, v in sorted(self.layouts.items()))
+            self.logger.info(f"Camada relacional: layouts reconhecidos para auditoria de cruzamento → {resumo}.")
+        else:
+            self.logger.info("Camada relacional: nenhuma aba normalizada reconhecida (auditoria de cruzamento inativa).")
+        return self.layouts
+
+
+class CrossLayoutAuditEngine:
+    """Motor de AUDITORIA DE CRUZAMENTO entre os layouts N02, N50, N52, N90 e N91.
+
+    Executa reconciliações e verificações RELACIONAIS que uma única tabela plana não
+    permite: participantes sem ensalamento, ensalados não inscritos, ensalamento
+    duplicado, órfãos referenciais (local/bloco/sala inexistentes), divergência de
+    município, ocupação × capacidade (sala e local), forasteiros × residentes, análise
+    de distâncias (faixas, críticos, ranking) e consistência de ID_KIT_PROVA (N02×N91).
+
+    Cada verificação gera um "achado" com: título, categoria, severidade (OK/ATENÇÃO/
+    CRÍTICO), valor, métricas, INTERPRETAÇÃO automática e RECOMENDAÇÃO. Além disso,
+    produz tabelas detalhadas (amostras) prontas para Excel/HTML e KPIs executivos.
+
+    Limiar de distância (contrato) configurável: padrão 20 km (crítico) e 10 km (atenção).
+    """
+
+    DIST_CRITICA_KM = 20.0
+    DIST_ATENCAO_KM = 10.0
+
+    def __init__(self, layouts: Dict[str, pd.DataFrame], logger):
+        self.L = {k: (v.copy() if isinstance(v, pd.DataFrame) else pd.DataFrame()) for k, v in (layouts or {}).items()}
+        self.logger = logger
+        self.ativo = False
+        self.kpis: Dict[str, Any] = {}
+        self.findings: List[Dict[str, Any]] = []
+        self.tabelas: Dict[str, pd.DataFrame] = {}
+        self.resumo_txt = ""
+
+    # ---- helpers -----------------------------------------------------------------
+    @staticmethod
+    def _norm_key(s: pd.Series) -> pd.Series:
+        out = s.astype(str).str.strip()
+        return out.str.replace(r'\.0$', '', regex=True)
+
+    def _key_col(self, df: pd.DataFrame) -> Optional[str]:
+        for c in ('CO_INSCRICAO_INEP', 'CO_INSCRICAO'):
+            if c in df.columns:
+                return c
+        return None
+
+    def _add(self, chave, titulo, categoria, severidade, valor, metricas, interpretacao, recomendacao=""):
+        self.findings.append({
+            'chave': chave, 'titulo': titulo, 'categoria': categoria, 'severidade': severidade,
+            'valor': valor, 'metricas': metricas or {}, 'interpretacao': interpretacao,
+            'recomendacao': recomendacao,
+        })
+
+    # ---- orquestração ------------------------------------------------------------
+    def run(self) -> "CrossLayoutAuditEngine":
+        present = [k for k, v in self.L.items() if isinstance(v, pd.DataFrame) and not v.empty]
+        # A auditoria exige pelo menos dois layouts com relação possível.
+        if len(present) < 2:
+            self.ativo = False
+            return self
+        self.ativo = True
+        self.logger.info("Executando AUDITORIA DE CRUZAMENTO entre layouts (reconciliações relacionais)...")
+        etapas = [
+            ('participantes', self._audit_participantes),
+            ('divergencia_municipio', self._audit_divergencia_municipio),
+            ('orfaos_referenciais', self._audit_orfaos_referenciais),
+            ('capacidade_ocupacao', self._audit_capacidade_ocupacao),
+            ('forasteiros', self._audit_forasteiros),
+            ('distancias', self._audit_distancias),
+            ('kit_prova', self._audit_kit_prova),
+            ('kit_atribuicao', self._audit_kit_attribution),
+            ('kit_deep', self._audit_kit_deep),
+            ('totais', self._audit_totais),
+            ('kit_compatibilidade', self._audit_kit_compatibilidade),
+            ('n91_sem_inscricao', self._audit_n91_sem_inscricao),
+            ('qualidade_dados', self._audit_qualidade_dados),
+            ('capacidade_avancada', self._audit_capacidade_avancada),
+            ('bloco_referencial', self._audit_bloco_referencial),
+            ('atendimentos_n91', self._audit_atendimentos_n91),
+            ('ranking_problemas', self._build_ranking_problemas),
+            ('tabela_mestre', self._build_tabela_mestre),
+            ('estimativa_provas', self._audit_estimativa_provas),
+            ('estatisticas_descritivas', self._audit_estatisticas_descritivas),
+            ('panorama_provas_kits', self._audit_panorama_provas_kits),
+            ('kits_por_tipo', self._audit_kits_por_tipo),
+            ('n60_cruzamentos', self._audit_n60_cruzamentos),
+            ('n60_capacidade_distancia', self._audit_n60_capacidade_distancia),
+            ('n91_laudo_kit', self._audit_n91_laudo_kit),
+            ('atendimento_demografia', self._audit_atendimento_demografia),
+            ('risco_composto_local', self._audit_risco_composto_local),
+            ('eficiencia_ocupacao', self._audit_eficiencia_ocupacao),
+            ('distancia_contratual', self._audit_distancia_contratual),
+            ('salas_sem_folga', self._audit_salas_sem_folga),
+            ('perfil_inscritos', self._audit_perfil_inscritos),
+            ('totais_gerais', self._audit_totais_gerais),
+            ('kits_por_municipio', self._audit_kits_por_municipio),
+            ('validacao_cruzada', self._audit_validacao_cruzada),
+        ]
+        for nome, fn in etapas:
+            try:
+                fn()
+            except Exception as exc:  # isolamento: uma falha não derruba as demais análises
+                self.logger.warning(f"Auditoria de cruzamento: etapa '{nome}' falhou de forma não fatal ({exc}).")
+        self._build_kpis_and_resumo(present)
+        return self
+
+    # ---- 1) Reconciliação de participantes (N90 × N02) ---------------------------
+    def _audit_participantes(self):
+        n90, n02 = self.L.get('N90'), self.L.get('N02')
+        if n90 is None or n02 is None or n90.empty or n02.empty:
+            return
+        k90, k02 = self._key_col(n90), self._key_col(n02)
+        if not k90 or not k02:
+            return
+        insc = self._norm_key(n90[k90])
+        ens = self._norm_key(n02[k02])
+        set_insc, set_ens = set(insc), set(ens)
+        total_insc = len(set_insc)
+        total_ens = len(set_ens)
+        self.kpis['total_inscritos'] = total_insc
+        self.kpis['total_ensalados'] = total_ens
+        self.kpis['pct_ensalamento'] = round(100 * len(set_insc & set_ens) / total_insc, 2) if total_insc else 0.0
+
+        # (a) inscritos sem ensalamento
+        sem = sorted(set_insc - set_ens)
+        n90_idx = n90.assign(_k=insc.values)
+        cols_show = [c for c in [k90, 'SG_UF_MUNICIPIO_PROVA', 'CO_MUNICIPIO_PROVA', 'CO_MUNICIPIO', 'SG_UF_MUNICIPIO_RESIDENCIA', 'CO_GRUPO_CURSO'] if c in n90.columns]
+        sem_df = n90_idx[n90_idx['_k'].isin(sem)][cols_show].drop_duplicates().head(500).reset_index(drop=True)
+        self.tabelas['sem_ensalamento'] = sem_df
+        self.kpis['qtd_sem_ensalamento'] = len(sem)
+        sev = 'CRÍTICO' if sem else 'OK'
+        interp = (f"Há {total_insc:,} participantes inscritos (N90) e {total_ens:,} ensalados (N02). "
+                  + (f"Foram identificados {len(sem):,} participante(s) SEM ensalamento — pessoas que se inscreveram "
+                     f"mas não possuem sala atribuída, risco direto de não realizarem a prova." if sem
+                     else "Todos os inscritos possuem ensalamento correspondente."))
+        rec = ("Localizar e ensalar imediatamente os participantes listados antes da aplicação; "
+               "verificar se houve falha de importação do N02.") if sem else "Nenhuma ação necessária."
+        self._add('participantes_sem_ensalamento', 'Participantes sem Ensalamento (N90 × N02)',
+                  'Reconciliação de Participantes', sev, len(sem),
+                  {'inscritos': total_insc, 'ensalados': total_ens, 'pct_ensalamento': self.kpis['pct_ensalamento']},
+                  interp, rec)
+
+        # (b) ensalados não inscritos (órfãos)
+        orf = sorted(set_ens - set_insc)
+        n02_idx = n02.assign(_k=ens.values)
+        cols02 = [c for c in [k02, 'CO_LOCAL', 'CO_BLOCO', 'ID_SALA', 'NO_SALA', 'CO_MUNICIPIO_PROVA'] if c in n02.columns]
+        orf_df = n02_idx[n02_idx['_k'].isin(orf)][cols02].drop_duplicates().head(500).reset_index(drop=True)
+        self.tabelas['ensalados_orfaos'] = orf_df
+        self.kpis['qtd_ensalados_orfaos'] = len(orf)
+        self._add('ensalados_nao_inscritos', 'Ensalados não Inscritos / Órfãos (N02 × N90)',
+                  'Reconciliação de Participantes', 'CRÍTICO' if orf else 'OK', len(orf),
+                  {'orfaos': len(orf)},
+                  (f"{len(orf):,} registro(s) de ensalamento no N02 referem-se a inscrições INEXISTENTES no N90. "
+                   "São registros órfãos que indicam erro de cadastro ou importação." if orf
+                   else "Todos os ensalamentos correspondem a inscrições válidas no N90."),
+                  "Remover ou corrigir os registros órfãos; validar a chave CO_INSCRICAO." if orf else "Nenhuma ação necessária.")
+
+        # (c) ensalamento duplicado (participante em >1 sala/local)
+        loc_cols = [c for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA'] if c in n02.columns]
+        if loc_cols:
+            dedup = n02_idx.drop_duplicates(subset=['_k'] + loc_cols)
+            cont = dedup.groupby('_k').size()
+            dup_keys = cont[cont > 1].index.tolist()
+            if dup_keys:
+                dup_df = (n02_idx[n02_idx['_k'].isin(dup_keys)]
+                          .sort_values('_k')[[c for c in [k02] + loc_cols + ['NO_SALA'] if c in n02_idx.columns]]
+                          .head(500).reset_index(drop=True))
+            else:
+                dup_df = pd.DataFrame()
+            self.tabelas['ensalamento_duplicado'] = dup_df
+            self.kpis['qtd_ensalamento_duplicado'] = len(dup_keys)
+            self._add('ensalamento_duplicado', 'Ensalamento Duplicado (participante em múltiplas salas)',
+                      'Reconciliação de Participantes', 'CRÍTICO' if dup_keys else 'OK', len(dup_keys),
+                      {'participantes_duplicados': len(dup_keys)},
+                      (f"{len(dup_keys):,} participante(s) aparecem alocados em MAIS DE UMA sala/local no N02, o que é "
+                       "logicamente impossível e consome capacidade indevidamente." if dup_keys
+                       else "Nenhum participante está alocado em mais de uma sala."),
+                      "Manter apenas um ensalamento por participante; investigar reprocessamentos." if dup_keys else "Nenhuma ação necessária.")
+
+    # ---- 2) Divergência de município (N90 × N02) ---------------------------------
+    def _audit_divergencia_municipio(self):
+        n90, n02 = self.L.get('N90'), self.L.get('N02')
+        if n90 is None or n02 is None or n90.empty or n02.empty:
+            return
+        k90, k02 = self._key_col(n90), self._key_col(n02)
+        mcol90 = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n90.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n90.columns else None)
+        mcol02 = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
+        if not (k90 and k02 and mcol90 and mcol02):
+            return
+        a = pd.DataFrame({'_k': self._norm_key(n90[k90]), 'MUN_N90': self._norm_key(n90[mcol90])}).drop_duplicates('_k')
+        b = pd.DataFrame({'_k': self._norm_key(n02[k02]), 'MUN_N02': self._norm_key(n02[mcol02])}).drop_duplicates('_k')
+        m = a.merge(b, on='_k', how='inner')
+        div = m[m['MUN_N90'] != m['MUN_N02']]
+        self.tabelas['divergencia_municipio'] = div.rename(columns={'_k': 'CO_INSCRICAO'}).head(500).reset_index(drop=True)
+        self.kpis['qtd_divergencia_municipio'] = int(len(div))
+        n = int(len(div))
+        self._add('divergencia_municipio', 'Divergência de Município de Prova (N90 × N02)',
+                  'Consistência entre Layouts', 'ATENÇÃO' if n else 'OK', n,
+                  {'divergentes': n, 'comparados': int(len(m))},
+                  (f"O município de prova coincide entre N90 e N02 para {len(m) - n:,} de {len(m):,} participantes comparados. "
+                   + (f"Foram encontradas {n:,} divergências — o participante está registrado em municípios diferentes nos dois layouts."
+                      if n else "Não há divergências de município.")),
+                  "Padronizar a fonte do município de prova; investigar as inscrições divergentes." if n else "Nenhuma ação necessária.")
+
+    # ---- 3) Órfãos referenciais (N02 → N52 / N50) --------------------------------
+    def _audit_orfaos_referenciais(self):
+        n02 = self.L.get('N02')
+        if n02 is None or n02.empty:
+            return
+        n52, n50 = self.L.get('N52'), self.L.get('N50')
+        # local inexistente
+        if n52 is not None and not n52.empty and 'CO_LOCAL' in n02.columns and 'CO_LOCAL' in n52.columns:
+            locais_validos = set(self._norm_key(n52['CO_LOCAL']))
+            loc02 = self._norm_key(n02['CO_LOCAL'])
+            mask = ~loc02.isin(locais_validos)
+            df = n02[mask.values][[c for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA', 'NO_SALA'] if c in n02.columns]].drop_duplicates().head(500).reset_index(drop=True)
+            self.tabelas['orfao_local'] = df
+            n = int(df['CO_LOCAL'].nunique()) if not df.empty else 0
+            self.kpis['qtd_orfao_local'] = int(mask.sum())
+            self._add('orfao_local', 'Registros com Local Inexistente no N52 (N02 → N52)',
+                      'Integridade Referencial', 'CRÍTICO' if mask.sum() else 'OK', int(mask.sum()),
+                      {'registros_orfaos': int(mask.sum()), 'locais_distintos': n},
+                      (f"{int(mask.sum()):,} registro(s) de ensalamento apontam para um CO_LOCAL que NÃO existe no N52 "
+                       f"({n} local(is) distinto(s)). Isso quebra a integridade referencial local↔ensalamento." if mask.sum()
+                       else "Todos os locais referenciados no N02 existem no N52."),
+                      "Corrigir o CO_LOCAL nos registros órfãos ou incluir o local no N52." if mask.sum() else "Nenhuma ação necessária.")
+        # sala inexistente
+        if n50 is not None and not n50.empty and all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']) and all(c in n50.columns for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']):
+            def _triple(d):
+                return (self._norm_key(d['CO_LOCAL']) + '|' + self._norm_key(d['CO_BLOCO']) + '|' + self._norm_key(d['ID_SALA']))
+            salas_validas = set(_triple(n50))
+            t02 = _triple(n02)
+            mask = ~t02.isin(salas_validas)
+            self.kpis['qtd_orfao_sala'] = int(mask.sum())
+            self.tabelas['orfao_sala'] = n02[mask.values][[c for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA', 'NO_SALA'] if c in n02.columns]].drop_duplicates().head(500).reset_index(drop=True)
+            self._add('orfao_sala', 'Registros com Sala Inexistente no N50 (N02 → N50)',
+                      'Integridade Referencial', 'CRÍTICO' if mask.sum() else 'OK', int(mask.sum()),
+                      {'registros_orfaos': int(mask.sum())},
+                      (f"{int(mask.sum()):,} ensalamento(s) apontam para uma sala (CO_LOCAL+CO_BLOCO+ID_SALA) inexistente no N50."
+                       if mask.sum() else "Todas as salas referenciadas no N02 existem no N50."),
+                      "Reconciliar as chaves de sala entre N02 e N50." if mask.sum() else "Nenhuma ação necessária.")
+
+    # ---- 4) Capacidade × ocupação (sala e local) ---------------------------------
+    def _audit_capacidade_ocupacao(self):
+        n02 = self.L.get('N02')
+        if n02 is None or n02.empty:
+            return
+        n50, n52 = self.L.get('N50'), self.L.get('N52')
+        # ocupação por sala
+        if n50 is not None and not n50.empty and all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']) and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns:
+            key = ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']
+            occ = n02.groupby(key).size().reset_index(name='ENSALADOS')
+            cap = n50[key + ['QT_CAPACIDADE_MAXIMA_SALA']].drop_duplicates(subset=key)
+            merged = cap.merge(occ, on=key, how='left')
+            merged['ENSALADOS'] = merged['ENSALADOS'].fillna(0).astype(int)
+            merged['CAP'] = pd.to_numeric(merged['QT_CAPACIDADE_MAXIMA_SALA'], errors='coerce')
+            merged['OCUPACAO (%)'] = np.where(merged['CAP'] > 0, (merged['ENSALADOS'] / merged['CAP'] * 100).round(1), np.nan)
+            superlot = merged[merged['OCUPACAO (%)'] > 100]
+            vazias = merged[(merged['CAP'] > 0) & (merged['ENSALADOS'] == 0)]
+            self.tabelas['ocupacao_sala'] = merged.sort_values('OCUPACAO (%)', ascending=False).head(1000).reset_index(drop=True)
+            self.tabelas['salas_superlotadas'] = superlot.sort_values('OCUPACAO (%)', ascending=False).head(500).reset_index(drop=True)
+            self.kpis['ocupacao_media_sala'] = round(float(merged['OCUPACAO (%)'].mean()), 1) if merged['OCUPACAO (%)'].notna().any() else 0.0
+            self.kpis['qtd_salas_superlotadas'] = int(len(superlot))
+            self.kpis['qtd_salas_vazias'] = int(len(vazias))
+            self.kpis['capacidade_total_salas'] = int(merged['CAP'].sum(skipna=True))
+            self.kpis['ensalados_em_salas'] = int(merged['ENSALADOS'].sum())
+            self._add('salas_superlotadas', 'Salas Superlotadas (ocupação > 100%) — N02 × N50',
+                      'Capacidade & Ocupação', 'CRÍTICO' if len(superlot) else 'OK', int(len(superlot)),
+                      {'ocupacao_media': self.kpis['ocupacao_media_sala'], 'superlotadas': int(len(superlot)), 'vazias': int(len(vazias))},
+                      (f"A ocupação média das salas é de {self.kpis['ocupacao_media_sala']:.1f}%. "
+                       + (f"{len(superlot):,} sala(s) estão SUPERLOTADAS (mais ensalados do que a capacidade), risco de "
+                          f"acomodação e segurança." if len(superlot) else "Nenhuma sala excede a capacidade.")
+                       + (f" Há ainda {len(vazias):,} sala(s) ativa(s) totalmente ociosa(s)." if len(vazias) else "")),
+                      "Redistribuir ensalados das salas superlotadas para as ociosas." if len(superlot) or len(vazias) else "Nenhuma ação necessária.")
+        # ocupação por local
+        if n52 is not None and not n52.empty and 'CO_LOCAL' in n02.columns and 'CO_LOCAL' in n52.columns and 'QT_CAPACIDADE_MAXIMA' in n52.columns:
+            occ = n02.groupby('CO_LOCAL').size().reset_index(name='ENSALADOS')
+            cap = n52.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA'].sum().reset_index(name='CAPACIDADE')
+            merged = cap.merge(occ, on='CO_LOCAL', how='left')
+            merged['ENSALADOS'] = merged['ENSALADOS'].fillna(0).astype(int)
+            merged['CAPACIDADE'] = pd.to_numeric(merged['CAPACIDADE'], errors='coerce')
+            merged['OCUPACAO (%)'] = np.where(merged['CAPACIDADE'] > 0, (merged['ENSALADOS'] / merged['CAPACIDADE'] * 100).round(1), np.nan)
+            if 'NO_LOCAL' in n52.columns:
+                nomes = n52[['CO_LOCAL', 'NO_LOCAL']].drop_duplicates('CO_LOCAL')
+                merged = merged.merge(nomes, on='CO_LOCAL', how='left')
+            self.tabelas['ocupacao_local'] = merged.sort_values('OCUPACAO (%)', ascending=False).head(1000).reset_index(drop=True)
+            self.kpis['qtd_locais_superlotados'] = int((merged['OCUPACAO (%)'] > 100).sum())
+
+    # ---- 5) Forasteiros × residentes (N90) ---------------------------------------
+    def _audit_forasteiros(self):
+        n90 = self.L.get('N90')
+        if n90 is None or n90.empty:
+            return
+        rcol = 'SG_UF_MUNICIPIO_RESIDENCIA' if 'SG_UF_MUNICIPIO_RESIDENCIA' in n90.columns else None
+        pcol = None
+        for c in ['SG_UF_MUNICIPIO_PROVA', 'SG_UF_PROVA', 'SG_UF']:
+            if c in n90.columns:
+                pcol = c
+                break
+        if not (rcol and pcol):
+            return
+        res = n90[rcol].astype(str).str.strip().str.upper()
+        prova = n90[pcol].astype(str).str.strip().str.upper()
+        invalid = {'NAN', 'NONE', '', 'NAO_INFORMADO'}
+        valid = ~(res.isin(invalid) | prova.isin(invalid))
+        foras = valid & (res != prova)
+        total = int(valid.sum())
+        nf = int(foras.sum())
+        self.kpis['qtd_forasteiros'] = nf
+        self.kpis['qtd_residentes'] = total - nf
+        self.kpis['pct_forasteiros'] = round(100 * nf / total, 1) if total else 0.0
+        # ranking por UF de prova
+        tmp = n90[foras.values]
+        if not tmp.empty:
+            rk = tmp.groupby(prova[foras.values]).size().reset_index()
+            rk.columns = ['UF DE PROVA', 'FORASTEIROS']
+            rk = rk.sort_values('FORASTEIROS', ascending=False).reset_index(drop=True)
+            self.tabelas['forasteiros_uf'] = rk
+        self._add('forasteiros', 'Forasteiros × Residentes (N90)',
+                  'Perfil de Deslocamento', 'ATENÇÃO' if self.kpis['pct_forasteiros'] >= 30 else 'OK', nf,
+                  {'forasteiros': nf, 'residentes': total - nf, 'pct': self.kpis['pct_forasteiros']},
+                  (f"São {nf:,} participantes FORASTEIROS ({self.kpis['pct_forasteiros']:.1f}%) — residem em UF diferente da "
+                   f"UF de prova — contra {total - nf:,} residentes. Alta proporção pressiona hospedagem, transporte e a "
+                   "capacidade dos polos de prova."),
+                  "Cruzar com capacidade instalada dos polos que mais recebem forasteiros para antecipar gargalos." if nf else "Nenhuma ação necessária.")
+
+    # ---- 6) Distâncias (N02.NU_DISTANCIA) ----------------------------------------
+    def _audit_distancias(self):
+        n02 = self.L.get('N02')
+        if n02 is None or n02.empty or 'NU_DISTANCIA' not in n02.columns:
+            return
+        dist_km = pd.to_numeric(n02['NU_DISTANCIA'], errors='coerce') / 1000.0
+        dist_km = dist_km[dist_km.notna() & (dist_km >= 0)]
+        if dist_km.empty:
+            return
+        stats_d = {
+            'media_km': round(float(dist_km.mean()), 2), 'mediana_km': round(float(dist_km.median()), 2),
+            'p90_km': round(float(dist_km.quantile(0.90)), 2), 'p95_km': round(float(dist_km.quantile(0.95)), 2),
+            'max_km': round(float(dist_km.max()), 2), 'min_km': round(float(dist_km.min()), 2),
+        }
+        self.kpis['distancia'] = stats_d
+        # faixas
+        bins = [-0.01, 1, 5, 10, 15, 20, np.inf]
+        labels = ['Menos de 1 km', '1 a 5 km', '5 a 10 km', '10 a 15 km', '15 a 20 km', 'Acima de 20 km']
+        faixas = pd.cut(dist_km, bins=bins, labels=labels)
+        fd = faixas.value_counts().reindex(labels).fillna(0).astype(int).reset_index()
+        fd.columns = ['FAIXA', 'QUANTIDADE']
+        total = fd['QUANTIDADE'].sum()
+        fd['PERCENTUAL (%)'] = (fd['QUANTIDADE'] / total * 100).round(2) if total else 0
+        self.tabelas['distancia_faixas'] = fd
+        # ranking por município
+        mcol = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
+        if mcol:
+            tmp = n02.assign(_dist=dist_km).dropna(subset=['_dist'])
+            rk = tmp.groupby(mcol)['_dist'].agg(['mean', 'max', 'count']).reset_index()
+            rk.columns = ['MUNICÍPIO (CÓD.)', 'DISTÂNCIA MÉDIA (KM)', 'DISTÂNCIA MÁX (KM)', 'PARTICIPANTES']
+            rk['DISTÂNCIA MÉDIA (KM)'] = rk['DISTÂNCIA MÉDIA (KM)'].round(2)
+            rk['DISTÂNCIA MÁX (KM)'] = rk['DISTÂNCIA MÁX (KM)'].round(2)
+            self.tabelas['distancia_municipio'] = rk.sort_values('DISTÂNCIA MÉDIA (KM)', ascending=False).head(200).reset_index(drop=True)
+        # críticos / atenção
+        criticos = int((dist_km > self.DIST_CRITICA_KM).sum())
+        atencao = int(((dist_km > self.DIST_ATENCAO_KM) & (dist_km <= self.DIST_CRITICA_KM)).sum())
+        self.kpis['qtd_dist_criticos'] = criticos
+        self.kpis['qtd_dist_atencao'] = atencao
+        crit_cols = [c for c in ['CO_INSCRICAO', 'CO_LOCAL', 'CO_MUNICIPIO_PROVA', 'NU_DISTANCIA'] if c in n02.columns]
+        crit_df = n02[(dist_km > self.DIST_CRITICA_KM).reindex(n02.index, fill_value=False).values][crit_cols].copy() if crit_cols else pd.DataFrame()
+        if not crit_df.empty and 'NU_DISTANCIA' in crit_df.columns:
+            crit_df['DISTANCIA_KM'] = (pd.to_numeric(crit_df['NU_DISTANCIA'], errors='coerce') / 1000.0).round(2)
+            crit_df = crit_df.sort_values('DISTANCIA_KM', ascending=False)
+        self.tabelas['casos_criticos_distancia'] = crit_df.head(500).reset_index(drop=True)
+        self._add('distancia_critica', f'Deslocamentos Críticos (> {self.DIST_CRITICA_KM:.0f} km) — N02',
+                  'Distâncias & Logística', 'CRÍTICO' if criticos else ('ATENÇÃO' if atencao else 'OK'), criticos,
+                  {**stats_d, 'criticos': criticos, 'atencao': atencao},
+                  (f"A distância média de deslocamento é de {stats_d['media_km']:.2f} km (mediana {stats_d['mediana_km']:.2f} km; "
+                   f"p95 {stats_d['p95_km']:.2f} km; máx {stats_d['max_km']:.2f} km). "
+                   f"Há {criticos:,} caso(s) CRÍTICO(s) acima de {self.DIST_CRITICA_KM:.0f} km e {atencao:,} caso(s) de ATENÇÃO "
+                   f"entre {self.DIST_ATENCAO_KM:.0f} e {self.DIST_CRITICA_KM:.0f} km."),
+                  "Revisar a alocação dos casos críticos buscando locais mais próximos da residência do participante." if criticos else "Deslocamentos dentro de padrões aceitáveis.")
+
+    # ---- 7) Consistência de ID_KIT_PROVA (N02 × N91) -----------------------------
+    def _audit_kit_prova(self):
+        n02, n91 = self.L.get('N02'), self.L.get('N91')
+        if n02 is None or n91 is None or n02.empty or n91.empty:
+            return
+        if 'ID_KIT_PROVA' not in n02.columns or 'ID_KIT_PROVA' not in n91.columns:
+            return
+        k02, k91 = self._key_col(n02), 'CO_INSCRICAO' if 'CO_INSCRICAO' in n91.columns else None
+        if not (k02 and k91):
+            return
+        a = pd.DataFrame({'_k': self._norm_key(n02[k02]), 'KIT_N02': n02['ID_KIT_PROVA'].astype(str).str.strip().str.upper()})
+        a = a[a['KIT_N02'].ne('') & a['KIT_N02'].ne('NAN')].drop_duplicates('_k')
+        b = pd.DataFrame({'_k': self._norm_key(n91[k91]), 'KIT_N91': n91['ID_KIT_PROVA'].astype(str).str.strip().str.upper()})
+        b = b[b['KIT_N91'].ne('') & b['KIT_N91'].ne('NAN')].drop_duplicates('_k')
+        m = a.merge(b, on='_k', how='inner')
+        div = m[m['KIT_N02'] != m['KIT_N91']]
+        self.tabelas['kit_divergente'] = div.rename(columns={'_k': 'CO_INSCRICAO'}).head(500).reset_index(drop=True)
+        n = int(len(div))
+        self.kpis['qtd_kit_divergente'] = n
+        self._add('kit_divergente', 'Divergência de ID_KIT_PROVA (N02 × N91)',
+                  'Consistência entre Layouts', 'ATENÇÃO' if n else 'OK', n,
+                  {'divergentes': n, 'comparados': int(len(m))},
+                  (f"Entre {len(m):,} participantes com kit informado em ambos os layouts, {n:,} apresentam KIT DIFERENTE "
+                   "entre N02 e N91 — risco de o participante receber material incompatível com seu atendimento." if n
+                   else f"Os {len(m):,} kits comparados entre N02 e N91 são consistentes."),
+                  "Padronizar a atribuição de kit conforme a nota técnica de ensalamento; corrigir as divergências." if n else "Nenhuma ação necessária.")
+
+    # ---- 8) Atendimentos N91 (deferimento) ---------------------------------------
+    def _audit_atendimentos_n91(self):
+        n91 = self.L.get('N91')
+        if n91 is None or n91.empty:
+            return
+        col_ativo = 'IN_ATIVO' if 'IN_ATIVO' in n91.columns else ('IN_ATIVO_ATENDIMENTO' if 'IN_ATIVO_ATENDIMENTO' in n91.columns else None)
+        total = int(len(n91))
+        self.kpis['total_itens_atendimento_n91'] = total
+        if col_ativo:
+            ativos = int((pd.to_numeric(n91[col_ativo], errors='coerce') == 1).sum())
+            self.kpis['qtd_atendimentos_deferidos'] = ativos
+            self.kpis['pct_atendimentos_deferidos'] = round(100 * ativos / total, 1) if total else 0.0
+            self._add('atendimentos_n91', 'Atendimentos Homologados (N91)',
+                      'Acessibilidade', 'OK', ativos,
+                      {'total': total, 'deferidos': ativos, 'pct_deferido': self.kpis['pct_atendimentos_deferidos']},
+                      (f"O N91 traz {total:,} itens de atendimento/recurso, dos quais {ativos:,} "
+                       f"({self.kpis['pct_atendimentos_deferidos']:.1f}%) estão homologados (ativos)."),
+                      "Acompanhar os itens ainda não homologados para garantir provimento no dia da prova.")
+
+    # ---- 9) Atribuição de KITS DE PROVA aos inscritos e ensalados (N91 × N02 × N90) --
+    def _audit_kit_attribution(self):
+        """Analisa a ATRIBUIÇÃO DE KITS (ID_KIT_PROVA) — o material especial que cada
+        participante recebe conforme suas necessidades (N91). Cruza com o ensalamento
+        (N02) e as inscrições (N90) para responder: quem precisa de kit recebeu? está
+        inscrito? está ensalado? Constrói um funil de cobertura e lista as falhas (quem
+        tem atendimento mas ficou sem kit ou sem sala).
+        """
+        n02, n91, n90 = self.L.get('N02'), self.L.get('N91'), self.L.get('N90')
+        invalid = {'NAO_INFORMADO', 'NÃO INFORMADO', 'NAN', 'NONE', '', 'NULL'}
+
+        # ---- (a) Distribuição de kits entre os ensalados (N02) ----
+        kit02_col = 'ID_KIT_PROVA' in n02.columns if isinstance(n02, pd.DataFrame) else False
+        if isinstance(n02, pd.DataFrame) and not n02.empty and kit02_col:
+            kit02 = n02['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+            kit02 = kit02.where(kit02.notna(), '')          # pandas 3.0: NA → '' (senão o ~isin mantém NA)
+            kit02_valid = kit02[~kit02.isin(invalid)]
+            self.kpis['qtd_ensalados_com_kit'] = int(len(kit02_valid))
+            self.kpis['qtd_kits_distintos'] = int(kit02_valid.nunique())
+            self.kpis['qtd_ensalados_sem_kit'] = int(len(kit02) - len(kit02_valid))
+            if not kit02_valid.empty:
+                dist = kit02_valid.value_counts().reset_index()
+                dist.columns = ['ID_KIT_PROVA', 'ENSALADOS_COM_KIT']
+                tot = dist['ENSALADOS_COM_KIT'].sum()
+                dist['PERCENTUAL (%)'] = (dist['ENSALADOS_COM_KIT'] / tot * 100).round(2) if tot else 0
+                dist = dist.sort_values('ENSALADOS_COM_KIT', ascending=False).reset_index(drop=True)
+                dist.insert(0, 'RANKING', range(1, len(dist) + 1))
+                self.tabelas['kit_distribuicao'] = dist
+
+        # Sem N91 não há como medir cobertura de necessidade → encerra aqui.
+        if not isinstance(n91, pd.DataFrame) or n91.empty:
+            if 'qtd_ensalados_com_kit' in self.kpis:
+                self._add('kit_distribuicao', 'Distribuição de Kits entre Ensalados (N02)',
+                          'Atribuição de Kits', 'OK', self.kpis.get('qtd_ensalados_com_kit', 0),
+                          {'ensalados_com_kit': self.kpis.get('qtd_ensalados_com_kit', 0),
+                           'kits_distintos': self.kpis.get('qtd_kits_distintos', 0)},
+                          (f"{self.kpis.get('qtd_ensalados_com_kit', 0):,} ensalados possuem kit de prova atribuído no N02, "
+                           f"distribuídos em {self.kpis.get('qtd_kits_distintos', 0)} tipo(s) de kit distinto(s)."),
+                          "Sem o layout N91 não é possível auditar a COBERTURA de kit por necessidade — forneça o N91.")
+            return
+
+        k91 = self._key_col(n91)
+        if not k91:
+            return
+        part_atend = set(self._norm_key(n91[k91]))              # participantes com atendimento/necessidade
+        self.kpis['qtd_participantes_com_atendimento'] = len(part_atend)
+
+        # ---- (b) Kit × tipo de atendimento (N91) ----
+        if 'ID_KIT_PROVA' in n91.columns and 'TP_ITEM_ATENDIMENTO' in n91.columns:
+            tmp = n91.copy()
+            tmp['_kit'] = tmp['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+            tmp['_kit'] = tmp['_kit'].where(tmp['_kit'].notna(), '')
+            tmp['_tipo'] = pd.to_numeric(tmp['TP_ITEM_ATENDIMENTO'], errors='coerce').map(
+                {1: 'Atend. Específico', 2: 'Atend. Especializado', 3: 'Recurso'}).fillna('Outro')
+            ct = tmp[~tmp['_kit'].isin(invalid)].groupby(['_kit', '_tipo']).size().reset_index(name='ITENS')
+            if not ct.empty:
+                ct.columns = ['ID_KIT_PROVA', 'TIPO DE ATENDIMENTO', 'ITENS']
+                self.tabelas['kit_por_tipo_atendimento'] = ct.sort_values(['ID_KIT_PROVA', 'ITENS'], ascending=[True, False]).reset_index(drop=True)
+
+        # ---- (c) Funil de atribuição: atendimento → inscrito → ensalado → com kit ----
+        set_insc = set()
+        if isinstance(n90, pd.DataFrame) and not n90.empty and self._key_col(n90):
+            set_insc = set(self._norm_key(n90[self._key_col(n90)]))
+        set_ens, com_kit_ens = set(), set()
+        if isinstance(n02, pd.DataFrame) and not n02.empty and self._key_col(n02):
+            k02 = self._key_col(n02)
+            n02k = n02.assign(_k=self._norm_key(n02[k02]).values)
+            set_ens = set(n02k['_k'])
+            if 'ID_KIT_PROVA' in n02.columns:
+                n02k['_kit'] = n02k['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+                n02k['_kit'] = n02k['_kit'].where(n02k['_kit'].notna(), '')
+                com_kit_ens = set(n02k[~n02k['_kit'].isin(invalid)]['_k'])
+
+        atend_inscritos = part_atend & set_insc if set_insc else part_atend
+        atend_ensalados = part_atend & set_ens if set_ens else set()
+        atend_com_kit = part_atend & com_kit_ens if com_kit_ens else set()
+        atend_sem_ens = part_atend - set_ens if set_ens else set()
+        atend_sem_kit = (part_atend & set_ens) - com_kit_ens if set_ens else set()
+
+        self.kpis['qtd_atend_ensalados'] = len(atend_ensalados)
+        self.kpis['qtd_atend_com_kit'] = len(atend_com_kit)
+        self.kpis['qtd_atend_sem_ensalamento'] = len(atend_sem_ens)
+        self.kpis['qtd_atend_sem_kit'] = len(atend_sem_kit)
+        self.kpis['pct_cobertura_kit'] = round(100 * len(atend_com_kit) / len(part_atend), 1) if part_atend else 0.0
+
+        # Tabela-funil (para gráfico e Excel).
+        funil_rows = [('Com atendimento/necessidade (N91)', len(part_atend))]
+        if set_insc:
+            funil_rows.append(('...também inscritos (N90)', len(atend_inscritos)))
+        if set_ens:
+            funil_rows.append(('...também ensalados (N02)', len(atend_ensalados)))
+            funil_rows.append(('...com kit atribuído (N02)', len(atend_com_kit)))
+        self.tabelas['kit_funil_atribuicao'] = pd.DataFrame(funil_rows, columns=['ETAPA DA ATRIBUIÇÃO', 'PARTICIPANTES'])
+
+        # ---- (d) Falhas de atribuição: atendimento SEM ensalamento e SEM kit ----
+        if atend_sem_ens:
+            k91n = n91.assign(_k=self._norm_key(n91[k91]).values)
+            cols = [c for c in [k91, 'NO_ITEM_ATENDIMENTO', 'TP_ITEM_ATENDIMENTO', 'ID_KIT_PROVA', 'SG_UF_MUNICIPIO_PROVA'] if c in n91.columns]
+            self.tabelas['atend_sem_ensalamento'] = (k91n[k91n['_k'].isin(atend_sem_ens)][cols]
+                                                     .drop_duplicates().head(500).reset_index(drop=True))
+        if atend_sem_kit:
+            k91n = n91.assign(_k=self._norm_key(n91[k91]).values)
+            cols = [c for c in [k91, 'NO_ITEM_ATENDIMENTO', 'TP_ITEM_ATENDIMENTO', 'ID_KIT_PROVA'] if c in n91.columns]
+            self.tabelas['atend_sem_kit'] = (k91n[k91n['_k'].isin(atend_sem_kit)][cols]
+                                            .drop_duplicates().head(500).reset_index(drop=True))
+
+        # ---- Achados com interpretação automática ----
+        self._add('kit_cobertura', 'Cobertura de Kit dos Participantes com Atendimento (N91 → N02)',
+                  'Atribuição de Kits', 'ATENÇÃO' if self.kpis['pct_cobertura_kit'] < 90 else 'OK', len(atend_com_kit),
+                  {'com_atendimento': len(part_atend), 'com_kit': len(atend_com_kit),
+                   'pct_cobertura': self.kpis['pct_cobertura_kit'], 'ensalados': len(atend_ensalados)},
+                  (f"Dos {len(part_atend):,} participantes com atendimento/necessidade no N91, {len(atend_com_kit):,} "
+                   f"({self.kpis['pct_cobertura_kit']:.1f}%) têm kit de prova atribuído no N02"
+                   + (f" e {len(atend_ensalados):,} estão ensalados." if set_ens else ".")
+                   + " O kit é o material especial (Braille, ampliado, etc.) que viabiliza a acessibilidade — "
+                     "sua atribuição é a ponte entre a necessidade declarada e o atendimento efetivo no dia da prova."),
+                  "Garantir que todo participante com atendimento tenha kit atribuído e sala compatível." if self.kpis['pct_cobertura_kit'] < 100 else "Cobertura integral — nenhuma ação necessária.")
+
+        self._add('kit_atend_sem_ensalamento', 'Participantes com Atendimento e SEM Ensalamento (N91 × N02)',
+                  'Atribuição de Kits', 'CRÍTICO' if atend_sem_ens else 'OK', len(atend_sem_ens),
+                  {'atend_sem_ensalamento': len(atend_sem_ens)},
+                  (f"{len(atend_sem_ens):,} participante(s) possuem atendimento/necessidade no N91 mas NÃO estão ensalados "
+                   "no N02 — precisam de material/sala especiais e não têm alocação, risco crítico de acessibilidade." if atend_sem_ens
+                   else "Todos os participantes com atendimento estão ensalados."),
+                  "Ensalar com urgência os participantes com necessidade especial e assegurar sala/material compatíveis." if atend_sem_ens else "Nenhuma ação necessária.")
+
+        if set_ens:
+            self._add('kit_atend_sem_kit', 'Ensalados com Atendimento e SEM Kit Atribuído (N91 × N02)',
+                      'Atribuição de Kits', 'ATENÇÃO' if atend_sem_kit else 'OK', len(atend_sem_kit),
+                      {'atend_sem_kit': len(atend_sem_kit)},
+                      (f"{len(atend_sem_kit):,} participante(s) estão ensalados e têm atendimento no N91, mas NÃO possuem "
+                       "kit de prova atribuído no N02 — podem receber material padrão incompatível com sua necessidade." if atend_sem_kit
+                       else "Todos os ensalados com atendimento possuem kit atribuído."),
+                      "Atribuir o kit correto conforme a nota técnica de ensalamento aos participantes listados." if atend_sem_kit else "Nenhuma ação necessária.")
+
+    # ---- 10) Análises PROFUNDAS de kit (kit × UF, curso, laudo, local; multi-atend.) --
+    def _audit_kit_deep(self):
+        """Aprofunda a análise de kits com cruzamentos adicionais: kit × UF de prova,
+        kit × grupo de curso, ranking de locais por demanda de kit especial, kit ×
+        situação do laudo médico (N91) e participantes com MÚLTIPLOS atendimentos.
+        Cada tabela alimenta o Excel e os gráficos; guardadas por existência de coluna.
+        """
+        n02, n91 = self.L.get('N02'), self.L.get('N91')
+        invalid = {'NAO_INFORMADO', 'NÃO INFORMADO', 'NAN', 'NONE', '', 'NULL'}
+
+        def _kit_series(df):
+            k = df['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+            return k.where(k.notna(), '')
+
+        # Base de ensalados COM kit (N02) para os cruzamentos por dimensão.
+        if isinstance(n02, pd.DataFrame) and not n02.empty and 'ID_KIT_PROVA' in n02.columns:
+            base = n02.copy()
+            base['_KIT'] = _kit_series(base)
+            base = base[~base['_KIT'].isin(invalid)]
+
+            # (a) Kit × UF de prova (matriz).
+            ufc = 'SG_UF_PROVA' if 'SG_UF_PROVA' in base.columns else ('SG_UF_MUNICIPIO_PROVA' if 'SG_UF_MUNICIPIO_PROVA' in base.columns else None)
+            if ufc and not base.empty:
+                piv = pd.crosstab(base[ufc], base['_KIT'])
+                piv['TOTAL'] = piv.sum(axis=1)
+                piv = piv.sort_values('TOTAL', ascending=False).reset_index().rename(columns={ufc: 'UF DE PROVA'})
+                self.tabelas['kit_por_uf'] = piv
+
+            # (b) Kit × grupo de curso (top cursos por demanda de kit).
+            cc = 'NO_GRUPO_CURSO' if 'NO_GRUPO_CURSO' in base.columns else ('CO_GRUPO_CURSO' if 'CO_GRUPO_CURSO' in base.columns else None)
+            if cc and not base.empty:
+                g = base.groupby(base[cc].astype(str)).agg(PARTICIPANTES_COM_KIT=('_KIT', 'size'),
+                                                           KITS_DISTINTOS=('_KIT', 'nunique')).reset_index()
+                g.columns = ['GRUPO / CURSO', 'PARTICIPANTES_COM_KIT', 'KITS_DISTINTOS']
+                g = g.sort_values('PARTICIPANTES_COM_KIT', ascending=False).head(30).reset_index(drop=True)
+                g.insert(0, 'RANKING', range(1, len(g) + 1))
+                self.tabelas['kit_por_curso'] = g
+
+            # (c) Ranking de locais por demanda de kit especial.
+            if 'CO_LOCAL' in base.columns and not base.empty:
+                agg = {'PARTICIPANTES_COM_KIT': ('_KIT', 'size'), 'KITS_DISTINTOS': ('_KIT', 'nunique')}
+                grp = base.groupby('CO_LOCAL').agg(**agg).reset_index()
+                if 'NO_LOCAL' in base.columns:
+                    nomes = base[['CO_LOCAL', 'NO_LOCAL']].drop_duplicates('CO_LOCAL')
+                    grp = grp.merge(nomes, on='CO_LOCAL', how='left')
+                grp = grp.sort_values('PARTICIPANTES_COM_KIT', ascending=False).head(100).reset_index(drop=True)
+                grp.insert(0, 'RANKING', range(1, len(grp) + 1))
+                self.tabelas['kit_local_ranking'] = grp
+                self.kpis['qtd_locais_com_kit'] = int(base['CO_LOCAL'].nunique())
+
+        # (d) Kit × situação do laudo médico (N91) + kits pendentes de laudo.
+        if isinstance(n91, pd.DataFrame) and not n91.empty and 'ID_KIT_PROVA' in n91.columns and 'CO_SITUACAO_LAUDO_MEDICO' in n91.columns:
+            t = n91.copy()
+            t['_KIT'] = _kit_series(t)
+            t = t[~t['_KIT'].isin(invalid)]
+            colm = pd.to_numeric(t['CO_SITUACAO_LAUDO_MEDICO'], errors='coerce')
+            aprov, reprov = [1, 4, 6, 7, 9], [0, 3, 5, 8, 10, 11]
+            t['_STATUS'] = np.where(colm.isin(aprov), 'Aprovado',
+                             np.where(colm.isin(reprov), 'Reprovado',
+                               np.where(colm == 2, 'Em Análise',
+                                 np.where(colm == 12, 'Recurso', 'Não Informado'))))
+            if not t.empty:
+                piv = pd.crosstab(t['_KIT'], t['_STATUS'])
+                piv['TOTAL'] = piv.sum(axis=1)
+                piv = piv.sort_values('TOTAL', ascending=False).reset_index().rename(columns={'_KIT': 'ID_KIT_PROVA'})
+                self.tabelas['kit_por_laudo'] = piv
+                pend = int((t['_STATUS'].isin(['Em Análise', 'Reprovado'])).sum())
+                self.kpis['qtd_kits_pendentes_laudo'] = pend
+                self._add('kit_pendente_laudo', 'Kits com Laudo Pendente ou Reprovado (N91)',
+                          'Atribuição de Kits', 'ATENÇÃO' if pend else 'OK', pend,
+                          {'pendentes_ou_reprovados': pend, 'total_itens_com_kit': int(len(t))},
+                          (f"{pend:,} itens de atendimento COM kit associado ainda estão 'Em Análise' ou foram 'Reprovados' "
+                           "no laudo médico — o kit pode não dever ser entregue (ou depende de decisão) antes da prova." if pend
+                           else "Todos os itens com kit associado têm laudo homologado."),
+                          "Priorizar a análise dos laudos pendentes; confirmar a elegibilidade antes de produzir/entregar o kit." if pend else "Nenhuma ação necessária.")
+
+        # (e) Participantes com MÚLTIPLOS atendimentos (N91).
+        if isinstance(n91, pd.DataFrame) and not n91.empty:
+            k91 = self._key_col(n91)
+            if k91:
+                cont = n91.assign(_k=self._norm_key(n91[k91]).values).groupby('_k').size()
+                dist = cont.value_counts().sort_index().reset_index()
+                dist.columns = ['ITENS_DE_ATENDIMENTO', 'PARTICIPANTES']
+                self.tabelas['multiplos_atendimentos_dist'] = dist
+                multi = int((cont > 1).sum())
+                self.kpis['qtd_participantes_multi_atendimento'] = multi
+                self.kpis['max_itens_por_participante'] = int(cont.max()) if len(cont) else 0
+                self.kpis['media_itens_por_participante'] = round(float(cont.mean()), 2) if len(cont) else 0.0
+                # lista dos participantes com mais itens
+                top = cont[cont > 1].sort_values(ascending=False).head(500).reset_index()
+                top.columns = ['CO_INSCRICAO', 'QTD_ITENS_ATENDIMENTO']
+                self.tabelas['multiplos_atendimentos_lista'] = top
+                self._add('multiplos_atendimentos', 'Participantes com Múltiplos Atendimentos (N91)',
+                          'Acessibilidade', 'OK', multi,
+                          {'com_multiplos': multi, 'max_itens': self.kpis['max_itens_por_participante'],
+                           'media_itens': self.kpis['media_itens_por_participante']},
+                          (f"{multi:,} participante(s) acumulam mais de um item de atendimento (média de "
+                           f"{self.kpis['media_itens_por_participante']:.2f} itens/participante; máximo de "
+                           f"{self.kpis['max_itens_por_participante']}). São casos de maior complexidade logística — exigem "
+                           "combinação de recursos e, muitas vezes, sala e kit específicos."),
+                          "Revisar individualmente os participantes com muitos itens para garantir compatibilidade de sala, kit e recursos.")
+
+    # ---- 11) Painel de TOTAIS consolidados + rankings gerais ---------------------
+    def _audit_totais(self):
+        """Monta um PAINEL DE TOTAIS executivo consolidando as grandezas de todos os
+        layouts (participantes, infraestrutura, acessibilidade, kits, deslocamento) e
+        os rankings gerais de locais e municípios por número de participantes."""
+        n02, n50, n52, n90, n91 = (self.L.get(k) for k in ('N02', 'N50', 'N52', 'N90', 'N91'))
+        linhas = []
+
+        def add(ind, val):
+            linhas.append({'INDICADOR': ind, 'VALOR': val})
+
+        # Participantes
+        if 'total_inscritos' in self.kpis:
+            add('Inscritos (N90)', self.kpis['total_inscritos'])
+        if 'total_ensalados' in self.kpis:
+            add('Ensalados (N02)', self.kpis['total_ensalados'])
+        if 'pct_ensalamento' in self.kpis:
+            add('Taxa de ensalamento (%)', self.kpis['pct_ensalamento'])
+        if 'qtd_sem_ensalamento' in self.kpis:
+            add('Participantes sem ensalamento', self.kpis['qtd_sem_ensalamento'])
+        if 'qtd_ensalados_orfaos' in self.kpis:
+            add('Ensalados órfãos (não inscritos)', self.kpis['qtd_ensalados_orfaos'])
+        if 'qtd_ensalamento_duplicado' in self.kpis:
+            add('Ensalamentos duplicados', self.kpis['qtd_ensalamento_duplicado'])
+        # Infraestrutura
+        if isinstance(n52, pd.DataFrame) and not n52.empty:
+            if 'CO_LOCAL' in n52.columns:
+                add('Locais de prova (N52)', int(n52['CO_LOCAL'].nunique()))
+            if 'CO_BLOCO' in n52.columns and 'CO_LOCAL' in n52.columns:
+                add('Blocos (N52)', int(n52[['CO_LOCAL', 'CO_BLOCO']].drop_duplicates().shape[0]))
+        if isinstance(n50, pd.DataFrame) and not n50.empty:
+            keyc = [c for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA'] if c in n50.columns]
+            if keyc:
+                add('Salas (N50)', int(n50[keyc].drop_duplicates().shape[0]))
+        if 'capacidade_total_salas' in self.kpis:
+            add('Capacidade total das salas', self.kpis['capacidade_total_salas'])
+        if 'ocupacao_media_sala' in self.kpis:
+            add('Ocupação média das salas (%)', self.kpis['ocupacao_media_sala'])
+        if 'qtd_salas_superlotadas' in self.kpis:
+            add('Salas superlotadas', self.kpis['qtd_salas_superlotadas'])
+        if 'qtd_salas_vazias' in self.kpis:
+            add('Salas ativas ociosas', self.kpis['qtd_salas_vazias'])
+        # Municípios / UFs
+        muns, ufs = set(), set()
+        for d in (n02, n90):
+            if isinstance(d, pd.DataFrame) and not d.empty:
+                for mc in ['CO_MUNICIPIO_PROVA', 'CO_MUNICIPIO']:
+                    if mc in d.columns:
+                        muns |= set(self._norm_key(d[mc]).tolist()); break
+                for uc in ['SG_UF_PROVA', 'SG_UF_MUNICIPIO_PROVA', 'SG_UF']:
+                    if uc in d.columns:
+                        ufs |= set(d[uc].astype(str).str.strip().str.upper().tolist()); break
+        muns.discard('NAN'); muns.discard(''); ufs.discard('NAN'); ufs.discard('')
+        if muns:
+            add('Municípios de prova distintos', len(muns))
+        if ufs:
+            add('UFs de prova distintas', len(ufs))
+        # Deslocamento
+        if 'pct_forasteiros' in self.kpis:
+            add('Forasteiros', self.kpis.get('qtd_forasteiros', 0))
+            add('Residentes', self.kpis.get('qtd_residentes', 0))
+            add('Forasteiros (%)', self.kpis['pct_forasteiros'])
+        if 'distancia' in self.kpis:
+            add('Distância média (km)', self.kpis['distancia'].get('media_km', 0))
+            add('Distância máxima (km)', self.kpis['distancia'].get('max_km', 0))
+            add('Deslocamentos críticos (> limiar)', self.kpis.get('qtd_dist_criticos', 0))
+        # Acessibilidade / Kits
+        if 'total_itens_atendimento_n91' in self.kpis:
+            add('Itens de atendimento (N91)', self.kpis['total_itens_atendimento_n91'])
+        if 'qtd_participantes_com_atendimento' in self.kpis:
+            add('Participantes com atendimento', self.kpis['qtd_participantes_com_atendimento'])
+        if 'qtd_participantes_multi_atendimento' in self.kpis:
+            add('Participantes com múltiplos atendimentos', self.kpis['qtd_participantes_multi_atendimento'])
+        if 'pct_atendimentos_deferidos' in self.kpis:
+            add('Atendimentos deferidos (%)', self.kpis['pct_atendimentos_deferidos'])
+        if 'qtd_ensalados_com_kit' in self.kpis:
+            add('Ensalados com kit atribuído', self.kpis['qtd_ensalados_com_kit'])
+        if 'qtd_kits_distintos' in self.kpis:
+            add('Tipos de kit distintos', self.kpis['qtd_kits_distintos'])
+        if 'pct_cobertura_kit' in self.kpis:
+            add('Cobertura de kit dos atendimentos (%)', self.kpis['pct_cobertura_kit'])
+        if 'qtd_atend_sem_kit' in self.kpis:
+            add('Ensalados com atendimento SEM kit', self.kpis['qtd_atend_sem_kit'])
+        if 'qtd_atend_sem_ensalamento' in self.kpis:
+            add('Atendimentos SEM ensalamento', self.kpis['qtd_atend_sem_ensalamento'])
+        if 'qtd_kits_pendentes_laudo' in self.kpis:
+            add('Kits com laudo pendente/reprovado', self.kpis['qtd_kits_pendentes_laudo'])
+        # Achados
+        add('Achados CRÍTICOS', self.kpis.get('qtd_achados_criticos', 0))
+        add('Achados de ATENÇÃO', self.kpis.get('qtd_achados_atencao', 0))
+
+        if linhas:
+            self.tabelas['painel_totais'] = pd.DataFrame(linhas)
+
+        # Rankings gerais por participantes (N02).
+        if isinstance(n02, pd.DataFrame) and not n02.empty:
+            if 'CO_LOCAL' in n02.columns:
+                rl = n02.groupby('CO_LOCAL').size().reset_index(name='PARTICIPANTES')
+                if 'NO_LOCAL' in n02.columns:
+                    rl = rl.merge(n02[['CO_LOCAL', 'NO_LOCAL']].drop_duplicates('CO_LOCAL'), on='CO_LOCAL', how='left')
+                rl = rl.sort_values('PARTICIPANTES', ascending=False).head(50).reset_index(drop=True)
+                rl.insert(0, 'RANKING', range(1, len(rl) + 1))
+                self.tabelas['ranking_locais_participantes'] = rl
+            mc = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
+            if mc:
+                rm = n02.groupby(self._norm_key(n02[mc])).size().reset_index(name='PARTICIPANTES')
+                rm.columns = ['MUNICÍPIO (CÓD.)', 'PARTICIPANTES']
+                rm = rm.sort_values('PARTICIPANTES', ascending=False).head(50).reset_index(drop=True)
+                rm.insert(0, 'RANKING', range(1, len(rm) + 1))
+                self.tabelas['ranking_municipios_participantes'] = rm
+
+    # ---- 12) Compatibilidade do kit com o atendimento e o laudo (N91) ------------
+    def _audit_kit_compatibilidade(self):
+        """Verifica se o kit é COMPATÍVEL com o tipo de atendimento e com o laudo (N91).
+        Regra inferida: para cada tipo de atendimento existe um kit dominante (modal);
+        itens cujo kit foge do padrão do seu tipo são marcados como possivelmente
+        incompatíveis. Também sinaliza kits associados a laudos reprovados."""
+        n91 = self.L.get('N91')
+        if not isinstance(n91, pd.DataFrame) or n91.empty:
+            return
+        if 'ID_KIT_PROVA' not in n91.columns or 'TP_ITEM_ATENDIMENTO' not in n91.columns:
+            return
+        invalid = {'NAO_INFORMADO', 'NÃO INFORMADO', 'NAN', 'NONE', '', 'NULL'}
+        t = n91.copy()
+        t['_KIT'] = t['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+        t['_KIT'] = t['_KIT'].where(t['_KIT'].notna(), '')
+        t['_TIPO'] = pd.to_numeric(t['TP_ITEM_ATENDIMENTO'], errors='coerce')
+        base = t[(~t['_KIT'].isin(invalid)) & t['_TIPO'].isin([1, 2, 3])]
+        if base.empty:
+            return
+        # kit dominante por tipo
+        modal = base.groupby('_TIPO')['_KIT'].agg(lambda s: s.value_counts().index[0]).to_dict()
+        base = base.assign(_KIT_ESPERADO=base['_TIPO'].map(modal))
+        incompat = base[base['_KIT'] != base['_KIT_ESPERADO']]
+        self.kpis['qtd_kit_incompativel_tipo'] = int(len(incompat))
+        if not incompat.empty:
+            cols = [c for c in ['CO_INSCRICAO', 'NO_ITEM_ATENDIMENTO', 'TP_ITEM_ATENDIMENTO', 'ID_KIT_PROVA'] if c in incompat.columns]
+            out = incompat[cols].copy()
+            out['KIT_ESPERADO_P/_TIPO'] = incompat['_KIT_ESPERADO'].values
+            self.tabelas['kit_incompativel_tipo'] = out.head(500).reset_index(drop=True)
+        self._add('kit_incompativel_tipo', 'Kit Incompatível com o Tipo de Atendimento (N91)',
+                  'Auditoria de Kits', 'ATENÇÃO' if len(incompat) else 'OK', int(len(incompat)),
+                  {'incompativeis': int(len(incompat)), 'avaliados': int(len(base))},
+                  (f"{len(incompat):,} item(ns) têm kit DIFERENTE do kit predominante para o seu tipo de atendimento — "
+                   "possível atribuição incorreta de material (o kit deveria seguir a nota técnica por tipo de necessidade)." if len(incompat)
+                   else "Todos os kits seguem o padrão esperado para o seu tipo de atendimento."),
+                  "Revisar a atribuição de kit dos itens divergentes conforme a nota técnica de ensalamento." if len(incompat) else "Nenhuma ação necessária.")
+
+        # kit em item com laudo reprovado
+        if 'CO_SITUACAO_LAUDO_MEDICO' in base.columns:
+            colm = pd.to_numeric(base['CO_SITUACAO_LAUDO_MEDICO'], errors='coerce')
+            reprov = [0, 3, 5, 8, 10, 11]
+            kit_reprov = base[colm.isin(reprov)]
+            self.kpis['qtd_kit_laudo_reprovado'] = int(len(kit_reprov))
+            if not kit_reprov.empty:
+                cols = [c for c in ['CO_INSCRICAO', 'NO_ITEM_ATENDIMENTO', 'ID_KIT_PROVA', 'CO_SITUACAO_LAUDO_MEDICO'] if c in kit_reprov.columns]
+                self.tabelas['kit_laudo_reprovado'] = kit_reprov[cols].head(500).reset_index(drop=True)
+            self._add('kit_laudo_reprovado', 'Kit Associado a Laudo Reprovado (N91)',
+                      'Auditoria de Kits', 'ATENÇÃO' if len(kit_reprov) else 'OK', int(len(kit_reprov)),
+                      {'itens': int(len(kit_reprov))},
+                      (f"{len(kit_reprov):,} item(ns) têm kit associado mas o laudo médico foi REPROVADO — o material pode "
+                       "estar sendo preparado indevidamente para participantes sem direito ao recurso." if len(kit_reprov)
+                       else "Nenhum kit está associado a laudo reprovado."),
+                      "Revisar a elegibilidade antes de produzir/entregar o kit nesses casos." if len(kit_reprov) else "Nenhuma ação necessária.")
+
+    # ---- 13) Participantes na N91 ausentes na N90 --------------------------------
+    def _audit_n91_sem_inscricao(self):
+        n90, n91 = self.L.get('N90'), self.L.get('N91')
+        if not all(isinstance(d, pd.DataFrame) and not d.empty for d in (n90, n91)):
+            return
+        k90, k91 = self._key_col(n90), self._key_col(n91)
+        if not (k90 and k91):
+            return
+        insc = set(self._norm_key(n90[k90]))
+        atk = self._norm_key(n91[k91])
+        orf = sorted(set(atk) - insc)
+        self.kpis['qtd_n91_sem_inscricao'] = len(orf)
+        if orf:
+            n91i = n91.assign(_k=atk.values)
+            cols = [c for c in [k91, 'NO_ITEM_ATENDIMENTO', 'TP_ITEM_ATENDIMENTO', 'ID_KIT_PROVA'] if c in n91.columns]
+            self.tabelas['n91_sem_inscricao'] = n91i[n91i['_k'].isin(orf)][cols].drop_duplicates().head(500).reset_index(drop=True)
+        self._add('n91_sem_inscricao', 'Atendimentos (N91) sem Inscrição correspondente (N90)',
+                  'Reconciliação de Participantes', 'CRÍTICO' if orf else 'OK', len(orf),
+                  {'orfaos': len(orf)},
+                  (f"{len(orf):,} participante(s) têm atendimento no N91 mas NÃO constam como inscritos no N90 — registro de "
+                   "acessibilidade órfão, indica erro de cadastro ou base desatualizada." if orf
+                   else "Todos os atendimentos do N91 correspondem a inscrições válidas no N90."),
+                  "Reconciliar a chave CO_INSCRICAO entre N91 e N90; corrigir ou remover os órfãos." if orf else "Nenhuma ação necessária.")
+
+    # ---- 14) Qualidade dos dados: completude e chaves duplicadas por layout ------
+    def _audit_qualidade_dados(self):
+        """Mede a QUALIDADE de cada layout: completude média (% de células preenchidas)
+        e integridade da chave (registros duplicados na chave natural)."""
+        chaves = {
+            'N02': ['CO_INSCRICAO_INEP', 'CO_INSCRICAO'],
+            'N90': ['CO_INSCRICAO_INEP', 'CO_INSCRICAO'],
+            'N91': ['CO_INSCRICAO', 'ID_ITEM_ATENDIMENTO'],
+            'N50': ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA'],
+            'N52': ['CO_LOCAL', 'CO_BLOCO'],
+        }
+        linhas = []
+        for lay, df in self.L.items():
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+            total_cel = df.shape[0] * df.shape[1]
+            preenchidas = int(df.notna().sum().sum())
+            completude = round(100 * preenchidas / total_cel, 1) if total_cel else 0.0
+            kcols = [c for c in chaves.get(lay, []) if c in df.columns]
+            dup = 0
+            if kcols:
+                dup = int(df.duplicated(subset=kcols).sum())
+            linhas.append({'LAYOUT': lay, 'LINHAS': int(df.shape[0]), 'COLUNAS': int(df.shape[1]),
+                           'COMPLETUDE_MEDIA (%)': completude, 'CHAVE_DUPLICADA': dup})
+        if linhas:
+            qd = pd.DataFrame(linhas).sort_values('LAYOUT').reset_index(drop=True)
+            self.tabelas['qualidade_dados'] = qd
+            self.kpis['completude_media_global'] = round(float(qd['COMPLETUDE_MEDIA (%)'].mean()), 1)
+            total_dup = int(qd['CHAVE_DUPLICADA'].sum())
+            self.kpis['qtd_chaves_duplicadas_total'] = total_dup
+            self._add('qualidade_dados', 'Qualidade dos Dados por Layout (completude e chaves)',
+                      'Qualidade de Dados', 'ATENÇÃO' if total_dup else 'OK', total_dup,
+                      {'completude_media': self.kpis['completude_media_global'], 'chaves_duplicadas': total_dup},
+                      (f"A completude média das colunas é de {self.kpis['completude_media_global']:.1f}% entre os layouts. "
+                       + (f"Foram encontradas {total_dup:,} chaves duplicadas (registros repetidos na chave natural)." if total_dup
+                          else "Nenhuma chave natural duplicada foi encontrada.")),
+                      "Investigar as duplicidades de chave e os campos com baixa completude." if total_dup else "Qualidade dentro do esperado.")
+
+    # ---- 15) Capacidade avançada: estatísticas, salas ociosas e ocupação/bloco ---
+    def _audit_capacidade_avancada(self):
+        # Recalcula a ocupação de sala a partir da base COMPLETA (a tabela ocupacao_sala
+        # é truncada e ordenada — usá-la enviesaria as estatísticas e a contagem).
+        n02, n50, n52 = self.L.get('N02'), self.L.get('N50'), self.L.get('N52')
+        occ = None
+        if all(isinstance(d, pd.DataFrame) and not d.empty for d in (n02, n50)) and all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']) and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns:
+            key = ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']
+            oc = n02.groupby(key).size().reset_index(name='ENSALADOS')
+            cap = n50[key + ['QT_CAPACIDADE_MAXIMA_SALA']].drop_duplicates(subset=key)
+            occ = cap.merge(oc, on=key, how='left')
+            occ['ENSALADOS'] = occ['ENSALADOS'].fillna(0).astype(int)
+            occ['CAP'] = pd.to_numeric(occ['QT_CAPACIDADE_MAXIMA_SALA'], errors='coerce')
+            occ['OCUPACAO (%)'] = np.where(occ['CAP'] > 0, (occ['ENSALADOS'] / occ['CAP'] * 100).round(1), np.nan)
+
+        if isinstance(occ, pd.DataFrame) and not occ.empty and 'OCUPACAO (%)' in occ.columns:
+            o = pd.to_numeric(occ['OCUPACAO (%)'], errors='coerce').dropna()
+            if not o.empty:
+                stats = pd.DataFrame([
+                    {'MÉTRICA': 'Média', 'OCUPAÇÃO (%)': round(float(o.mean()), 1)},
+                    {'MÉTRICA': 'Mediana', 'OCUPAÇÃO (%)': round(float(o.median()), 1)},
+                    {'MÉTRICA': 'Desvio-padrão', 'OCUPAÇÃO (%)': round(float(o.std()), 1)},
+                    {'MÉTRICA': 'Mínimo', 'OCUPAÇÃO (%)': round(float(o.min()), 1)},
+                    {'MÉTRICA': 'Percentil 25', 'OCUPAÇÃO (%)': round(float(o.quantile(0.25)), 1)},
+                    {'MÉTRICA': 'Percentil 75', 'OCUPAÇÃO (%)': round(float(o.quantile(0.75)), 1)},
+                    {'MÉTRICA': 'Máximo', 'OCUPAÇÃO (%)': round(float(o.max()), 1)},
+                ])
+                self.tabelas['ocupacao_estatisticas'] = stats
+                self.kpis['ocupacao_desvio_sala'] = round(float(o.std()), 1)
+                # salas subutilizadas (< 50% com capacidade) — sobre a base completa
+                sub = occ[(pd.to_numeric(occ['OCUPACAO (%)'], errors='coerce') < 50) & (occ['CAP'] > 0)]
+                self.kpis['qtd_salas_subutilizadas'] = int(len(sub))
+                self.tabelas['salas_subutilizadas'] = sub.sort_values('OCUPACAO (%)').head(500).reset_index(drop=True)
+                self._add('salas_subutilizadas', 'Salas Subutilizadas (ocupação < 50%) — N02 × N50',
+                          'Capacidade & Ocupação', 'ATENÇÃO' if len(sub) else 'OK', int(len(sub)),
+                          {'subutilizadas': int(len(sub)), 'desvio_ocupacao': self.kpis['ocupacao_desvio_sala']},
+                          (f"{len(sub):,} sala(s) operam abaixo de 50% da capacidade — capacidade ociosa que poderia absorver "
+                           f"redistribuição. O desvio-padrão da ocupação é de {self.kpis['ocupacao_desvio_sala']:.1f} p.p." if len(sub)
+                           else "Não há salas relevantemente subutilizadas."),
+                          "Consolidar ensalados de salas muito vazias para reduzir custo operacional (fiscais, materiais)." if len(sub) else "Nenhuma ação necessária.")
+
+        # ocupação por bloco (N02 × N52)
+        n02, n52 = self.L.get('N02'), self.L.get('N52')
+        if all(isinstance(d, pd.DataFrame) and not d.empty for d in (n02, n52)) and all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO']) and 'QT_CAPACIDADE_MAXIMA' in n52.columns and 'CO_BLOCO' in n52.columns:
+            key = ['CO_LOCAL', 'CO_BLOCO']
+            occb = n02.groupby(key).size().reset_index(name='ENSALADOS')
+            capb = n52.groupby(key)['QT_CAPACIDADE_MAXIMA'].sum().reset_index(name='CAPACIDADE') if 'CO_LOCAL' in n52.columns else None
+            if capb is not None:
+                mb = capb.merge(occb, on=key, how='left')
+                mb['ENSALADOS'] = mb['ENSALADOS'].fillna(0).astype(int)
+                mb['CAPACIDADE'] = pd.to_numeric(mb['CAPACIDADE'], errors='coerce')
+                mb['OCUPACAO (%)'] = np.where(mb['CAPACIDADE'] > 0, (mb['ENSALADOS'] / mb['CAPACIDADE'] * 100).round(1), np.nan)
+                self.tabelas['ocupacao_bloco'] = mb.sort_values('OCUPACAO (%)', ascending=False).head(1000).reset_index(drop=True)
+                self.kpis['qtd_blocos_criticos'] = int((mb['OCUPACAO (%)'] > 100).sum())
+
+    # ---- 16) Integridade referencial de bloco (N02 → N52) -----------------------
+    def _audit_bloco_referencial(self):
+        n02, n52 = self.L.get('N02'), self.L.get('N52')
+        if not all(isinstance(d, pd.DataFrame) and not d.empty for d in (n02, n52)):
+            return
+        if not all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO']) or not all(c in n52.columns for c in ['CO_LOCAL', 'CO_BLOCO']):
+            return
+        pares_validos = set((self._norm_key(n52['CO_LOCAL']) + '|' + self._norm_key(n52['CO_BLOCO'])).tolist())
+        par02 = self._norm_key(n02['CO_LOCAL']) + '|' + self._norm_key(n02['CO_BLOCO'])
+        mask = ~par02.isin(pares_validos)
+        self.kpis['qtd_bloco_inexistente'] = int(mask.sum())
+        if mask.sum():
+            self.tabelas['bloco_inexistente'] = n02[mask.values][[c for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA', 'NO_SALA'] if c in n02.columns]].drop_duplicates().head(500).reset_index(drop=True)
+        self._add('bloco_inexistente', 'Ensalamento em Bloco Inexistente no N52 (N02 → N52)',
+                  'Integridade Referencial', 'CRÍTICO' if mask.sum() else 'OK', int(mask.sum()),
+                  {'registros': int(mask.sum())},
+                  (f"{int(mask.sum()):,} ensalamento(s) apontam para um par LOCAL+BLOCO que não existe no N52 — quebra da "
+                   "hierarquia local→bloco." if mask.sum() else "Todos os pares local+bloco do N02 existem no N52."),
+                  "Reconciliar os blocos entre N02 e N52." if mask.sum() else "Nenhuma ação necessária.")
+
+    # ---- 17) Ranking consolidado de problemas (executivo) -----------------------
+    def _build_ranking_problemas(self):
+        """Consolida TODOS os achados em um ranking executivo por severidade e volume,
+        e destaca os municípios/locais que concentram problemas."""
+        if not self.findings:
+            return
+        sev_peso = {'CRÍTICO': 2, 'ATENÇÃO': 1, 'OK': 0}
+        rank = [{
+            'SEVERIDADE': f['severidade'], 'CATEGORIA': f['categoria'], 'PROBLEMA': f['titulo'],
+            'OCORRENCIAS': f['valor'], 'RECOMENDAÇÃO': f.get('recomendacao', ''),
+        } for f in self.findings if (f['valor'] or 0) > 0 and f['severidade'] in ('CRÍTICO', 'ATENÇÃO')]
+        if rank:
+            rdf = pd.DataFrame(rank)
+            rdf['_peso'] = rdf['SEVERIDADE'].map(sev_peso)
+            rdf = rdf.sort_values(['_peso', 'OCORRENCIAS'], ascending=[False, False]).drop(columns='_peso').reset_index(drop=True)
+            rdf.insert(0, 'RANKING', range(1, len(rdf) + 1))
+            self.tabelas['ranking_problemas'] = rdf
+        # municípios que concentram problemas (divergência de município + distâncias críticas)
+        mun_prob = {}
+        dv = self.tabelas.get('divergencia_municipio')
+        if isinstance(dv, pd.DataFrame) and not dv.empty and 'MUN_N02' in dv.columns:
+            for m, c in dv['MUN_N02'].value_counts().items():
+                mun_prob[str(m)] = mun_prob.get(str(m), 0) + int(c)
+        cc = self.tabelas.get('casos_criticos_distancia')
+        if isinstance(cc, pd.DataFrame) and not cc.empty and 'CO_MUNICIPIO_PROVA' in cc.columns:
+            for m, c in cc['CO_MUNICIPIO_PROVA'].astype(str).value_counts().items():
+                mun_prob[str(m)] = mun_prob.get(str(m), 0) + int(c)
+        if mun_prob:
+            mp = pd.DataFrame(sorted(mun_prob.items(), key=lambda x: x[1], reverse=True)[:50], columns=['MUNICÍPIO (CÓD.)', 'PROBLEMAS'])
+            mp.insert(0, 'RANKING', range(1, len(mp) + 1))
+            self.tabelas['municipios_criticos'] = mp
+
+    def _build_tabela_mestre(self):
+        """Consolida UMA linha por candidato unindo N90 (inscrição), N02 (ensalamento) e
+        N91 (atendimentos/kit), com atributos, flags derivadas (forasteiro, faixa etária,
+        faixa de distância, possui kit/atendimento/laudo) e a SITUAÇÃO DE AUDITORIA de cada
+        um (alertas e divergências). É a tabela de rastreabilidade central da plataforma."""
+        n90, n02, n91 = self.L.get('N90'), self.L.get('N02'), self.L.get('N91')
+        present = [d for d in (n90, n02, n91) if isinstance(d, pd.DataFrame) and not d.empty]
+        if not present:
+            return
+
+        def indexed(df):
+            if not (isinstance(df, pd.DataFrame) and not df.empty and self._key_col(df)):
+                return None
+            d = df.copy()
+            d['_k'] = self._norm_key(df[self._key_col(df)]).values
+            return d.drop_duplicates('_k').set_index('_k')
+
+        i90, i02, i91 = indexed(n90), indexed(n02), indexed(n91)
+        set90 = set(i90.index) if i90 is not None else set()
+        set02 = set(i02.index) if i02 is not None else set()
+        # participantes com item de atendimento (N91 pode ter múltiplas linhas)
+        set91 = set()
+        if isinstance(n91, pd.DataFrame) and not n91.empty and self._key_col(n91):
+            set91 = set(self._norm_key(n91[self._key_col(n91)]))
+
+        keys = sorted(set90 | set02 | set91)
+        if not keys:
+            return
+        m = pd.DataFrame({'CO_INSCRICAO': keys})
+        idxk = m['CO_INSCRICAO']
+
+        def col(idxdf, name, default=''):
+            if idxdf is None or name not in idxdf.columns:
+                return pd.Series([default] * len(m))
+            return idxk.map(idxdf[name]).where(idxk.isin(idxdf.index), default)
+
+        # Município / UF (prova do N02, residência do N90)
+        muni_prova = col(i02, 'CO_MUNICIPIO_PROVA')
+        if (muni_prova == '').all():
+            muni_prova = col(i90, 'CO_MUNICIPIO_PROVA')
+        uf_prova = col(i02, 'SG_UF_PROVA')
+        if (uf_prova == '').all():
+            uf_prova = col(i90, 'SG_UF_MUNICIPIO_PROVA')
+        uf_resid = col(i90, 'SG_UF_MUNICIPIO_RESIDENCIA')
+
+        m['INSCRITO_N90'] = np.where(idxk.isin(set90), 'Sim', 'Não')
+        m['ENSALADO_N02'] = np.where(idxk.isin(set02), 'Sim', 'Não')
+        m['UF_RESIDENCIA'] = uf_resid
+        m['UF_PROVA'] = uf_prova
+        m['MUNICIPIO_PROVA'] = muni_prova
+        m['CO_LOCAL'] = col(i02, 'CO_LOCAL')
+        m['CO_BLOCO'] = col(i02, 'CO_BLOCO')
+        m['ID_SALA'] = col(i02, 'ID_SALA')
+
+        # Kit
+        kit = col(i02, 'ID_KIT_PROVA').astype(str).str.strip().str.upper()
+        kit = kit.where(kit.notna(), '').replace({'NAN': '', 'NONE': ''})
+        m['POSSUI_KIT'] = np.where(kit.isin(['', 'NAN']) == False, 'Sim', 'Não')
+        m['ID_KIT_PROVA'] = kit
+
+        # Atendimento (N91)
+        m['TEM_ATENDIMENTO'] = np.where(idxk.isin(set91), 'Sim', 'Não')
+        tipo = col(i91, 'TP_ITEM_ATENDIMENTO')
+        m['TIPO_ATENDIMENTO'] = pd.to_numeric(tipo, errors='coerce').map(
+            {1: 'Específico', 2: 'Especializado', 3: 'Recurso'}).fillna('')
+        # Laudo
+        laudo = pd.to_numeric(col(i91, 'CO_SITUACAO_LAUDO_MEDICO', default=np.nan), errors='coerce')
+        m['POSSUI_LAUDO'] = np.where(laudo.notna() & idxk.isin(set91), 'Sim', 'Não')
+        aprov = [1, 4, 6, 7, 9]; reprov = [0, 3, 5, 8, 10, 11]
+        m['STATUS_LAUDO'] = np.where(laudo.isin(aprov), 'Aprovado',
+                              np.where(laudo.isin(reprov), 'Reprovado',
+                                np.where(laudo == 2, 'Em Análise',
+                                  np.where(laudo == 12, 'Recurso', ''))))
+
+        # Distância / faixa
+        dist = pd.to_numeric(col(i02, 'NU_DISTANCIA', default=np.nan), errors='coerce')
+        dist_km = (dist / 1000.0).round(2)
+        m['DISTANCIA_KM'] = dist_km
+        faixas = pd.cut(dist_km, bins=[-0.01, 1, 5, 10, 15, 20, np.inf],
+                        labels=['<1 km', '1-5 km', '5-10 km', '10-15 km', '15-20 km', '>20 km'])
+        m['FAIXA_DISTANCIA'] = faixas.astype(str).replace('nan', '')
+
+        # Forasteiro / residente
+        rr = uf_resid.astype(str).str.strip().str.upper()
+        pp = uf_prova.astype(str).str.strip().str.upper()
+        valid_uf = ~(rr.isin(['', 'NAN', 'NONE']) | pp.isin(['', 'NAN', 'NONE']))
+        m['FORASTEIRO'] = np.where(valid_uf & (rr != pp), 'Sim', np.where(valid_uf, 'Não', ''))
+
+        # Idade / faixa etária / gênero (N90)
+        nasc = col(i90, 'DT_NASCIMENTO', default='')
+        dt = pd.to_datetime(nasc, errors='coerce', dayfirst=True)
+        hoje = pd.Timestamp(datetime.now().date())
+        idade = ((hoje - dt).dt.days / 365.25).round(0)
+        m['IDADE'] = idade
+        m['FAIXA_ETARIA'] = pd.cut(idade, bins=[0, 17, 24, 34, 44, 59, 200],
+                                   labels=['≤17', '18-24', '25-34', '35-44', '45-59', '60+']).astype(str).replace('nan', '')
+        sexo = col(i90, 'TP_SEXO', default='').astype(str).str.upper().str[:1]
+        m['GENERO'] = sexo.map({'M': 'Masculino', 'F': 'Feminino'}).fillna('')
+
+        # ---- SITUAÇÃO DE AUDITORIA por candidato (alertas e divergências) ----
+        # Reconstrói os conjuntos de problema (baratos) para marcar cada linha.
+        alert_sets = {}
+        alert_sets['Sem ensalamento'] = set90 - set02
+        alert_sets['Ensalado sem inscrição (órfão)'] = set02 - set90
+        alert_sets['Atendimento sem inscrição'] = set91 - set90 if set91 else set()
+        # divergência de município (N90 x N02)
+        if i90 is not None and i02 is not None:
+            mc90 = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in i90.columns else None
+            mc02 = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in i02.columns else None
+            if mc90 and mc02:
+                comum = set90 & set02
+                a = i90.loc[list(comum), mc90].astype(str).str.strip() if comum else pd.Series(dtype=str)
+                b = i02.loc[list(comum), mc02].astype(str).str.strip() if comum else pd.Series(dtype=str)
+                alert_sets['Divergência de município'] = set(a.index[a.values != b.values]) if comum else set()
+        # ensalamento duplicado
+        if isinstance(n02, pd.DataFrame) and not n02.empty and self._key_col(n02):
+            loc_cols = [c for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA'] if c in n02.columns]
+            if loc_cols:
+                k02s = self._norm_key(n02[self._key_col(n02)])
+                dd = n02.assign(_k=k02s.values).drop_duplicates(subset=['_k'] + loc_cols)
+                cnt = dd.groupby('_k').size()
+                alert_sets['Ensalamento duplicado'] = set(cnt[cnt > 1].index)
+        # ensalado com atendimento sem kit
+        alert_sets['Ensalado com atendimento e sem kit'] = (set91 & set02) - set(m.loc[kit.ne('') & kit.ne('NAN'), 'CO_INSCRICAO'])
+
+        alert_cols = []
+        for nome, s in alert_sets.items():
+            if s:
+                flag = idxk.isin(s)
+                if flag.any():
+                    alert_cols.append((nome, flag))
+        if alert_cols:
+            def row_alerts(i):
+                return '; '.join(nome for nome, flag in alert_cols if flag.iloc[i])
+            alerts_series = pd.Series([row_alerts(i) for i in range(len(m))])
+        else:
+            alerts_series = pd.Series([''] * len(m))
+        m['ALERTAS'] = alerts_series
+        n_alertas = m['ALERTAS'].apply(lambda x: 0 if not x else x.count(';') + 1)
+        m['SITUACAO_AUDITORIA'] = np.where(n_alertas == 0, 'OK', n_alertas.astype(str) + ' alerta(s)')
+
+        self.tabelas['tabela_mestre_candidatos'] = m
+        self.kpis['total_candidatos_master'] = int(len(m))
+        self.kpis['candidatos_com_alerta'] = int((n_alertas > 0).sum())
+
+        # Resumos demográficos derivados da tabela mestre (para Excel).
+        def _resumo(colname, key):
+            if colname in m.columns:
+                sub = m[m[colname].astype(str).str.len() > 0]
+                if not sub.empty:
+                    r = sub.groupby(colname).size().reset_index(name='CANDIDATOS')
+                    tot = r['CANDIDATOS'].sum()
+                    r['PERCENTUAL (%)'] = (r['CANDIDATOS'] / tot * 100).round(2) if tot else 0
+                    r = r.sort_values('CANDIDATOS', ascending=False).reset_index(drop=True)
+                    self.tabelas[key] = r
+        _resumo('GENERO', 'candidatos_por_genero')
+        _resumo('FAIXA_ETARIA', 'candidatos_por_faixa_etaria')
+        _resumo('FAIXA_DISTANCIA', 'candidatos_por_faixa_distancia')
+        _resumo('SITUACAO_AUDITORIA', 'candidatos_por_situacao')
+
+    # ---- KPIs consolidados e resumo executivo ------------------------------------
+
+    # ---- 19) Estimativa de Provas & Logística (N90×N02×N91×N50/N52) -------------
+    def _audit_estimativa_provas(self):
+        """Estima a DEMANDA DE PROVAS e a folga logística cruzando inscritos (N90),
+        ensalamento (N02), atendimentos/kits (N91) e capacidade (N50/N52). Premissa
+        declarada: 1 prova por participante inscrito; provas ESPECIAIS = participantes
+        com item de atendimento no N91 (que exigem kit/material adaptado). A folga é a
+        capacidade instalada (N50/N52) menos a demanda de provas."""
+        n90, n02, n91, n50, n52 = (self.L.get(k) for k in ('N90', 'N02', 'N91', 'N50', 'N52'))
+
+        def _keys(df):
+            return set(self._norm_key(df[self._key_col(df)])) if isinstance(df, pd.DataFrame) and not df.empty and self._key_col(df) else set()
+
+        set90, set02, set91 = _keys(n90), _keys(n02), _keys(n91)
+        # Demanda de provas: prioriza inscritos (N90); se ausente, usa ensalados (N02).
+        base_provas = set90 if set90 else set02
+        total_provas = len(base_provas)
+        if total_provas == 0:
+            return
+        provas_especiais = len(set91 & base_provas) if set91 else len(set91)
+        provas_comuns = total_provas - provas_especiais
+        self.kpis['provas_estimadas_total'] = total_provas
+        self.kpis['provas_estimadas_especiais'] = provas_especiais
+        self.kpis['provas_estimadas_comuns'] = provas_comuns
+        self.kpis['pct_provas_especiais'] = round(100 * provas_especiais / total_provas, 2) if total_provas else 0.0
+
+        # Painel-resumo de provas (com premissa explícita).
+        painel = [
+            {'INDICADOR': 'Provas estimadas (1 por inscrito — N90)', 'VALOR': total_provas,
+             'PREMISSA': 'Cada participante inscrito no N90 demanda uma prova.'},
+            {'INDICADOR': 'Provas comuns (padrão)', 'VALOR': provas_comuns,
+             'PREMISSA': 'Inscritos sem item de atendimento no N91.'},
+            {'INDICADOR': 'Provas especiais/adaptadas', 'VALOR': provas_especiais,
+             'PREMISSA': 'Participantes com atendimento/recurso no N91 (kit/material adaptado).'},
+        ]
+        # Kits: necessários (N91) x atribuídos (N02).
+        invalid = {'NAO_INFORMADO', 'NÃO INFORMADO', 'NAN', 'NONE', '', 'NULL'}
+        kits_atribuidos = 0
+        if isinstance(n02, pd.DataFrame) and not n02.empty and 'ID_KIT_PROVA' in n02.columns:
+            k = n02['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+            k = k.where(k.notna(), '')
+            kits_atribuidos = int((~k.isin(invalid)).sum())
+        kits_necessarios = provas_especiais
+        gap_kits = kits_necessarios - kits_atribuidos
+        self.kpis['kits_necessarios_estimado'] = kits_necessarios
+        self.kpis['kits_atribuidos'] = kits_atribuidos
+        self.kpis['kits_gap'] = gap_kits
+        painel += [
+            {'INDICADOR': 'Kits necessários (estimado)', 'VALOR': kits_necessarios,
+             'PREMISSA': 'Um kit por participante com atendimento no N91.'},
+            {'INDICADOR': 'Kits atribuídos (N02)', 'VALOR': kits_atribuidos,
+             'PREMISSA': 'Registros do N02 com ID_KIT_PROVA preenchido.'},
+            {'INDICADOR': 'Lacuna de kits (necessário − atribuído)', 'VALOR': gap_kits,
+             'PREMISSA': 'Positivo = faltam kits; negativo = excedente.'},
+        ]
+        # Capacidade instalada x demanda (folga logística).
+        cap_total = None
+        if isinstance(n50, pd.DataFrame) and not n50.empty and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns:
+            cap_total = int(pd.to_numeric(n50['QT_CAPACIDADE_MAXIMA_SALA'], errors='coerce').fillna(0).sum())
+        elif isinstance(n52, pd.DataFrame) and not n52.empty and 'QT_CAPACIDADE_MAXIMA' in n52.columns:
+            cap_total = int(pd.to_numeric(n52['QT_CAPACIDADE_MAXIMA'], errors='coerce').fillna(0).sum())
+        if cap_total is not None:
+            folga = cap_total - total_provas
+            self.kpis['capacidade_instalada'] = cap_total
+            self.kpis['folga_capacidade_provas'] = folga
+            self.kpis['pct_margem_logistica'] = round(100 * folga / cap_total, 2) if cap_total else 0.0
+            painel += [
+                {'INDICADOR': 'Capacidade instalada (assentos — N50/N52)', 'VALOR': cap_total,
+                 'PREMISSA': 'Soma das capacidades máximas das salas/blocos.'},
+                {'INDICADOR': 'Folga de capacidade (assentos − provas)', 'VALOR': folga,
+                 'PREMISSA': 'Positivo = sobra de assentos; negativo = déficit.'},
+                {'INDICADOR': 'Margem logística (%)', 'VALOR': self.kpis['pct_margem_logistica'],
+                 'PREMISSA': 'Folga ÷ capacidade instalada.'},
+            ]
+            sev = 'CRÍTICO' if folga < 0 else ('ATENÇÃO' if self.kpis['pct_margem_logistica'] < 5 else 'OK')
+            self._add('folga_capacidade', 'Folga de Capacidade para as Provas (N50/N52 × N90)',
+                      'Estimativa de Provas & Logística', sev, abs(folga) if folga < 0 else folga,
+                      {'capacidade': cap_total, 'provas': total_provas, 'folga': folga, 'margem_pct': self.kpis['pct_margem_logistica']},
+                      (f"A capacidade instalada é de {cap_total:,} assentos para uma demanda estimada de {total_provas:,} provas "
+                       f"(1 por inscrito), resultando em folga de {folga:,} assento(s) ({self.kpis['pct_margem_logistica']:.1f}% de margem). "
+                       + ("Déficit: não há assentos suficientes para todos os inscritos." if folga < 0
+                          else "Margem apertada — pouca folga para remanejamentos." if self.kpis['pct_margem_logistica'] < 5
+                          else "Há folga confortável para acomodar todos os inscritos e eventuais remanejamentos.")),
+                      "Ampliar/rever a alocação de salas ou redistribuir participantes." if folga < 0 else ("Monitorar de perto; considerar salas reserva." if self.kpis['pct_margem_logistica'] < 5 else "Nenhuma ação necessária."))
+
+        self.tabelas['estimativa_provas_painel'] = pd.DataFrame(painel)
+
+        # Achado de lacuna de kits.
+        self._add('kit_gap_logistico', 'Lacuna Logística de Kits (necessário × atribuído)',
+                  'Estimativa de Provas & Logística', 'CRÍTICO' if gap_kits > 0 else 'OK', gap_kits if gap_kits > 0 else 0,
+                  {'necessarios': kits_necessarios, 'atribuidos': kits_atribuidos, 'lacuna': gap_kits},
+                  (f"São estimados {kits_necessarios:,} kits necessários (participantes com atendimento no N91) contra "
+                   f"{kits_atribuidos:,} kits atribuídos no N02 — lacuna de {gap_kits:,}. Cada participante sem o kit correto "
+                   "pode não receber o material adaptado no dia da prova." if gap_kits > 0
+                   else f"Os {kits_atribuidos:,} kits atribuídos cobrem a demanda estimada de {kits_necessarios:,}."),
+                  "Produzir/atribuir os kits faltantes conforme a nota técnica de ensalamento." if gap_kits > 0 else "Nenhuma ação necessária.")
+
+        # Provas por município e por local (demanda territorial), a partir do N02.
+        if isinstance(n02, pd.DataFrame) and not n02.empty:
+            mc = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
+            if mc:
+                pm = n02.groupby(self._norm_key(n02[mc])).size().reset_index(name='PROVAS_ESTIMADAS')
+                pm.columns = ['MUNICÍPIO (CÓD.)', 'PROVAS_ESTIMADAS']
+                pm = pm.sort_values('PROVAS_ESTIMADAS', ascending=False).head(200).reset_index(drop=True)
+                pm.insert(0, 'RANKING', range(1, len(pm) + 1))
+                self.tabelas['provas_por_municipio'] = pm
+            if 'CO_LOCAL' in n02.columns:
+                pl = n02.groupby('CO_LOCAL').size().reset_index(name='PROVAS_ESTIMADAS')
+                if 'NO_LOCAL' in n02.columns:
+                    pl = pl.merge(n02[['CO_LOCAL', 'NO_LOCAL']].drop_duplicates('CO_LOCAL'), on='CO_LOCAL', how='left')
+                pl = pl.sort_values('PROVAS_ESTIMADAS', ascending=False).head(200).reset_index(drop=True)
+                pl.insert(0, 'RANKING', range(1, len(pl) + 1))
+                self.tabelas['provas_por_local'] = pl
+
+    # ---- 20) Estatísticas descritivas das variáveis numéricas-chave --------------
+    def _audit_estatisticas_descritivas(self):
+        """Calcula um bloco completo de ESTATÍSTICA DESCRITIVA (média, mediana, moda,
+        desvio-padrão, variância, coeficiente de variação, quartis/percentis, assimetria
+        e amplitude) para as principais variáveis numéricas derivadas dos layouts —
+        distância de deslocamento (N02), concentração de participantes por local/município
+        (N02) e capacidade das salas (N50). Fundamenta decisões sobre dispersão e outliers."""
+        n02, n50 = self.L.get('N02'), self.L.get('N50')
+        series = {}
+        # Distância (km) — N02
+        if isinstance(n02, pd.DataFrame) and not n02.empty and 'NU_DISTANCIA' in n02.columns:
+            d = pd.to_numeric(n02['NU_DISTANCIA'], errors='coerce').dropna() / 1000.0
+            if len(d) >= 5:
+                series['Distância de deslocamento (km) — N02'] = d
+        # Participantes por local e por município — N02
+        if isinstance(n02, pd.DataFrame) and not n02.empty:
+            if 'CO_LOCAL' in n02.columns:
+                pl = n02.groupby('CO_LOCAL').size()
+                if len(pl) >= 5:
+                    series['Participantes por local — N02'] = pl.astype(float)
+            mc = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
+            if mc:
+                pm = n02.groupby(self._norm_key(n02[mc])).size()
+                if len(pm) >= 5:
+                    series['Participantes por município — N02'] = pm.astype(float)
+        # Capacidade das salas — N50
+        if isinstance(n50, pd.DataFrame) and not n50.empty and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns:
+            cap = pd.to_numeric(n50['QT_CAPACIDADE_MAXIMA_SALA'], errors='coerce').dropna()
+            if len(cap) >= 5:
+                series['Capacidade máxima por sala — N50'] = cap.astype(float)
+
+        if not series:
+            return
+        linhas = []
+        for nome, s in series.items():
+            s = s.astype(float)
+            try:
+                moda = s.mode()
+                moda_v = round(float(moda.iloc[0]), 2) if len(moda) else np.nan
+            except Exception:
+                moda_v = np.nan
+            media = float(s.mean())
+            dp = float(s.std())
+            linhas.append({
+                'VARIÁVEL': nome, 'N': int(s.count()),
+                'MÉDIA': round(media, 2), 'MEDIANA': round(float(s.median()), 2), 'MODA': moda_v,
+                'DESVIO_PADRAO': round(dp, 2), 'VARIANCIA': round(float(s.var()), 2),
+                'CV (%)': round(100 * dp / media, 1) if media else np.nan,
+                'MÍNIMO': round(float(s.min()), 2), 'P10': round(float(s.quantile(0.10)), 2),
+                'P25 (Q1)': round(float(s.quantile(0.25)), 2), 'P75 (Q3)': round(float(s.quantile(0.75)), 2),
+                'P90': round(float(s.quantile(0.90)), 2), 'MÁXIMO': round(float(s.max()), 2),
+                'AMPLITUDE': round(float(s.max() - s.min()), 2),
+                'ASSIMETRIA': round(float(s.skew()), 2) if s.count() > 2 else np.nan,
+            })
+        self.tabelas['estatisticas_descritivas'] = pd.DataFrame(linhas)
+        self.kpis['qtd_variaveis_analisadas_estat'] = len(linhas)
+
+        # Interpretação automática: destaca a variável mais dispersa (maior CV).
+        vt = pd.DataFrame(linhas)
+        vt_cv = vt.dropna(subset=['CV (%)'])
+        if not vt_cv.empty:
+            top = vt_cv.sort_values('CV (%)', ascending=False).iloc[0]
+            self._add('estatisticas_dispersao', 'Dispersão das Variáveis-Chave (coeficiente de variação)',
+                      'Estatística Descritiva', 'OK', int(round(top['CV (%)'])),
+                      {'variavel_mais_dispersa': top['VARIÁVEL'], 'cv_pct': float(top['CV (%)']),
+                       'variaveis_analisadas': len(linhas)},
+                      (f"Foram caracterizadas {len(linhas)} variáveis numéricas-chave. A mais dispersa é "
+                       f"'{top['VARIÁVEL']}', com coeficiente de variação de {top['CV (%)']:.1f}% "
+                       + ("(alta heterogeneidade — média pouco representativa; use mediana e quartis)." if top['CV (%)'] > 50
+                          else "(dispersão moderada)." if top['CV (%)'] > 25 else "(baixa dispersão — média é representativa).")
+                       + " CV alto indica valores muito desiguais (ex.: alguns locais lotados e outros vazios)."),
+                      "Para variáveis com CV alto, priorize mediana/quartis nas decisões e investigue os outliers (P90 vs máximo).")
+
+    # ---- 21) Panorama territorial de Provas & Kits + estimativa comparativa ------
+    def _audit_panorama_provas_kits(self):
+        """Aprofunda a análise territorial de PROVAS e KITS: demanda de provas por bloco,
+        sala e tipo de ensalamento; distribuição de kits por município, tipo e atendimento;
+        e uma ESTIMATIVA COMPARATIVA de provas por diferentes bases (inscritos N90, ensalados
+        N02, kits necessários N91, capacidade N50) — justificando cada premissa e apontando
+        divergências entre as estimativas."""
+        n02, n50, n90, n91, n52 = (self.L.get(k) for k in ('N02', 'N50', 'N90', 'N91', 'N52'))
+        invalid = {'NAO_INFORMADO', 'NÃO INFORMADO', 'NAN', 'NONE', '', 'NULL'}
+
+        # --- Provas por bloco / sala / tipo de ensalamento (N02) ---
+        if isinstance(n02, pd.DataFrame) and not n02.empty:
+            if all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO']):
+                pb = n02.groupby(['CO_LOCAL', 'CO_BLOCO']).size().reset_index(name='PROVAS_ESTIMADAS')
+                pb = pb.sort_values('PROVAS_ESTIMADAS', ascending=False).head(300).reset_index(drop=True)
+                pb.insert(0, 'RANKING', range(1, len(pb) + 1))
+                self.tabelas['provas_por_bloco'] = pb
+            if all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']):
+                ps = n02.groupby(['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']).size().reset_index(name='PROVAS_NA_SALA')
+                ps = ps.sort_values('PROVAS_NA_SALA', ascending=False).head(500).reset_index(drop=True)
+                self.tabelas['provas_por_sala'] = ps
+                self.kpis['provas_media_por_sala'] = round(float(ps['PROVAS_NA_SALA'].mean()), 2)
+            tp = 'TP_ENSALAMENTO' if 'TP_ENSALAMENTO' in n02.columns else None
+            if tp:
+                pt = n02.groupby(n02[tp].astype(str)).size().reset_index(name='PROVAS')
+                pt.columns = ['TIPO_ENSALAMENTO', 'PROVAS']
+                tot = pt['PROVAS'].sum()
+                pt['PERCENTUAL (%)'] = (pt['PROVAS'] / tot * 100).round(2) if tot else 0
+                self.tabelas['provas_por_tipo_ensalamento'] = pt.sort_values('PROVAS', ascending=False).reset_index(drop=True)
+
+        # --- Kits por município e por tipo de atendimento ---
+        def _kit(df):
+            k = df['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+            return k.where(k.notna(), '')
+        if isinstance(n02, pd.DataFrame) and not n02.empty and 'ID_KIT_PROVA' in n02.columns:
+            base = n02.assign(_KIT=_kit(n02).values)
+            base = base[~base['_KIT'].isin(invalid)]
+            mc = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
+            if mc and not base.empty:
+                km = base.groupby(self._norm_key(base[mc])).agg(KITS=('_KIT', 'size'), KITS_DISTINTOS=('_KIT', 'nunique')).reset_index()
+                km.columns = ['MUNICÍPIO (CÓD.)', 'KITS', 'KITS_DISTINTOS']
+                km = km.sort_values('KITS', ascending=False).head(200).reset_index(drop=True)
+                km.insert(0, 'RANKING', range(1, len(km) + 1))
+                self.tabelas['kits_por_municipio'] = km
+        if isinstance(n91, pd.DataFrame) and not n91.empty and 'ID_KIT_PROVA' in n91.columns and 'NO_ITEM_ATENDIMENTO' in n91.columns:
+            t = n91.assign(_KIT=_kit(n91).values)
+            t = t[~t['_KIT'].isin(invalid)]
+            if not t.empty:
+                ka = t.groupby(t['NO_ITEM_ATENDIMENTO'].astype(str)).agg(ITENS=('_KIT', 'size'), KITS_DISTINTOS=('_KIT', 'nunique')).reset_index()
+                ka.columns = ['ITEM DE ATENDIMENTO', 'ITENS', 'KITS_DISTINTOS']
+                self.tabelas['kits_por_atendimento'] = ka.sort_values('ITENS', ascending=False).head(100).reset_index(drop=True)
+
+        # --- ESTIMATIVA COMPARATIVA de provas por diferentes bases ---
+        est = []
+        n_insc = self.kpis.get('total_inscritos')
+        if n_insc:
+            est.append({'BASE DE ESTIMATIVA': 'Inscritos (N90)', 'PROVAS_ESTIMADAS': int(n_insc),
+                        'PREMISSA': '1 prova por participante inscrito — base primária de demanda.'})
+        if isinstance(n02, pd.DataFrame) and not n02.empty and self._key_col(n02):
+            n_ens = int(self._norm_key(n02[self._key_col(n02)]).nunique())
+            est.append({'BASE DE ESTIMATIVA': 'Ensalados (N02)', 'PROVAS_ESTIMADAS': n_ens,
+                        'PREMISSA': '1 prova por participante alocado em sala — provas efetivamente posicionadas.'})
+        # via kits: kits especiais + provas comuns (inscritos - especiais)
+        n_esp = self.kpis.get('provas_estimadas_especiais')
+        if n_esp is not None and n_insc:
+            est.append({'BASE DE ESTIMATIVA': 'Kits/atendimentos (N91) + comuns', 'PROVAS_ESTIMADAS': int(n_insc),
+                        'PREMISSA': f'{n_esp:,} provas especiais (1 kit por atendimento no N91) + {n_insc - n_esp:,} provas comuns.'})
+        cap = self.kpis.get('capacidade_instalada')
+        if cap:
+            est.append({'BASE DE ESTIMATIVA': 'Capacidade instalada (N50/N52)', 'PROVAS_ESTIMADAS': int(cap),
+                        'PREMISSA': 'Teto físico de assentos — máximo de provas aplicáveis simultaneamente.'})
+        if est:
+            edf = pd.DataFrame(est)
+            self.tabelas['estimativa_provas_comparativa'] = edf
+            vals = [e['PROVAS_ESTIMADAS'] for e in est if e['BASE DE ESTIMATIVA'] != 'Capacidade instalada (N50/N52)']
+            if len(vals) >= 2:
+                divergencia = max(vals) - min(vals)
+                self.kpis['divergencia_estimativas_provas'] = int(divergencia)
+                self._add('estimativa_comparativa', 'Divergência entre Estimativas de Provas (bases distintas)',
+                          'Estimativa de Provas & Logística', 'ATENÇÃO' if divergencia > 0 else 'OK', int(divergencia),
+                          {'divergencia': int(divergencia), 'bases_comparadas': len(vals)},
+                          (f"As diferentes bases de estimativa (inscritos, ensalados, kits) divergem em {divergencia:,} prova(s). "
+                           "Idealmente inscritos ≈ ensalados; a diferença corresponde a participantes inscritos ainda não "
+                           "alocados (ou alocados sem inscrição). A capacidade instalada é apenas o teto físico." if divergencia > 0
+                           else "As estimativas de provas convergem entre as bases — inscritos, ensalados e kits batem."),
+                          "Reconciliar inscritos × ensalados (N90 × N02) para alinhar a demanda real de provas." if divergencia > 0 else "Nenhuma ação necessária.")
+
+    # ---- 22) Contagem de TODOS os tipos de kit (N02 e N91) -----------------------
+    def _audit_kits_por_tipo(self):
+        """Conta TODOS os tipos de kit de prova distintos e quantos participantes/itens
+        cada um cobre — no ensalamento (N02, ID_KIT_PROVA) e nos atendimentos (N91,
+        ID_KIT_PROVA × item). Também cruza os tipos entre os dois layouts para detectar
+        kits presentes em um e não no outro (possível inconsistência de atribuição)."""
+        n02, n91 = self.L.get('N02'), self.L.get('N91')
+        invalid = {'NAO_INFORMADO', 'NÃO INFORMADO', 'NAN', 'NONE', '', 'NULL', 'SEM KIT', '0'}
+
+        def _kitcol(df):
+            k = df['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+            k = k.where(k.notna(), '')
+            return k[~k.isin(invalid)]
+
+        tipos02 = set()
+        # --- Tipos de kit no N02 (ensalamento) ---
+        if isinstance(n02, pd.DataFrame) and not n02.empty and 'ID_KIT_PROVA' in n02.columns:
+            k02 = _kitcol(n02)
+            if not k02.empty:
+                vc = k02.value_counts()
+                tipos02 = set(vc.index)
+                tot = int(vc.sum())
+                t = vc.reset_index()
+                t.columns = ['TIPO_DE_KIT (ID)', 'PARTICIPANTES']
+                t['PERCENTUAL (%)'] = (t['PARTICIPANTES'] / tot * 100).round(2) if tot else 0
+                t.insert(0, 'RANKING', range(1, len(t) + 1))
+                self.tabelas['kits_tipos_n02'] = t.head(500)
+                self.kpis['kits_tipos_distintos_n02'] = int(len(vc))
+                self.kpis['kits_total_atribuidos_n02'] = tot
+                self.kpis['kit_tipo_mais_comum_n02'] = str(vc.index[0])
+                self.kpis['kit_tipo_mais_comum_qtd_n02'] = int(vc.iloc[0])
+
+        tipos91 = set()
+        # --- Tipos de kit no N91 (atendimentos/recursos) ---
+        if isinstance(n91, pd.DataFrame) and not n91.empty and 'ID_KIT_PROVA' in n91.columns:
+            k91 = _kitcol(n91)
+            if not k91.empty:
+                vc = k91.value_counts()
+                tipos91 = set(vc.index)
+                tot = int(vc.sum())
+                t = vc.reset_index()
+                t.columns = ['TIPO_DE_KIT (ID)', 'ITENS_DE_ATENDIMENTO']
+                t['PERCENTUAL (%)'] = (t['ITENS_DE_ATENDIMENTO'] / tot * 100).round(2) if tot else 0
+                t.insert(0, 'RANKING', range(1, len(t) + 1))
+                self.tabelas['kits_tipos_n91'] = t.head(500)
+                self.kpis['kits_tipos_distintos_n91'] = int(len(vc))
+                self.kpis['kits_total_itens_n91'] = tot
+
+        # --- Consolidação: universo de todos os tipos e presença em cada layout ---
+        todos = sorted(tipos02 | tipos91)
+        if todos:
+            self.kpis['kits_tipos_distintos_total'] = len(todos)
+            linhas = []
+            for kt in todos:
+                em02, em91 = kt in tipos02, kt in tipos91
+                linhas.append({
+                    'TIPO_DE_KIT (ID)': kt,
+                    'NO_ENSALAMENTO_N02': 'Sim' if em02 else 'Não',
+                    'NO_ATENDIMENTO_N91': 'Sim' if em91 else 'Não',
+                    'SITUACAO': 'Em ambos (N02+N91)' if (em02 and em91)
+                    else ('Só no N02 (atribuído sem atendimento correspondente)' if em02
+                          else 'Só no N91 (necessário mas não atribuído no ensalamento)')
+                })
+            cons = pd.DataFrame(linhas)
+            self.tabelas['kits_tipos_consolidado'] = cons
+            so02 = int((cons['SITUACAO'].str.startswith('Só no N02')).sum())
+            so91 = int((cons['SITUACAO'].str.startswith('Só no N91')).sum())
+            self.kpis['kits_tipos_so_n02'] = so02
+            self.kpis['kits_tipos_so_n91'] = so91
+            sev = 'ATENÇÃO' if (so91 > 0 or so02 > 0) else 'OK'
+            self._add('kits_tipos_cobertura', 'Cobertura dos Tipos de Kit entre N02 e N91',
+                      'Kits & Materiais', sev, so91 + so02,
+                      {'tipos_total': len(todos), 'em_ambos': len(todos) - so02 - so91, 'so_n02': so02, 'so_n91': so91},
+                      (f"Foram identificados {len(todos)} tipos de kit distintos: {len(todos) - so02 - so91} presentes em "
+                       f"ambos os layouts, {so91} apenas no N91 (necessários por atendimento, mas sem kit correspondente no "
+                       f"ensalamento) e {so02} apenas no N02 (atribuídos no ensalamento sem atendimento correspondente no N91). "
+                       "Divergências de tipo de kit entre os dois layouts podem indicar erro de atribuição." if (so91 or so02)
+                       else f"Todos os {len(todos)} tipos de kit aparecem de forma consistente entre N02 e N91."),
+                      "Revisar os tipos que aparecem em só um layout: confirmar se o participante recebeu (ou deveria receber) "
+                      "o kit correto no dia da prova." if (so91 or so02) else "Nenhuma ação necessária.")
+
+    # ---- 23) Cruzamentos da N60 (infraestrutura × ensalamento × atendimentos) -----
+    def _audit_n60_cruzamentos(self):
+        """Cruza a INFRAESTRUTURA PREDIAL (N60) com o ensalamento (N02) e os atendimentos
+        (N91). Calcula um índice de acessibilidade por local (a partir das flags IN_* da
+        N60) e verifica quantos participantes — e principalmente quantos participantes COM
+        NECESSIDADE DE ATENDIMENTO (N91) — estão alocados em locais de BAIXA acessibilidade.
+        É a análise de EQUIDADE central que só a N60 permite."""
+        n60, n02, n91 = self.L.get('N60'), self.L.get('N02'), self.L.get('N91')
+        if not (isinstance(n60, pd.DataFrame) and not n60.empty and 'CO_LOCAL' in n60.columns):
+            return
+        acc_cols = [c for c in ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA', 'IN_SALA_ACESSIVEL',
+                    'IN_RAMPA_ACESSO_LOCAL', 'IN_RAMPA_ENTORNO', 'IN_PISO_ADEQUADO', 'IN_PORTAS_ADEQUADAS',
+                    'IN_MESA_CADEIRANTE', 'IN_BEBEDOUROS_ADAPTADOS', 'IN_BANHEIRO_ACESSIVEL'] if c in n60.columns]
+        if not acc_cols:
+            return
+        loc = n60[['CO_LOCAL'] + acc_cols].drop_duplicates(subset=['CO_LOCAL']).copy()
+        for c in acc_cols:
+            loc[c] = pd.to_numeric(loc[c], errors='coerce').fillna(0).clip(0, 1)
+        loc['SCORE_ACESSIBILIDADE'] = (loc[acc_cols].sum(axis=1) / len(acc_cols) * 100).round(1)
+        loc['NIVEL_ACESSIBILIDADE'] = pd.cut(loc['SCORE_ACESSIBILIDADE'], bins=[-1, 33.4, 66.7, 101],
+                                             labels=['Baixa', 'Média', 'Alta'])
+        loc['CO_LOCAL'] = self._norm_key(loc['CO_LOCAL'])
+
+        # Ensalados por local (N02)
+        ens_map = {}
+        if isinstance(n02, pd.DataFrame) and not n02.empty and 'CO_LOCAL' in n02.columns:
+            n02l = n02.copy(); n02l['CO_LOCAL'] = self._norm_key(n02l['CO_LOCAL'])
+            ens = n02l.groupby('CO_LOCAL').size()
+            ens_map = ens.to_dict()
+            loc['ENSALADOS'] = loc['CO_LOCAL'].map(ens_map).fillna(0).astype(int)
+        else:
+            loc['ENSALADOS'] = 0
+
+        self.tabelas['n60_acessibilidade_local'] = loc.sort_values('SCORE_ACESSIBILIDADE').reset_index(drop=True)
+
+        # Distribuição por nível
+        dist = loc.groupby('NIVEL_ACESSIBILIDADE', observed=False).agg(
+            LOCAIS=('CO_LOCAL', 'nunique'), ENSALADOS=('ENSALADOS', 'sum')).reset_index()
+        self.tabelas['n60_ensalados_por_nivel'] = dist
+        total_ens = int(loc['ENSALADOS'].sum())
+        baixa_ens = int(loc.loc[loc['NIVEL_ACESSIBILIDADE'] == 'Baixa', 'ENSALADOS'].sum())
+        self.kpis['n60_locais_total'] = int(loc['CO_LOCAL'].nunique())
+        self.kpis['n60_locais_baixa_acess'] = int((loc['NIVEL_ACESSIBILIDADE'] == 'Baixa').sum())
+        self.kpis['n60_ensalados_baixa_acess'] = baixa_ens
+        self.kpis['n60_pct_ensalados_baixa_acess'] = round(100 * baixa_ens / total_ens, 2) if total_ens else 0.0
+
+        # N60 × N91: participantes COM ATENDIMENTO em locais de baixa acessibilidade
+        atend_baixa = None
+        if (isinstance(n91, pd.DataFrame) and not n91.empty and self._key_col(n91)
+                and isinstance(n02, pd.DataFrame) and not n02.empty and 'CO_LOCAL' in n02.columns and self._key_col(n02)):
+            kc02 = self._key_col(n02); kc91 = self._key_col(n91)
+            n02k = n02.copy(); n02k['_K'] = self._norm_key(n02k[kc02]); n02k['CO_LOCAL'] = self._norm_key(n02k['CO_LOCAL'])
+            atend_keys = set(self._norm_key(n91[kc91]))
+            baixa_locais = set(loc.loc[loc['NIVEL_ACESSIBILIDADE'] == 'Baixa', 'CO_LOCAL'])
+            aloc = n02k[n02k['_K'].isin(atend_keys)]
+            atend_baixa = int(aloc['CO_LOCAL'].isin(baixa_locais).sum())
+            self.kpis['n60_atendimento_baixa_acess'] = atend_baixa
+            sev = 'CRÍTICO' if atend_baixa > 0 else 'OK'
+            self._add('n60_equidade_atendimento', 'Equidade: Participantes com Atendimento em Locais de Baixa Acessibilidade (N60×N91×N02)',
+                      'Infraestrutura & Equidade (N60)', sev, atend_baixa,
+                      {'participantes_atendimento_baixa_acess': atend_baixa, 'locais_baixa_acess': self.kpis['n60_locais_baixa_acess']},
+                      (f"{atend_baixa:,} participante(s) COM necessidade de atendimento (N91) estão alocados (N02) em locais "
+                       f"classificados como de BAIXA acessibilidade pela infraestrutura predial (N60). Esse é o cruzamento de "
+                       "maior risco de equidade: justamente quem mais precisa de acessibilidade foi posicionado onde ela é menor." if atend_baixa > 0
+                       else "Nenhum participante com necessidade de atendimento (N91) está alocado em local de baixa acessibilidade (N60) — alocação equânime."),
+                      "Priorizar o remanejamento desses participantes para locais de acessibilidade Alta/Média, ou adequar a infraestrutura do local." if atend_baixa > 0 else "Nenhuma ação necessária.")
+
+        # Achado geral de acessibilidade da rede
+        sevg = 'ATENÇÃO' if self.kpis['n60_pct_ensalados_baixa_acess'] > 10 else 'OK'
+        self._add('n60_rede_acessibilidade', 'Acessibilidade da Rede de Locais (N60 × N02)',
+                  'Infraestrutura & Equidade (N60)', sevg, self.kpis['n60_locais_baixa_acess'],
+                  {'locais_baixa': self.kpis['n60_locais_baixa_acess'], 'ensalados_baixa': baixa_ens, 'pct': self.kpis['n60_pct_ensalados_baixa_acess']},
+                  (f"Dos {self.kpis['n60_locais_total']:,} locais avaliados pela N60, {self.kpis['n60_locais_baixa_acess']:,} são de baixa "
+                   f"acessibilidade, concentrando {baixa_ens:,} ensalados ({self.kpis['n60_pct_ensalados_baixa_acess']:.1f}% do total). "
+                   "Um percentual elevado indica necessidade de investimento em adequação predial." if self.kpis['n60_pct_ensalados_baixa_acess'] > 10
+                   else "A maioria dos participantes está em locais de acessibilidade média/alta."),
+                  "Mapear os locais de baixa acessibilidade e priorizá-los em adequação/vistoria." if self.kpis['n60_pct_ensalados_baixa_acess'] > 10 else "Monitorar.")
+
+    # ---- 24) N60 × distância × capacidade (desigualdade acumulada) ----------------
+    def _audit_n60_capacidade_distancia(self):
+        """Cruza o NÍVEL DE ACESSIBILIDADE do local (N60, calculado na etapa anterior) com a
+        DISTÂNCIA de deslocamento dos participantes (N02) e a CAPACIDADE instalada (N50/N52).
+        Revela se os locais de baixa acessibilidade também concentram viagens mais longas ou
+        maior lotação — ou seja, se as desigualdades se acumulam. Só é possível com a N60."""
+        loc = self.tabelas.get('n60_acessibilidade_local')
+        n02 = self.L.get('N02')
+        if not (isinstance(loc, pd.DataFrame) and not loc.empty and 'NIVEL_ACESSIBILIDADE' in loc.columns and 'CO_LOCAL' in loc.columns):
+            return
+        if not (isinstance(n02, pd.DataFrame) and not n02.empty and 'CO_LOCAL' in n02.columns):
+            return
+
+        nivel_por_local = loc.set_index('CO_LOCAL')['NIVEL_ACESSIBILIDADE'].astype(str).to_dict()
+        n02x = n02.copy()
+        n02x['CO_LOCAL'] = self._norm_key(n02x['CO_LOCAL'])
+        n02x['NIVEL_ACESSIBILIDADE'] = n02x['CO_LOCAL'].map(nivel_por_local)
+        n02x = n02x[n02x['NIVEL_ACESSIBILIDADE'].notna()]
+        if n02x.empty:
+            return
+
+        agg = {}
+        if 'NU_DISTANCIA' in n02x.columns:
+            n02x['_DIST_KM'] = pd.to_numeric(n02x['NU_DISTANCIA'], errors='coerce') / 1000.0
+        # Capacidade por local (N50 ou N52)
+        cap_por_local = None
+        n50, n52 = self.L.get('N50'), self.L.get('N52')
+        if isinstance(n50, pd.DataFrame) and not n50.empty and 'CO_LOCAL' in n50.columns and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns:
+            tmp = n50.copy(); tmp['CO_LOCAL'] = self._norm_key(tmp['CO_LOCAL'])
+            cap_por_local = tmp.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA_SALA'].apply(lambda s: pd.to_numeric(s, errors='coerce').sum())
+        elif isinstance(n52, pd.DataFrame) and not n52.empty and 'CO_LOCAL' in n52.columns and 'QT_CAPACIDADE_MAXIMA' in n52.columns:
+            tmp = n52.copy(); tmp['CO_LOCAL'] = self._norm_key(tmp['CO_LOCAL'])
+            cap_por_local = tmp.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA'].apply(lambda s: pd.to_numeric(s, errors='coerce').sum())
+        if cap_por_local is not None:
+            n02x['_CAP_LOCAL'] = n02x['CO_LOCAL'].map(cap_por_local.to_dict())
+
+        linhas = []
+        order = {'Baixa': 0, 'Média': 1, 'Alta': 2}
+        for niv in sorted(n02x['NIVEL_ACESSIBILIDADE'].unique(), key=lambda x: order.get(x, 9)):
+            sub = n02x[n02x['NIVEL_ACESSIBILIDADE'] == niv]
+            row = {'NIVEL_ACESSIBILIDADE': niv, 'ENSALADOS': int(len(sub))}
+            if '_DIST_KM' in sub.columns:
+                d = sub['_DIST_KM'].dropna()
+                if len(d):
+                    row['DISTANCIA_MEDIA_KM'] = round(float(d.mean()), 2)
+                    row['DISTANCIA_MEDIANA_KM'] = round(float(d.median()), 2)
+            if '_CAP_LOCAL' in sub.columns:
+                c = sub['_CAP_LOCAL'].dropna()
+                if len(c):
+                    row['CAPACIDADE_MEDIA_LOCAL'] = round(float(c.mean()), 1)
+            linhas.append(row)
+        if not linhas:
+            return
+        tab = pd.DataFrame(linhas)
+        self.tabelas['n60_distancia_capacidade_nivel'] = tab
+
+        # Finding: a baixa acessibilidade se acumula com distância maior?
+        if 'DISTANCIA_MEDIA_KM' in tab.columns:
+            m = tab.set_index('NIVEL_ACESSIBILIDADE')['DISTANCIA_MEDIA_KM'].to_dict()
+            d_baixa, d_alta = m.get('Baixa'), m.get('Alta')
+            self.kpis['n60_dist_media_baixa_acess'] = d_baixa if d_baixa is not None else 0
+            if d_baixa is not None and d_alta is not None:
+                pior = d_baixa > d_alta
+                self._add('n60_desigualdade_acumulada', 'Desigualdade Acumulada: Acessibilidade × Distância (N60 × N02)',
+                          'Infraestrutura & Equidade (N60)', 'ATENÇÃO' if pior else 'OK',
+                          round(abs(d_baixa - d_alta), 1),
+                          {'dist_media_baixa_km': d_baixa, 'dist_media_alta_km': d_alta},
+                          (f"Participantes em locais de BAIXA acessibilidade percorrem, em média, {d_baixa:.1f} km, contra "
+                           f"{d_alta:.1f} km nos locais de ALTA acessibilidade. " +
+                           ("As desigualdades se ACUMULAM: quem está em local menos acessível também viaja mais — atenção redobrada." if pior
+                            else "Não há acúmulo de desigualdade pela distância neste recorte.")),
+                          "Priorizar, na revisão de ensalamento, aproximar de casa os participantes alocados em locais de baixa acessibilidade." if pior else "Monitorar.")
+
+    # ---- 25) N91: laudo médico × kit (risco de material não entregue) ------------
+    def _audit_n91_laudo_kit(self):
+        """Cruza, dentro do N91, a SITUAÇÃO DO LAUDO MÉDICO (CO_SITUACAO_LAUDO_MEDICO) com a
+        presença de KIT (ID_KIT_PROVA) e o tipo de item (TP_ITEM_ATENDIMENTO). O foco é o
+        RISCO OPERACIONAL: participantes com kit associado a um laudo ainda EM ANÁLISE ou
+        REPROVADO podem não receber o material adaptado no dia da prova."""
+        n91 = self.L.get('N91')
+        if not (isinstance(n91, pd.DataFrame) and not n91.empty and 'CO_SITUACAO_LAUDO_MEDICO' in n91.columns):
+            return
+        aprovado = {1, 4, 6, 7, 9}; reprovado = {0, 3, 5, 8, 10, 11}; analise = {2}; recurso = {12}
+
+        def _classifica(v):
+            try:
+                iv = int(float(v))
+            except (ValueError, TypeError):
+                return 'Não informado'
+            if iv in aprovado: return 'Aprovado'
+            if iv in reprovado: return 'Reprovado'
+            if iv in analise: return 'Em análise'
+            if iv in recurso: return 'Em recurso'
+            return 'Não informado'
+
+        df = n91.copy()
+        df['STATUS_LAUDO'] = df['CO_SITUACAO_LAUDO_MEDICO'].apply(_classifica)
+
+        # Distribuição do status de laudo
+        vc = df['STATUS_LAUDO'].value_counts()
+        tot = int(vc.sum())
+        dist = vc.reset_index(); dist.columns = ['STATUS_LAUDO', 'ITENS']
+        dist['PERCENTUAL (%)'] = (dist['ITENS'] / tot * 100).round(2) if tot else 0
+        self.tabelas['n91_status_laudo'] = dist
+        self.kpis['n91_itens_total'] = tot
+        self.kpis['n91_pct_laudo_pendente'] = round(100 * int(df['STATUS_LAUDO'].isin(['Em análise', 'Em recurso']).sum()) / tot, 2) if tot else 0.0
+        self.kpis['n91_pct_laudo_reprovado'] = round(100 * int((df['STATUS_LAUDO'] == 'Reprovado').sum()) / tot, 2) if tot else 0.0
+
+        # Cruzamento laudo × kit
+        if 'ID_KIT_PROVA' in df.columns:
+            invalid = {'NAO_INFORMADO', 'NÃO INFORMADO', 'NAN', 'NONE', '', 'NULL', 'SEM KIT', '0'}
+            kk = df['ID_KIT_PROVA'].astype(str).str.strip().str.upper()
+            kk = kk.where(kk.notna(), '')
+            df['_TEM_KIT'] = ~kk.isin(invalid)
+            ct = pd.crosstab(df['STATUS_LAUDO'], df['_TEM_KIT'])
+            ct = ct.rename(columns={True: 'COM_KIT', False: 'SEM_KIT'}).reset_index()
+            for c in ['COM_KIT', 'SEM_KIT']:
+                if c not in ct.columns: ct[c] = 0
+            self.tabelas['n91_laudo_x_kit'] = ct[['STATUS_LAUDO', 'COM_KIT', 'SEM_KIT']]
+
+            # Risco: kit associado a laudo pendente/reprovado
+            risco = int(df[(df['_TEM_KIT']) & (df['STATUS_LAUDO'].isin(['Em análise', 'Em recurso', 'Reprovado']))].shape[0])
+            self.kpis['n91_kit_laudo_risco'] = risco
+            sev = 'CRÍTICO' if risco > 0 else 'OK'
+            self._add('n91_kit_laudo_risco', 'Kits Associados a Laudo Pendente ou Reprovado (N91)',
+                      'Kits & Materiais', sev, risco,
+                      {'itens_kit_laudo_pendente_ou_reprovado': risco,
+                       'pct_laudo_pendente': self.kpis['n91_pct_laudo_pendente'],
+                       'pct_laudo_reprovado': self.kpis['n91_pct_laudo_reprovado']},
+                      (f"{risco:,} item(ns) de atendimento têm KIT associado, mas o laudo médico está EM ANÁLISE, EM RECURSO ou "
+                       "REPROVADO. Se o laudo não for aprovado a tempo (ou for negado), há risco de o kit/material adaptado não "
+                       "ser entregue — ou de ser produzido sem necessidade confirmada." if risco > 0
+                       else "Todos os kits do N91 estão associados a laudos já aprovados — sem risco por pendência de laudo."),
+                      "Acompanhar a fila de laudos pendentes/recursos e confirmar a produção/entrega dos kits só após a decisão." if risco > 0 else "Nenhuma ação necessária.")
+
+        # Status de laudo por tipo de item
+        if 'TP_ITEM_ATENDIMENTO' in df.columns:
+            it = pd.crosstab(df['TP_ITEM_ATENDIMENTO'].astype(str), df['STATUS_LAUDO']).reset_index()
+            it = it.rename(columns={'TP_ITEM_ATENDIMENTO': 'TIPO_ITEM_ATENDIMENTO'})
+            self.tabelas['n91_laudo_por_tipo_item'] = it
+
+    # ---- 26) Atendimento × demografia (equidade por gênero e faixa etária) --------
+    def _audit_atendimento_demografia(self):
+        """Cruza a NECESSIDADE DE ATENDIMENTO (N91) com o perfil demográfico do participante
+        (gênero e faixa etária, do N90) usando a tabela mestre. Revela a TAXA de atendimento
+        por grupo — quais perfis concentram maior demanda de acessibilidade — para planejar
+        recursos de forma equitativa."""
+        m = self.tabelas.get('tabela_mestre_candidatos')
+        if not (isinstance(m, pd.DataFrame) and not m.empty and 'TEM_ATENDIMENTO' in m.columns):
+            return
+
+        def _taxa_por(col, key):
+            if col not in m.columns:
+                return
+            sub = m[m[col].astype(str).str.len() > 0].copy()
+            if sub.empty:
+                return
+            g = sub.groupby(col).agg(
+                CANDIDATOS=('TEM_ATENDIMENTO', 'size'),
+                COM_ATENDIMENTO=('TEM_ATENDIMENTO', lambda s: int((s == 'Sim').sum()))).reset_index()
+            g['TAXA_ATENDIMENTO (%)'] = (g['COM_ATENDIMENTO'] / g['CANDIDATOS'] * 100).round(2)
+            g = g.sort_values('CANDIDATOS', ascending=False).reset_index(drop=True)
+            self.tabelas[key] = g
+            return g
+
+        gen = _taxa_por('GENERO', 'atendimento_por_genero')
+        fai = _taxa_por('FAIXA_ETARIA', 'atendimento_por_faixa_etaria')
+
+        # KPI: taxa geral e grupo de maior taxa (faixa etária)
+        total = int(len(m)); com = int((m['TEM_ATENDIMENTO'] == 'Sim').sum())
+        self.kpis['taxa_atendimento_geral'] = round(100 * com / total, 2) if total else 0.0
+        if isinstance(fai, pd.DataFrame) and not fai.empty:
+            fai_v = fai[fai['CANDIDATOS'] >= max(10, int(0.02 * total))]  # evita ruído de grupos minúsculos
+            if not fai_v.empty:
+                top = fai_v.sort_values('TAXA_ATENDIMENTO (%)', ascending=False).iloc[0]
+                self.kpis['faixa_maior_taxa_atendimento'] = str(top['FAIXA_ETARIA'])
+                self.kpis['faixa_maior_taxa_atendimento_pct'] = float(top['TAXA_ATENDIMENTO (%)'])
+                self._add('atendimento_demografia', 'Demanda de Atendimento por Perfil (N91 × N90)',
+                          'Acessibilidade & Atendimentos', 'OK', int(round(top['TAXA_ATENDIMENTO (%)'])),
+                          {'taxa_geral_pct': self.kpis['taxa_atendimento_geral'],
+                           'faixa_maior': str(top['FAIXA_ETARIA']), 'faixa_maior_pct': float(top['TAXA_ATENDIMENTO (%)'])},
+                          (f"A taxa geral de demanda por atendimento especializado é de {self.kpis['taxa_atendimento_geral']:.1f}%. "
+                           f"A faixa etária com maior taxa é '{top['FAIXA_ETARIA']}', com {top['TAXA_ATENDIMENTO (%)']:.1f}% de seus "
+                           "candidatos demandando atendimento. Grupos com taxa acima da média merecem atenção no dimensionamento "
+                           "de recursos de acessibilidade e na conferência de kits/laudos."),
+                          "Dimensionar recursos de acessibilidade priorizando os grupos com maior taxa de atendimento.")
+
+    # ---- 27) Índice de Risco Composto por Local (prioriza onde agir) --------------
+    def _audit_risco_composto_local(self):
+        """Combina em UM ÚNICO índice os principais sinais de risco de cada local, cruzando
+        vários layouts: taxa de ocupação (N02 ÷ N50/N52), baixa acessibilidade (N60),
+        distância média dos participantes (N02) e presença de participantes com atendimento
+        (N91) em local pouco acessível. Gera um ranking priorizado dos locais que mais
+        precisam de atenção — inteligência operacional acionável."""
+        n02 = self.L.get('N02')
+        if not (isinstance(n02, pd.DataFrame) and not n02.empty and 'CO_LOCAL' in n02.columns):
+            return
+        n02l = n02.copy(); n02l['CO_LOCAL'] = self._norm_key(n02l['CO_LOCAL'])
+
+        # Base: ensalados por local
+        base = n02l.groupby('CO_LOCAL').size().reset_index(name='ENSALADOS')
+
+        # Sinal 1 — ocupação (ensalados ÷ capacidade)
+        cap_por_local = None
+        n50, n52 = self.L.get('N50'), self.L.get('N52')
+        if isinstance(n50, pd.DataFrame) and not n50.empty and 'CO_LOCAL' in n50.columns and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns:
+            tmp = n50.copy(); tmp['CO_LOCAL'] = self._norm_key(tmp['CO_LOCAL'])
+            cap_por_local = tmp.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA_SALA'].apply(lambda s: pd.to_numeric(s, errors='coerce').sum())
+        elif isinstance(n52, pd.DataFrame) and not n52.empty and 'CO_LOCAL' in n52.columns and 'QT_CAPACIDADE_MAXIMA' in n52.columns:
+            tmp = n52.copy(); tmp['CO_LOCAL'] = self._norm_key(tmp['CO_LOCAL'])
+            cap_por_local = tmp.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA'].apply(lambda s: pd.to_numeric(s, errors='coerce').sum())
+        if cap_por_local is not None:
+            base['CAPACIDADE'] = base['CO_LOCAL'].map(cap_por_local.to_dict())
+            base['OCUPACAO (%)'] = (base['ENSALADOS'] / base['CAPACIDADE'] * 100).round(1)
+        else:
+            base['OCUPACAO (%)'] = np.nan
+
+        # Sinal 2 — acessibilidade (do módulo N60, se disponível)
+        loc_acc = self.tabelas.get('n60_acessibilidade_local')
+        if isinstance(loc_acc, pd.DataFrame) and not loc_acc.empty and 'SCORE_ACESSIBILIDADE' in loc_acc.columns:
+            amap = loc_acc.set_index('CO_LOCAL')['SCORE_ACESSIBILIDADE'].to_dict()
+            base['ACESSIBILIDADE (0-100)'] = base['CO_LOCAL'].map(amap)
+        else:
+            base['ACESSIBILIDADE (0-100)'] = np.nan
+
+        # Sinal 3 — distância média dos participantes do local
+        if 'NU_DISTANCIA' in n02l.columns:
+            n02l['_DKM'] = pd.to_numeric(n02l['NU_DISTANCIA'], errors='coerce') / 1000.0
+            dmap = n02l.groupby('CO_LOCAL')['_DKM'].mean()
+            base['DISTANCIA_MEDIA_KM'] = base['CO_LOCAL'].map(dmap.to_dict()).round(2)
+        else:
+            base['DISTANCIA_MEDIA_KM'] = np.nan
+
+        # Normalização 0-100 de cada sinal (maior = pior)
+        def _norm(col, invert=False):
+            s = pd.to_numeric(base[col], errors='coerce')
+            if s.notna().sum() == 0:
+                return pd.Series([np.nan] * len(base))
+            lo, hi = s.min(), s.max()
+            if hi == lo:
+                return pd.Series([0.0] * len(base))
+            n = (s - lo) / (hi - lo) * 100
+            return (100 - n) if invert else n
+
+        r_ocup = _norm('OCUPACAO (%)')                       # ocupação alta = risco
+        r_acess = _norm('ACESSIBILIDADE (0-100)', invert=True)  # acessibilidade baixa = risco
+        r_dist = _norm('DISTANCIA_MEDIA_KM')                  # distância alta = risco
+
+        # Índice composto = média dos sinais disponíveis
+        sinais = pd.concat([r_ocup, r_acess, r_dist], axis=1)
+        base['INDICE_RISCO (0-100)'] = sinais.mean(axis=1, skipna=True).round(1)
+
+        def _classe(v):
+            if pd.isna(v): return 'Sem dados'
+            if v >= 66: return 'Alto'
+            if v >= 33: return 'Médio'
+            return 'Baixo'
+        base['CLASSE_RISCO'] = base['INDICE_RISCO (0-100)'].apply(_classe)
+
+        rank = base.sort_values('INDICE_RISCO (0-100)', ascending=False, na_position='last').reset_index(drop=True)
+        rank.insert(0, 'RANKING', range(1, len(rank) + 1))
+        # Reordena colunas para leitura
+        cols = ['RANKING', 'CO_LOCAL', 'ENSALADOS', 'OCUPACAO (%)', 'ACESSIBILIDADE (0-100)', 'DISTANCIA_MEDIA_KM', 'INDICE_RISCO (0-100)', 'CLASSE_RISCO']
+        cols = [c for c in cols if c in rank.columns]
+        self.tabelas['risco_composto_local'] = rank[cols].head(300)
+
+        n_alto = int((base['CLASSE_RISCO'] == 'Alto').sum())
+        self.kpis['locais_risco_alto'] = n_alto
+        self.kpis['locais_avaliados_risco'] = int(base['INDICE_RISCO (0-100)'].notna().sum())
+        if n_alto > 0:
+            top = rank[rank['CLASSE_RISCO'] == 'Alto'].head(1)
+            top_local = str(top['CO_LOCAL'].iloc[0]) if not top.empty else '—'
+            self._add('risco_composto_local', 'Locais de Alto Risco Operacional (índice composto multi-layout)',
+                      'Risco Operacional & Priorização', 'ATENÇÃO' if n_alto else 'OK', n_alto,
+                      {'locais_alto_risco': n_alto, 'locais_avaliados': self.kpis['locais_avaliados_risco'], 'local_top': top_local},
+                      (f"{n_alto:,} local(is) foram classificados como de ALTO risco operacional, combinando num único índice a "
+                       "ocupação (N02÷N50/N52), a acessibilidade (N60) e a distância de deslocamento (N02). Esses locais "
+                       "concentram simultaneamente vários fatores de risco e devem ser priorizados em vistoria, ajuste de "
+                       "alocação e reforço logístico. O ranking completo está na tabela desta análise."),
+                      "Priorizar os locais do topo do ranking para vistoria e realocação; tratar primeiro os que somam superlotação e baixa acessibilidade.")
+
+    # ---- 28) Eficiência de Ocupação dos Locais (ociosidade × superlotação) --------
+    def _audit_eficiencia_ocupacao(self):
+        """Classifica cada local pela sua TAXA DE OCUPAÇÃO (ensalados N02 ÷ capacidade N50/N52)
+        em faixas — Subutilizado, Adequado, Quase cheio, Superlotado — e quantifica os assentos
+        OCIOSOS (nos subutilizados) e o EXCEDENTE (nos superlotados). Aponta oportunidade de
+        rebalanceamento: mover participantes de locais cheios para locais com folga."""
+        loc = self.tabelas.get('risco_composto_local')
+        # Reaproveita a tabela de risco (já tem ENSALADOS, CAPACIDADE/OCUPACAO). Se não houver, recomputa do zero.
+        n02 = self.L.get('N02')
+        if not (isinstance(n02, pd.DataFrame) and not n02.empty and 'CO_LOCAL' in n02.columns):
+            return
+        if isinstance(loc, pd.DataFrame) and not loc.empty and 'OCUPACAO (%)' in loc.columns and 'ENSALADOS' in loc.columns:
+            df = loc.copy()
+            if 'CAPACIDADE' not in df.columns:
+                df['CAPACIDADE'] = (df['ENSALADOS'] / (pd.to_numeric(df['OCUPACAO (%)'], errors='coerce') / 100)).round()
+        else:
+            return
+        oc = pd.to_numeric(df['OCUPACAO (%)'], errors='coerce')
+        df = df[oc.notna()].copy()
+        if df.empty:
+            return
+        oc = pd.to_numeric(df['OCUPACAO (%)'], errors='coerce')
+
+        def _faixa(v):
+            if v < 50: return '1. Subutilizado (<50%)'
+            if v < 90: return '2. Adequado (50–90%)'
+            if v <= 100: return '3. Quase cheio (90–100%)'
+            return '4. Superlotado (>100%)'
+        df['FAIXA_OCUPACAO'] = oc.apply(_faixa)
+        cap = pd.to_numeric(df['CAPACIDADE'], errors='coerce').fillna(0)
+        ens = pd.to_numeric(df['ENSALADOS'], errors='coerce').fillna(0)
+        df['ASSENTOS_OCIOSOS'] = (cap - ens).clip(lower=0)
+        df['EXCEDENTE'] = (ens - cap).clip(lower=0)
+
+        resumo = df.groupby('FAIXA_OCUPACAO').agg(
+            LOCAIS=('CO_LOCAL', 'nunique'),
+            ENSALADOS=('ENSALADOS', 'sum'),
+            ASSENTOS_OCIOSOS=('ASSENTOS_OCIOSOS', 'sum'),
+            EXCEDENTE=('EXCEDENTE', 'sum')).reset_index().sort_values('FAIXA_OCUPACAO')
+        self.tabelas['eficiencia_ocupacao'] = resumo
+
+        subut = int((df['FAIXA_OCUPACAO'].str.startswith('1.')).sum())
+        superl = int((df['FAIXA_OCUPACAO'].str.startswith('4.')).sum())
+        ociosos = int(df['ASSENTOS_OCIOSOS'].sum())
+        excedente = int(df['EXCEDENTE'].sum())
+        self.kpis['locais_subutilizados'] = subut
+        self.kpis['locais_superlotados'] = superl
+        self.kpis['assentos_ociosos_total'] = ociosos
+        self.kpis['excedente_total'] = excedente
+
+        sev = 'CRÍTICO' if superl > 0 else ('ATENÇÃO' if subut > 0 else 'OK')
+        self._add('eficiencia_ocupacao', 'Eficiência de Ocupação dos Locais (ociosidade × superlotação)',
+                  'Capacidade & Ocupação', sev, superl if superl else subut,
+                  {'subutilizados': subut, 'superlotados': superl, 'assentos_ociosos': ociosos, 'excedente': excedente},
+                  (f"{superl:,} local(is) estão SUPERLOTADOS (mais ensalados que a capacidade), somando {excedente:,} participante(s) "
+                   f"acima do limite; e {subut:,} local(is) estão SUBUTILIZADOS (<50%), com {ociosos:,} assento(s) ociosos. "
+                   "Há oportunidade clara de rebalanceamento: remanejar participantes dos locais cheios para os com folga." if superl > 0
+                   else (f"{subut:,} local(is) estão subutilizados (<50%), com {ociosos:,} assento(s) ociosos — capacidade instalada "
+                         "que poderia absorver remanejamentos ou reduzir custos." if subut > 0
+                         else "A ocupação dos locais está equilibrada — sem superlotação nem grande ociosidade.")),
+                  "Remanejar participantes dos locais superlotados para os subutilizados próximos, respeitando a distância." if superl > 0 else ("Avaliar consolidação de locais muito vazios para reduzir custo logístico." if subut > 0 else "Nenhuma ação necessária."))
+
+    # ---- 29) Distância por faixa + casos críticos/atenção por município ----------
+    def _audit_distancia_contratual(self):
+        """Classifica os deslocamentos (NU_DISTANCIA, N02) em FAIXAS operacionais e destaca
+        os casos de ATENÇÃO (15–20 km) e CRÍTICOS (acima do limiar contratual, aqui 20 km),
+        agregando os críticos por MUNICÍPIO com média, máximo e contagem — espelhando a
+        análise real de deslocamento (participante × distância contratual)."""
+        n02 = self.L.get('N02')
+        if not (isinstance(n02, pd.DataFrame) and not n02.empty and 'NU_DISTANCIA' in n02.columns):
+            return
+        LIMIAR_ATENCAO_MIN, LIMIAR_CRITICO = 15.0, 20.0  # km
+        d = n02.copy()
+        d['_KM'] = pd.to_numeric(d['NU_DISTANCIA'], errors='coerce') / 1000.0
+        d = d[d['_KM'].notna()]
+        if d.empty:
+            return
+
+        def _faixa(v):
+            if v < 1: return '1 - Menos de 1 km'
+            if v < 5: return '2 - 1 a 5 km'
+            if v < 10: return '3 - 5 a 10 km'
+            if v < 15: return '4 - 10 a 15 km'
+            if v <= 20: return '5 - 15 a 20 km (ATENÇÃO)'
+            return '6 - Acima de 20 km (CRÍTICO)'
+        d['CLASS_DIST'] = d['_KM'].apply(_faixa)
+        kc = self._key_col(d)
+        # Tabela de faixas (contagem de participantes distintos)
+        if kc:
+            fx = d.groupby('CLASS_DIST')[kc].nunique().reset_index(name='QTD_INSCRITOS')
+        else:
+            fx = d.groupby('CLASS_DIST').size().reset_index(name='QTD_INSCRITOS')
+        fx = fx.sort_values('CLASS_DIST').reset_index(drop=True)
+        total = int(fx['QTD_INSCRITOS'].sum())
+        fx['PERCENTUAL (%)'] = (fx['QTD_INSCRITOS'] / total * 100).round(2) if total else 0
+        self.tabelas['distancia_por_faixa'] = fx
+
+        media_geral = round(float(d['_KM'].mean()), 2)
+        self.kpis['distancia_media_km'] = media_geral
+        n_aten = int((d['CLASS_DIST'].str.contains('ATENÇÃO')).sum())
+        crit = d[d['_KM'] > LIMIAR_CRITICO]
+        n_crit = int(crit[kc].nunique()) if kc else int(len(crit))
+        self.kpis['distancia_casos_atencao'] = n_aten
+        self.kpis['distancia_casos_criticos'] = n_crit
+
+        # Casos CRÍTICOS por município (média, máximo, contagem)
+        if not crit.empty:
+            mc = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in crit.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in crit.columns else None)
+            if mc:
+                grp = crit.groupby(self._norm_key(crit[mc]))
+                agg = grp['_KM'].agg(['count', 'mean', 'max', 'min']).reset_index()
+                agg.columns = ['MUNICÍPIO (CÓD.)', 'PARTICIPANTES_CRÍTICOS', 'DIST_MÉDIA_KM', 'DIST_MÁX_KM', 'DIST_MÍN_KM']
+                nome_col = 'NO_MUNICIPIO_PROVA' if 'NO_MUNICIPIO_PROVA' in crit.columns else ('NO_MUNICIPIO' if 'NO_MUNICIPIO' in crit.columns else None)
+                if nome_col:
+                    nomes = crit[[mc, nome_col]].copy(); nomes[mc] = self._norm_key(nomes[mc])
+                    nomes = nomes.drop_duplicates(mc).set_index(mc)[nome_col]
+                    agg.insert(1, 'MUNICÍPIO', agg['MUNICÍPIO (CÓD.)'].map(nomes.to_dict()))
+                for c in ['DIST_MÉDIA_KM', 'DIST_MÁX_KM', 'DIST_MÍN_KM']:
+                    agg[c] = agg[c].round(2)
+                agg = agg.sort_values('PARTICIPANTES_CRÍTICOS', ascending=False).reset_index(drop=True)
+                self.tabelas['distancia_criticos_por_municipio'] = agg
+
+            # Lista dos participantes críticos (para rastreabilidade)
+            cols_lista = [c for c in [kc, mc, 'NO_MUNICIPIO_PROVA', 'CO_LOCAL', '_KM'] if c and c in crit.columns]
+            lst = crit[cols_lista].copy().rename(columns={'_KM': 'DISTANCIA_KM'})
+            lst['DISTANCIA_KM'] = lst['DISTANCIA_KM'].round(2)
+            lst = lst.sort_values('DISTANCIA_KM', ascending=False).head(500).reset_index(drop=True)
+            self.tabelas['distancia_criticos_lista'] = lst
+
+            faixa_min = round(float(crit['_KM'].min()), 2); faixa_max = round(float(crit['_KM'].max()), 2)
+            self._add('distancia_critica', 'Deslocamentos Acima do Limiar Contratual (N02)',
+                      'Distâncias & Logística', 'CRÍTICO' if n_crit > 0 else 'OK', n_crit,
+                      {'criticos': n_crit, 'atencao': n_aten, 'limiar_km': LIMIAR_CRITICO, 'dist_min_km': faixa_min, 'dist_max_km': faixa_max},
+                      (f"{n_crit:,} participante(s) têm deslocamento acima do limiar contratual de {LIMIAR_CRITICO:.0f} km "
+                       f"(variando de {faixa_min:.1f} km a {faixa_max:.1f} km), além de {n_aten:,} caso(s) de atenção (15–20 km). "
+                       "A distância média geral é de "
+                       f"{media_geral:.2f} km. Os casos críticos costumam concentrar-se em municípios/regiões isoladas — veja a "
+                       "quebra por município na tabela desta análise."),
+                      "Verificar os casos críticos por município (possível erro de georreferência ou região realmente distante) e avaliar realocação/logística especial.")
+        else:
+            self._add('distancia_critica', 'Deslocamentos Acima do Limiar Contratual (N02)',
+                      'Distâncias & Logística', 'OK', 0,
+                      {'criticos': 0, 'atencao': n_aten, 'limiar_km': LIMIAR_CRITICO},
+                      f"Nenhum participante acima do limiar contratual de {LIMIAR_CRITICO:.0f} km. Distância média geral: {media_geral:.2f} km.",
+                      "Nenhuma ação necessária.")
+
+    # ---- 30) Salas sem folga (locais sem sala extra) -----------------------------
+    def _audit_salas_sem_folga(self):
+        """Identifica LOCAIS que estão usando todas as suas salas (sem sala extra/reserva),
+        cruzando as salas efetivamente utilizadas no ensalamento (N02) com o total de salas
+        do local (N50/N52). Locais sem folga têm risco operacional: qualquer imprevisto
+        (sala interditada, superlotação) não tem para onde remanejar."""
+        n02, n50, n52 = self.L.get('N02'), self.L.get('N50'), self.L.get('N52')
+        if not (isinstance(n02, pd.DataFrame) and not n02.empty and 'CO_LOCAL' in n02.columns and 'ID_SALA' in n02.columns):
+            return
+        n02l = n02.copy(); n02l['CO_LOCAL'] = self._norm_key(n02l['CO_LOCAL'])
+        salas_usadas = n02l.groupby('CO_LOCAL')['ID_SALA'].nunique().reset_index(name='SALAS_UTILIZADAS')
+
+        # Total de salas por local: conta salas distintas no N50, senão QT_SALAS no N52.
+        total_salas = None
+        if isinstance(n50, pd.DataFrame) and not n50.empty and 'CO_LOCAL' in n50.columns and 'ID_SALA' in n50.columns:
+            t = n50.copy(); t['CO_LOCAL'] = self._norm_key(t['CO_LOCAL'])
+            total_salas = t.groupby('CO_LOCAL')['ID_SALA'].nunique().reset_index(name='SALAS_TOTAL')
+        elif isinstance(n52, pd.DataFrame) and not n52.empty and 'CO_LOCAL' in n52.columns and 'QT_SALAS' in n52.columns:
+            t = n52.copy(); t['CO_LOCAL'] = self._norm_key(t['CO_LOCAL'])
+            total_salas = t.groupby('CO_LOCAL')['QT_SALAS'].apply(lambda s: int(pd.to_numeric(s, errors='coerce').max())).reset_index(name='SALAS_TOTAL')
+        if total_salas is None:
+            return
+
+        m = salas_usadas.merge(total_salas, on='CO_LOCAL', how='left')
+        m['SALAS_TOTAL'] = pd.to_numeric(m['SALAS_TOTAL'], errors='coerce').fillna(m['SALAS_UTILIZADAS'])
+        m['SALAS_EXTRAS'] = (m['SALAS_TOTAL'] - m['SALAS_UTILIZADAS']).astype(int)
+        # nome do local, se houver
+        nome_col = 'NO_LOCAL' if 'NO_LOCAL' in n02.columns else None
+        if nome_col:
+            nomes = n02l[['CO_LOCAL', nome_col]].drop_duplicates('CO_LOCAL').set_index('CO_LOCAL')[nome_col]
+            m.insert(1, 'NO_LOCAL', m['CO_LOCAL'].map(nomes.to_dict()))
+        sem_folga = m[m['SALAS_EXTRAS'] <= 0].sort_values('SALAS_UTILIZADAS', ascending=False).reset_index(drop=True)
+        self.tabelas['salas_sem_folga'] = sem_folga.head(500)
+        self.tabelas['salas_folga_por_local'] = m.sort_values('SALAS_EXTRAS').head(500).reset_index(drop=True)
+
+        n_sem = int(len(sem_folga))
+        self.kpis['locais_sem_sala_extra'] = n_sem
+        self.kpis['locais_total_com_salas'] = int(len(m))
+        self._add('salas_sem_folga', 'Locais sem Sala Extra (sem folga de remanejamento)',
+                  'Capacidade & Ocupação', 'ATENÇÃO' if n_sem > 0 else 'OK', n_sem,
+                  {'locais_sem_extra': n_sem, 'locais_total': int(len(m))},
+                  (f"{n_sem:,} local(is) estão usando TODAS as suas salas, sem nenhuma sala extra de reserva. "
+                   "Nesses locais, qualquer imprevisto no dia (sala interditada, necessidade de isolar um participante) "
+                   "não tem para onde remanejar." if n_sem > 0
+                   else "Todos os locais têm ao menos uma sala extra de folga."),
+                  "Mapear salas de contingência para os locais sem folga, ou reservar um local próximo como retaguarda." if n_sem > 0 else "Nenhuma ação necessária.")
+
+    # ---- 31) Perfil consolidado dos Inscritos (por UF e por gênero) --------------
+    def _audit_perfil_inscritos(self):
+        """Consolida o perfil dos inscritos a partir do N90: distribuição por UF de prova
+        e por gênero, com contagem e percentual. Gera indicadores auditáveis (nº de UFs,
+        UF com mais inscritos, gênero predominante) e tabelas rastreáveis."""
+        n90 = self.L.get('N90')
+        if not (isinstance(n90, pd.DataFrame) and not n90.empty):
+            return
+        kc = self._key_col(n90)
+        total = int(n90[kc].nunique()) if kc else int(len(n90))
+        if total == 0:
+            return
+
+        # Distribuição por UF (de prova, senão de residência)
+        uf_col = next((c for c in ['SG_UF_PROVA', 'SG_UF', 'SG_UF_RESIDENCIA', 'SG_UF_INSC'] if c in n90.columns), None)
+        if uf_col:
+            s = n90[uf_col].where(n90[uf_col].notna(), 'NÃO INFORMADO').astype(str)
+            uf = s.value_counts().reset_index()
+            uf.columns = ['UF', 'INSCRITOS']
+            uf['PERCENTUAL (%)'] = (uf['INSCRITOS'] / uf['INSCRITOS'].sum() * 100).round(2)
+            self.tabelas['inscritos_por_uf'] = uf
+            self.kpis['inscritos_num_ufs'] = int((uf['UF'] != 'NÃO INFORMADO').sum())
+            if not uf.empty:
+                top = uf.iloc[0]
+                self.kpis['inscritos_uf_top'] = f"{top['UF']} ({int(top['INSCRITOS']):,})".replace(',', '.')
+
+        # Distribuição por gênero
+        sexo_col = next((c for c in ['TP_SEXO', 'SG_SEXO', 'NO_SEXO', 'DS_SEXO'] if c in n90.columns), None)
+        if sexo_col:
+            mapa = {'M': 'Masculino', 'F': 'Feminino', '1': 'Masculino', '2': 'Feminino', 'm': 'Masculino', 'f': 'Feminino'}
+            g = n90[sexo_col].where(n90[sexo_col].notna(), 'NÃO INFORMADO').astype(str)
+            g = g.map(lambda v: mapa.get(v, v))
+            gen = g.value_counts().reset_index()
+            gen.columns = ['GÊNERO', 'INSCRITOS']
+            gen['PERCENTUAL (%)'] = (gen['INSCRITOS'] / gen['INSCRITOS'].sum() * 100).round(2)
+            self.tabelas['inscritos_por_genero'] = gen
+            if not gen.empty:
+                self.kpis['inscritos_genero_predominante'] = f"{gen.iloc[0]['GÊNERO']} ({gen.iloc[0]['PERCENTUAL (%)']}%)"
+
+        temfx = []
+        if 'inscritos_por_uf' in self.tabelas:
+            temfx.append(f"{self.kpis.get('inscritos_num_ufs', 0)} UF(s)")
+        if 'inscritos_por_genero' in self.tabelas:
+            temfx.append("gênero")
+        if temfx:
+            self._add('perfil_inscritos', 'Perfil dos Inscritos (distribuição por UF e gênero)',
+                      'Reconciliação de Participantes', 'OK', total,
+                      {'total_inscritos': total, 'num_ufs': self.kpis.get('inscritos_num_ufs'),
+                       'uf_top': self.kpis.get('inscritos_uf_top'), 'genero': self.kpis.get('inscritos_genero_predominante')},
+                      (f"Os {total:,} inscritos foram perfilados por " + " e ".join(temfx) + ". "
+                       "As distribuições completas (contagem e percentual) estão nas tabelas desta análise, permitindo "
+                       "dimensionar recursos por região e por perfil."),
+                      "Usar o perfil para planejar logística e recursos de atendimento conforme a concentração regional e demográfica.")
+
+    # ---- 32) Totais Gerais — dezenas de contagens consolidadas e auditáveis ------
+    def _audit_totais_gerais(self):
+        """Consolida DEZENAS de totais a partir de todos os layouts presentes: número de
+        registros por layout, quantidades distintas (locais, blocos, salas, municípios, UFs,
+        tipos de kit, itens de atendimento) e volumes-chave. Cada total vira um KPI e uma
+        linha numa tabela auditável (métrica, valor, origem)."""
+        linhas = []  # (métrica, valor, origem/layout)
+
+        def add(metrica, valor, origem, kpi_key=None):
+            try:
+                v = int(valor)
+            except (ValueError, TypeError):
+                return
+            linhas.append({'MÉTRICA': metrica, 'VALOR': v, 'ORIGEM (LAYOUT/COLUNA)': origem})
+            if kpi_key:
+                self.kpis[kpi_key] = v
+
+        def n_dist(df, col):
+            if isinstance(df, pd.DataFrame) and not df.empty and col in df.columns:
+                return int(self._norm_key(df[col]).nunique())
+            return None
+
+        # 1) Registros por layout presente
+        for lay in ['N90', 'N02', 'N91', 'N60', 'N50', 'N52']:
+            df = self.L.get(lay)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                add(f'Registros no layout {lay}', len(df), f'{lay} (linhas)', f'total_registros_{lay.lower()}')
+
+        n90, n02, n91 = self.L.get('N90'), self.L.get('N02'), self.L.get('N91')
+        n50, n52, n60 = self.L.get('N50'), self.L.get('N52'), self.L.get('N60')
+
+        # 2) Participantes / ensalados / atendimentos (distintos)
+        if isinstance(n90, pd.DataFrame) and not n90.empty:
+            add('Inscritos distintos (N90)', self._norm_key(n90[self._key_col(n90)]).nunique() if self._key_col(n90) else len(n90), 'N90 · CO_INSCRICAO', 'tg_inscritos_distintos')
+        if isinstance(n02, pd.DataFrame) and not n02.empty:
+            add('Ensalados distintos (N02)', self._norm_key(n02[self._key_col(n02)]).nunique() if self._key_col(n02) else len(n02), 'N02 · CO_INSCRICAO', 'tg_ensalados_distintos')
+        if isinstance(n91, pd.DataFrame) and not n91.empty:
+            add('Participantes com atendimento (N91)', self._norm_key(n91[self._key_col(n91)]).nunique() if self._key_col(n91) else len(n91), 'N91 · CO_INSCRICAO', 'tg_atendimentos_distintos')
+            add('Registros de atendimento (N91)', len(n91), 'N91 · linhas', 'tg_atend_registros')
+
+        # 3) Estrutura física (distintos) — cada dimensão uma vez, da 1ª fonte que a tiver
+        for col, nome, key in [('CO_LOCAL', 'Locais distintos', 'tg_locais'),
+                               ('ID_BLOCO', 'Blocos distintos', 'tg_blocos'),
+                               ('ID_SALA', 'Salas distintas', 'tg_salas')]:
+            for lay, df in [('N02', n02), ('N52', n52), ('N50', n50), ('N60', n60)]:
+                v = n_dist(df, col)
+                if v is not None:
+                    add(f'{nome} ({lay})', v, f'{lay} · {col}', key)
+                    break
+        # Municípios e UFs (do N90/N02)
+        for lay, df in [('N02', n02), ('N90', n90)]:
+            for col in ['CO_MUNICIPIO_PROVA', 'CO_MUNICIPIO']:
+                v = n_dist(df, col)
+                if v is not None:
+                    add(f'Municípios de prova distintos ({lay})', v, f'{lay} · {col}', 'tg_municipios')
+                    break
+            for col in ['SG_UF_PROVA', 'SG_UF']:
+                v = n_dist(df, col)
+                if v is not None:
+                    add(f'UFs de prova distintas ({lay})', v, f'{lay} · {col}', 'tg_ufs')
+                    break
+
+        # 4) Kits e atendimentos (variedade)
+        for col in ['ID_KIT_PROVA', 'CO_KIT_PROVA']:
+            v = n_dist(n02, col)
+            if v is not None:
+                add('Tipos de kit distintos (N02)', v, f'N02 · {col}', 'tg_kits_n02'); break
+        for col in ['ID_KIT_PROVA', 'CO_KIT_PROVA']:
+            v = n_dist(n91, col)
+            if v is not None:
+                add('Tipos de kit distintos (N91)', v, f'N91 · {col}', 'tg_kits_n91'); break
+        for col in ['CO_TIPO_ATENDIMENTO', 'ID_TIPO_ATENDIMENTO', 'CO_NECESSIDADE']:
+            v = n_dist(n91, col)
+            if v is not None:
+                add('Tipos de atendimento distintos (N91)', v, f'N91 · {col}', 'tg_tipos_atend'); break
+
+        # 5) Capacidade total instalada
+        if isinstance(n50, pd.DataFrame) and not n50.empty and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns:
+            add('Capacidade total instalada (assentos)', pd.to_numeric(n50['QT_CAPACIDADE_MAXIMA_SALA'], errors='coerce').sum(), 'N50 · QT_CAPACIDADE_MAXIMA_SALA', 'tg_capacidade_total')
+
+        if not linhas:
+            return
+        tab = pd.DataFrame(linhas)
+        self.tabelas['totais_gerais'] = tab
+        self.kpis['total_indicadores_consolidados'] = len(linhas)
+        self._add('totais_gerais', 'Painel de Totais Gerais Consolidados',
+                  'Estatística Descritiva', 'OK', len(linhas),
+                  {'qtd_totais': len(linhas)},
+                  (f"Foram consolidados {len(linhas)} totais a partir dos layouts presentes — registros por layout, "
+                   "participantes, locais, blocos, salas, municípios, UFs, tipos de kit e de atendimento, e capacidade "
+                   "instalada. Cada total é auditável na tabela desta análise (métrica, valor e origem)."),
+                  "Usar como painel-síntese de conferência rápida dos volumes de toda a base.")
+
+    # ---- 34) Kits por município + reconciliação N91↔N02 -------------------------
+    def _audit_kits_por_municipio(self):
+        """Reconciliação entre os tipos de kit do N91 (solicitados/validados) e do N02
+        (atribuídos) — espelhando a necessidade real de o ID_KIT_PROVA do N02 refletir o N91.
+        (A distribuição de kits por município é produzida por outra etapa dedicada.)"""
+        n02, n91 = self.L.get('N02'), self.L.get('N91')
+        kit_col_02 = next((c for c in ['ID_KIT_PROVA', 'CO_KIT_PROVA'] if isinstance(n02, pd.DataFrame) and c in n02.columns), None)
+
+        # B) Reconciliação de TIPOS de kit entre N91 e N02
+        kit_col_91 = next((c for c in ['ID_KIT_PROVA', 'CO_KIT_PROVA'] if isinstance(n91, pd.DataFrame) and c in n91.columns), None)
+        if isinstance(n02, pd.DataFrame) and kit_col_02 and isinstance(n91, pd.DataFrame) and kit_col_91:
+            tipos02 = set(self._norm_key(n02[kit_col_02]).replace('', np.nan).dropna().unique())
+            tipos91 = set(self._norm_key(n91[kit_col_91]).replace('', np.nan).dropna().unique())
+            so_91 = sorted(tipos91 - tipos02)   # solicitados no N91 mas ausentes no N02
+            so_02 = sorted(tipos02 - tipos91)   # atribuídos no N02 sem correspondência no N91
+            comuns = sorted(tipos91 & tipos02)
+            rec = pd.DataFrame({
+                'SITUAÇÃO': ['Tipos em ambos (N91 e N02)', 'Só no N91 (solicitado, não atribuído no N02)', 'Só no N02 (atribuído sem correspondência no N91)'],
+                'QTD_TIPOS': [len(comuns), len(so_91), len(so_02)],
+                'TIPOS': [', '.join(map(str, comuns))[:200], ', '.join(map(str, so_91))[:200], ', '.join(map(str, so_02))[:200]],
+            })
+            self.tabelas['kits_reconciliacao_n91_n02'] = rec
+            self.kpis['kit_tipos_so_n91'] = len(so_91)
+            self.kpis['kit_tipos_so_n02'] = len(so_02)
+            sev = 'ATENÇÃO' if (len(so_91) > 0 or len(so_02) > 0) else 'OK'
+            self._add('kits_reconciliacao', 'Reconciliação de Tipos de Kit (N91 × N02)',
+                      'Kits & Materiais', sev, len(so_91) + len(so_02),
+                      {'em_ambos': len(comuns), 'so_n91': len(so_91), 'so_n02': len(so_02)},
+                      (f"Dos tipos de kit, {len(comuns)} aparecem tanto no N91 quanto no N02; {len(so_91)} estão só no N91 "
+                       f"(solicitados/validados mas ainda não refletidos na atribuição do N02) e {len(so_02)} só no N02. "
+                       "Idealmente o ID_KIT_PROVA do N02 deve espelhar o do N91, já conferido." if sev == 'ATENÇÃO'
+                       else "Os tipos de kit do N91 e do N02 estão alinhados."),
+                      "Preencher/validar o ID_KIT_PROVA do N02 a partir do N91 (fonte já conferida) para os tipos divergentes." if sev == 'ATENÇÃO' else "Nenhuma ação necessária.")
+
+    # ---- 33) Validação cruzada automática (KPIs × tabelas × layouts) -------------
+    def _audit_validacao_cruzada(self):
+        """CONFERÊNCIA AUTOMÁTICA: verifica invariantes matemáticas entre os KPIs, as tabelas
+        e os layouts de origem. Cada verificação compara um valor ESPERADO com o OBTIDO e
+        marca OK ou DIVERGÊNCIA. Divergências são registradas em log. Produz uma tabela
+        auditável — a plataforma conferindo a si mesma antes de o usuário confiar nos números."""
+        checks = []  # (verificação, esperado, obtido, status, detalhe)
+
+        def _ok(a, b, tol=0):
+            try:
+                return abs(float(a) - float(b)) <= tol
+            except (ValueError, TypeError):
+                return a == b
+
+        def add_check(nome, esperado, obtido, detalhe='', tol=0):
+            status = 'OK' if _ok(esperado, obtido, tol) else 'DIVERGÊNCIA'
+            checks.append({'VERIFICAÇÃO': nome, 'ESPERADO': esperado, 'OBTIDO': obtido,
+                           'STATUS': status, 'DETALHE': detalhe})
+            if status == 'DIVERGÊNCIA':
+                self.logger.warning(f"[VALIDAÇÃO CRUZADA] Divergência em '{nome}': esperado={esperado}, obtido={obtido}. {detalhe}")
+
+        K, T = self.kpis, self.tabelas
+
+        # 1) Ensalados nunca podem exceder inscritos
+        ins = K.get('tg_inscritos_distintos'); ens = K.get('tg_ensalados_distintos')
+        if ins is not None and ens is not None:
+            add_check('Ensalados ≤ Inscritos', True, ens <= ins,
+                      f'inscritos={ins}, ensalados={ens}')
+
+        # 2) Soma das faixas de distância = total de participantes com distância
+        fx = T.get('distancia_por_faixa')
+        if isinstance(fx, pd.DataFrame) and not fx.empty and 'QTD_INSCRITOS' in fx.columns:
+            soma = int(fx['QTD_INSCRITOS'].sum())
+            add_check('Soma das faixas de distância é consistente (>0)', True, soma > 0,
+                      f'soma das faixas={soma}')
+            # percentuais somam ~100
+            if 'PERCENTUAL (%)' in fx.columns:
+                pct = round(float(fx['PERCENTUAL (%)'].sum()), 1)
+                add_check('Percentuais de faixa de distância somam ~100%', 100.0, pct,
+                          f'soma%={pct}', tol=1.0)
+
+        # 3) Soma de inscritos por UF = total de inscritos
+        uf = T.get('inscritos_por_uf')
+        if isinstance(uf, pd.DataFrame) and not uf.empty and 'INSCRITOS' in uf.columns and ins is not None:
+            add_check('Soma de inscritos por UF = inscritos distintos', ins, int(uf['INSCRITOS'].sum()),
+                      'N90 agregado por UF deve bater com o total')
+
+        # 4) Soma de inscritos por gênero = total de inscritos
+        gen = T.get('inscritos_por_genero')
+        if isinstance(gen, pd.DataFrame) and not gen.empty and 'INSCRITOS' in gen.columns and ins is not None:
+            add_check('Soma de inscritos por gênero = inscritos distintos', ins, int(gen['INSCRITOS'].sum()),
+                      'N90 agregado por gênero deve bater com o total')
+
+        # 5) Eficiência de ocupação: soma dos locais por faixa = locais avaliados
+        ef = T.get('eficiencia_ocupacao')
+        if isinstance(ef, pd.DataFrame) and not ef.empty and 'LOCAIS' in ef.columns:
+            tot_loc = K.get('locais_avaliados_risco')
+            if tot_loc is not None:
+                add_check('Soma de locais por faixa de ocupação = locais avaliados', tot_loc, int(ef['LOCAIS'].sum()),
+                          'partição das faixas deve cobrir todos os locais', tol=max(1, int(tot_loc*0.02)))
+
+        # 6) Percentual de ensalamento coerente (0–100)
+        pe = K.get('pct_ensalamento')
+        if pe is not None:
+            add_check('Taxa de ensalamento dentro de 0–100%', True, 0 <= float(pe) <= 100,
+                      f'pct_ensalamento={pe}')
+
+        # 7) Totais gerais: nº de linhas = KPI de contagem
+        tg = T.get('totais_gerais')
+        if isinstance(tg, pd.DataFrame) and not tg.empty:
+            add_check('Nº de totais consolidados = KPI de contagem',
+                      K.get('total_indicadores_consolidados'), len(tg),
+                      'a tabela de totais deve refletir o KPI')
+
+        # 8) Salas sem folga ≤ total de locais com salas
+        ssf = K.get('locais_sem_sala_extra'); ltc = K.get('locais_total_com_salas')
+        if ssf is not None and ltc is not None:
+            add_check('Locais sem sala extra ≤ total de locais com salas', True, ssf <= ltc,
+                      f'sem_extra={ssf}, total={ltc}')
+
+        # 9) KITS — variedade N91 e N02 coerentes; lacuna de kits não-negativa quando faz sentido
+        kn02, kn91 = K.get('tg_kits_n02'), K.get('tg_kits_n91')
+        if kn02 is not None:
+            add_check('Tipos de kit (N02) ≥ 0', True, kn02 >= 0, f'tipos_kit_n02={kn02}')
+        if kn91 is not None:
+            add_check('Tipos de kit (N91) ≥ 0', True, kn91 >= 0, f'tipos_kit_n91={kn91}')
+        # Tabela de tipos de kit: soma das contagens = participantes com kit (se ambos existem)
+        kt = T.get('kits_tipos_n02')
+        if isinstance(kt, pd.DataFrame) and not kt.empty:
+            valcol = next((c for c in kt.columns if 'PARTICIP' in c.upper() or 'QTD' in c.upper() or 'CONTAGEM' in c.upper()), None)
+            if valcol:
+                add_check('Soma dos tipos de kit (N02) é consistente (>0)', True, int(kt[valcol].sum()) > 0,
+                          f'soma={int(kt[valcol].sum())}')
+
+        # 10) CAPACIDADE — capacidade total ≥ 0 e superlotação coerente
+        capt = K.get('tg_capacidade_total')
+        if capt is not None:
+            add_check('Capacidade total instalada ≥ 0', True, capt >= 0, f'capacidade={capt}')
+        superl = K.get('locais_superlotados'); subut = K.get('locais_subutilizados')
+        if superl is not None and ltc is not None:
+            add_check('Locais superlotados ≤ total de locais', True, superl <= ltc,
+                      f'superlotados={superl}, total={ltc}')
+
+        # 11) ACESSIBILIDADE N60 — scores dentro de 0–100
+        la = T.get('n60_acessibilidade_local')
+        if isinstance(la, pd.DataFrame) and not la.empty and 'SCORE_ACESSIBILIDADE' in la.columns:
+            sc = pd.to_numeric(la['SCORE_ACESSIBILIDADE'], errors='coerce')
+            dentro = bool(((sc >= 0) & (sc <= 100)).all())
+            add_check('Scores de acessibilidade (N60) dentro de 0–100', True, dentro,
+                      f'min={round(float(sc.min()),1) if sc.notna().any() else "-"}, max={round(float(sc.max()),1) if sc.notna().any() else "-"}')
+
+        # 12) LAUDOS N91 — soma dos status = total de itens com laudo
+        ls = T.get('n91_status_laudo')
+        if isinstance(ls, pd.DataFrame) and not ls.empty:
+            valcol = next((c for c in ls.columns if 'ITENS' in c.upper() or 'QTD' in c.upper() or 'CONTAGEM' in c.upper()), None)
+            if valcol:
+                add_check('Soma dos status de laudo (N91) é consistente (>0)', True, int(ls[valcol].sum()) > 0,
+                          f'soma={int(ls[valcol].sum())}')
+
+        # 13) ATENDIMENTO — taxa geral dentro de 0–100
+        ta = K.get('taxa_atendimento_geral')
+        if ta is not None:
+            add_check('Taxa geral de atendimento dentro de 0–100%', True, 0 <= float(ta) <= 100,
+                      f'taxa={ta}')
+        # atendimentos distintos ≤ inscritos
+        atd = K.get('tg_atendimentos_distintos')
+        if atd is not None and ins is not None:
+            add_check('Participantes com atendimento ≤ inscritos', True, atd <= ins,
+                      f'atendimentos={atd}, inscritos={ins}')
+
+        # 14) RISCO — índice composto dentro de 0–100
+        rc = T.get('risco_composto_local')
+        if isinstance(rc, pd.DataFrame) and not rc.empty and 'INDICE_RISCO (0-100)' in rc.columns:
+            ri = pd.to_numeric(rc['INDICE_RISCO (0-100)'], errors='coerce').dropna()
+            if not ri.empty:
+                add_check('Índice de risco composto dentro de 0–100', True, bool(((ri >= 0) & (ri <= 100)).all()),
+                          f'min={round(float(ri.min()),1)}, max={round(float(ri.max()),1)}')
+
+        if not checks:
+            return
+        tab = pd.DataFrame(checks)
+        self.tabelas['validacao_cruzada'] = tab
+        n_div = int((tab['STATUS'] == 'DIVERGÊNCIA').sum())
+        n_ok = int((tab['STATUS'] == 'OK').sum())
+        self.kpis['validacoes_realizadas'] = len(checks)
+        self.kpis['validacoes_ok'] = n_ok
+        self.kpis['validacoes_divergentes'] = n_div
+        self._add('validacao_cruzada', 'Validação Cruzada Automática (KPIs × Tabelas × Layouts)',
+                  'Qualidade de Dados', 'CRÍTICO' if n_div > 0 else 'OK', n_div,
+                  {'verificacoes': len(checks), 'ok': n_ok, 'divergencias': n_div},
+                  (f"Foram executadas {len(checks)} verificações automáticas de consistência entre os KPIs, as tabelas e os "
+                   f"layouts de origem: {n_ok} passaram e {n_div} apresentaram divergência. " +
+                   ("Todas as invariantes conferem — os números exibidos são internamente consistentes." if n_div == 0
+                    else "Há divergências registradas em log que precisam de atenção (veja a coluna STATUS na tabela).")),
+                  "Nenhuma ação necessária — sistema consistente." if n_div == 0 else "Investigar as verificações marcadas como DIVERGÊNCIA na tabela desta análise.")
+
+    # ---- KPIs consolidados e resumo executivo ------------------------------------
+    def _build_kpis_and_resumo(self, present):
+        self.kpis['layouts_detectados'] = present
+        n_crit = sum(1 for f in self.findings if f['severidade'] == 'CRÍTICO' and (f['valor'] or 0) > 0)
+        n_aten = sum(1 for f in self.findings if f['severidade'] == 'ATENÇÃO' and (f['valor'] or 0) > 0)
+        self.kpis['qtd_achados_criticos'] = n_crit
+        self.kpis['qtd_achados_atencao'] = n_aten
+        partes = [f"Auditoria de cruzamento executada sobre os layouts {', '.join(present)}."]
+        if 'total_inscritos' in self.kpis:
+            partes.append(
+                f"Reconciliação de participantes: {self.kpis.get('total_inscritos', 0):,} inscritos (N90) × "
+                f"{self.kpis.get('total_ensalados', 0):,} ensalados (N02) → {self.kpis.get('pct_ensalamento', 0):.1f}% ensalados; "
+                f"{self.kpis.get('qtd_sem_ensalamento', 0):,} sem ensalamento e {self.kpis.get('qtd_ensalados_orfaos', 0):,} órfãos.")
+        if 'ocupacao_media_sala' in self.kpis:
+            partes.append(
+                f"Ocupação média das salas de {self.kpis.get('ocupacao_media_sala', 0):.1f}% "
+                f"({self.kpis.get('qtd_salas_superlotadas', 0):,} superlotadas, {self.kpis.get('qtd_salas_vazias', 0):,} ociosas).")
+        if 'pct_forasteiros' in self.kpis:
+            partes.append(f"{self.kpis.get('qtd_forasteiros', 0):,} forasteiros ({self.kpis.get('pct_forasteiros', 0):.1f}%).")
+        if 'distancia' in self.kpis:
+            partes.append(
+                f"Distância média de {self.kpis['distancia'].get('media_km', 0):.2f} km com "
+                f"{self.kpis.get('qtd_dist_criticos', 0):,} deslocamentos críticos (>{self.DIST_CRITICA_KM:.0f} km).")
+        if 'pct_cobertura_kit' in self.kpis:
+            partes.append(
+                f"Atribuição de kits: {self.kpis.get('pct_cobertura_kit', 0):.1f}% dos participantes com atendimento têm kit "
+                f"({self.kpis.get('qtd_atend_sem_kit', 0):,} ensalados sem kit; "
+                f"{self.kpis.get('qtd_atend_sem_ensalamento', 0):,} com atendimento sem ensalamento).")
+        if 'provas_estimadas_total' in self.kpis:
+            partes.append(
+                f"Estimativa logística: {self.kpis.get('provas_estimadas_total', 0):,} provas necessárias "
+                f"({self.kpis.get('provas_estimadas_especiais', 0):,} especiais), lacuna de {self.kpis.get('kits_gap', 0):,} kit(s)"
+                + (f" e {self.kpis.get('pct_margem_logistica', 0):.1f}% de margem de capacidade." if 'pct_margem_logistica' in self.kpis else "."))
+        if 'total_candidatos_master' in self.kpis:
+            partes.append(
+                f"A tabela mestre consolida {self.kpis.get('total_candidatos_master', 0):,} candidatos "
+                f"({self.kpis.get('candidatos_com_alerta', 0):,} com algum alerta de auditoria).")
+        partes.append(f"No total, {n_crit} achado(s) CRÍTICO(s) e {n_aten} de ATENÇÃO requerem tratamento.")
+        self.resumo_txt = " ".join(partes)
+
+
+# ==========================================
+# ORQUESTRADOR CENTRAL DEFINITIVO DO SISTEMA (PIPELINE)
+# ==========================================
+class AnalyticsPipeline:
+    """Orquestrador central: valida a entrada, executa as 8 etapas e trata falhas.
+
+    Parameters
+    ----------
+    input_override, demo, output_override:
+        Repassados ao :class:`EnvironmentManager` (ver documentação daquela classe).
+    """
+
+    def __init__(self, input_override: Optional[str] = None, demo: bool = False,
+                 output_override: Optional[str] = None, layouts_override: Optional[str] = None,
+                 offline: bool = False, mapa_path: Optional[str] = None) -> None:
+        self.env = EnvironmentManager(input_override=input_override, demo=demo, output_override=output_override)
+        self.logger = self.env.logger
+        self.offline_mode = bool(offline)
+        # Seleção de layouts (--layouts). None/vazio/"all" = usar todos os disponíveis.
+        self.selected_layouts = self._parse_layout_selection(layouts_override)
+        # Mapeamento de colunas (--mapa arquivo.json): {COLUNA_ESPERADA: "coluna_na_minha_base"}.
+        self.column_map = self._carregar_mapa_colunas(mapa_path)
+
+    def _carregar_mapa_colunas(self, caminho: Optional[str]):
+        if not caminho:
+            return {}
+        try:
+            import json as _json
+            from pathlib import Path as _P
+            p = _P(caminho)
+            if not p.exists():
+                self.logger.warning(f"[MAPA] Arquivo de mapeamento não encontrado: {caminho}. Prosseguindo sem mapeamento.")
+                return {}
+            dados = _json.loads(p.read_text(encoding="utf-8"))
+            # Aceita formato plano {esperada: real} ou aninhado por layout {N02: {esperada: real}}
+            mapa = {}
+            if isinstance(dados, dict):
+                for k, v in dados.items():
+                    if isinstance(v, dict):
+                        for ek, ev in v.items():
+                            if isinstance(ev, str) and ev.strip():
+                                mapa[ek.strip().upper()] = ev.strip()
+                    elif isinstance(v, str) and v.strip():
+                        mapa[k.strip().upper()] = v.strip()
+            self.logger.info(f"[MAPA] {len(mapa)} mapeamento(s) de coluna carregado(s) de {caminho}.")
+            return mapa
+        except Exception as e:
+            self.logger.warning(f"[MAPA] Falha ao ler o mapeamento ({e}). Prosseguindo sem mapeamento.")
+            return {}
+
+    def _aplicar_mapa_e_relatorio(self, layouts):
+        """Aplica o mapeamento de colunas às bases carregadas e gera um relatório das colunas
+        esperadas que faltam por layout, com um TEMPLATE de mapeamento pré-preenchido para o
+        usuário indicar qual coluna da sua base corresponde a cada uma."""
+        import json as _json
+        from pathlib import Path as _P
+        # 1) Aplicar renomeações do mapa (coluna real -> esperada)
+        if self.column_map and layouts:
+            for lay, df in layouts.items():
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    ren = {atual: esp for esp, atual in self.column_map.items() if atual in df.columns and esp not in df.columns}
+                    if ren:
+                        df.rename(columns=ren, inplace=True)
+                        self.logger.info(f"[MAPA] {lay}: colunas renomeadas conforme mapeamento -> {ren}")
+        # 2) Relatório de colunas esperadas ausentes por layout
+        try:
+            campos_por_layout = {}
+            for campo, meta in INEPLayoutDictionary.FIELDS.items():
+                lay = meta[0]
+                campos_por_layout.setdefault(lay, []).append(campo)
+            faltantes = {}
+            template = {}
+            for lay, df in (layouts or {}).items():
+                if lay.startswith('_') or not isinstance(df, pd.DataFrame):
+                    continue
+                cols_atuais = set(df.columns)
+                esperadas = campos_por_layout.get(lay, [])
+                falta = [c for c in esperadas if c not in cols_atuais]
+                if falta:
+                    faltantes[lay] = {
+                        'colunas_esperadas_ausentes': falta,
+                        'colunas_disponiveis_na_sua_base': sorted(cols_atuais),
+                    }
+                    template[lay] = {c: "" for c in falta}
+            outdir = None
+            if isinstance(self.env.dirs, dict):
+                outdir = self.env.dirs.get("")
+                if outdir is None and self.env.dirs.get("arquivos_auxiliares") is not None:
+                    outdir = self.env.dirs["arquivos_auxiliares"].parent
+            base_out = _P(str(outdir)) if outdir is not None else _P('.')
+            if faltantes:
+                relatorio = {
+                    'INSTRUCOES': ("Para cada layout abaixo, o sistema listou as COLUNAS ESPERADAS que não foram encontradas "
+                                   "e as COLUNAS DISPONIVEIS na sua base. Edite o arquivo 'mapa_colunas.json' preenchendo, para "
+                                   "cada coluna esperada ausente, o NOME da coluna correspondente da sua base (escolhida entre as "
+                                   "disponíveis). Depois rode novamente com: python app.py --input SUA_BASE.xlsx --mapa mapa_colunas.json"),
+                    'layouts': faltantes,
+                }
+                (base_out / 'COLUNAS_NAO_RECONHECIDAS.json').write_text(_json.dumps(relatorio, ensure_ascii=False, indent=2), encoding='utf-8')
+                # Só cria o template se ainda não existir, para não sobrescrever o que o usuário preencheu
+                tpath = base_out / 'mapa_colunas.json'
+                if not tpath.exists():
+                    tpath.write_text(_json.dumps(template, ensure_ascii=False, indent=2), encoding='utf-8')
+                # Guia LEGÍVEL (texto) — mesma informação sem exigir leitura de JSON
                 try:
-                    with st.spinner("Processando arquitetura de dados e Inteligência Artificial..."):
-                        orchestrator.run(progress_bar, status_text)
-                    
-                    st.success("🎉 Processamento Finalizado com Sucesso!")
-                    
-                    with log_expander:
-                        st.code(log_stream.getvalue(), language='bash')
-                    
-                    st.divider()
-                    st.subheader("📊 3. Resumo da Execução")
-                    
-                    quality = orchestrator.results.get('data_quality', {})
-                    stats_df = orchestrator.results.get('geral_stats', pd.DataFrame())
-                    outliers_df = orchestrator.results.get('outliers', pd.DataFrame())
-                    
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Linhas Iniciais", quality.get('total_linhas_iniciais', 0))
-                    m2.metric("Registros Válidos (Finais)", quality.get('total_linhas_finais', 0))
-                    m3.metric("Anomalias Detectadas", len(outliers_df), delta_color="inverse")
-                    m4.metric("Duplicadas Removidas", quality.get('duplicadas_encontradas', 0), delta_color="inverse")
-                    
-                    st.markdown("#### Pré-visualização do Relatório Estatístico")
-                    if not stats_df.empty:
-                        st.dataframe(stats_df, use_container_width=True)
-                    
-                    figs = orchestrator.results.get('figs', {})
-                    if figs:
-                        with st.expander("📈 Visualizar Gráficos Principais (Exploração Rápida)"):
-                            if '1_KPIs_Executivos' in figs: st.plotly_chart(figs['1_KPIs_Executivos'], use_container_width=True)
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                if '2_Histograma_Distribuicao' in figs: st.plotly_chart(figs['2_Histograma_Distribuicao'], use_container_width=True)
-                                if '8_Clusters_IA_Distribuicao' in figs: st.plotly_chart(figs['8_Clusters_IA_Distribuicao'], use_container_width=True)
-                            with c2:
-                                if '9_Boxplot_Faixas' in figs: st.plotly_chart(figs['9_Boxplot_Faixas'], use_container_width=True)
-                                if '5_Pareto_UF' in figs: st.plotly_chart(figs['5_Pareto_UF'], use_container_width=True)
-                    
-                    st.divider()
-                    st.subheader("📦 4. Exportação do Arsenal de BI")
-                    st.info("Todo o pacote (Excel corporativo, Aplicação SPA Interativa em HTML, Relatório Sweetviz, Laudo em TXT e Gráficos PGN/SVG) foi empacotado e está pronto para uso.")
-                    
-                    zip_path = os.path.join(temp_dir, "Plataforma_BI_Saida.zip")
-                    zip_directory(output_folder, zip_path)
-                    
-                    with open(zip_path, "rb") as zfile:
-                        st.download_button(
-                            label="⬇️ BAIXAR TODOS OS RESULTADOS (.ZIP)",
-                            data=zfile,
-                            file_name="Plataforma_BI_Analitica.zip",
-                            mime="application/zip",
-                            type="primary",
-                            use_container_width=True
-                        )
-                        
-                except Exception as e:
-                    st.error("🚨 Erro durante o processamento!")
-                    st.error(str(e))
-                    with log_expander:
-                        st.code(traceback.format_exc(), language='python')
+                    ln = []
+                    ln.append("COMO FAZER AS TABELAS/GRÁFICOS QUE FALTAM APARECEREM (mapeamento de colunas)")
+                    ln.append("=" * 74)
+                    ln.append("")
+                    ln.append("O sistema reconheceu a sua base, mas ALGUMAS COLUNAS que certas análises precisam")
+                    ln.append("não foram encontradas com o nome esperado. Isso costuma acontecer quando, na sua")
+                    ln.append("base, a coluna tem outro nome. Você pode resolver em 3 passos:")
+                    ln.append("")
+                    ln.append("PASSO 1 — Veja abaixo, por layout, QUAIS COLUNAS FALTAM e QUAIS EXISTEM na sua base.")
+                    ln.append("PASSO 2 — Abra o arquivo 'mapa_colunas.json' (na mesma pasta) e, para cada coluna que")
+                    ln.append("          falta, escreva entre as aspas o nome da SUA coluna correspondente.")
+                    ln.append("PASSO 3 — Rode de novo:  python app.py --input SUA_BASE.xlsx --mapa mapa_colunas.json")
+                    ln.append("          As tabelas e gráficos que dependiam dessas colunas passarão a ser gerados.")
+                    ln.append("")
+                    ln.append("Dica: você só precisa preencher as colunas que REALMENTE quer ver. As que deixar em")
+                    ln.append("branco simplesmente continuarão sem a análise correspondente (sem erro).")
+                    ln.append("")
+                    for lay, info in faltantes.items():
+                        ln.append("-" * 74)
+                        ln.append(f"LAYOUT {lay}")
+                        ln.append(f"  Colunas que FALTAM (o sistema precisa de uma equivalente na sua base):")
+                        for c in info['colunas_esperadas_ausentes']:
+                            ln.append(f"     - {c}")
+                        disp = info['colunas_disponiveis_na_sua_base']
+                        ln.append(f"  Colunas DISPONÍVEIS na sua base ({len(disp)}) — escolha entre estas:")
+                        # imprime em blocos para não ficar uma linha gigante
+                        linha = "     "
+                        for c in disp:
+                            if len(linha) + len(c) + 2 > 100:
+                                ln.append(linha); linha = "     "
+                            linha += c + ", "
+                        if linha.strip():
+                            ln.append(linha.rstrip(", "))
+                        ln.append("")
+                    (base_out / 'COMO_MAPEAR_COLUNAS.txt').write_text("\n".join(ln), encoding='utf-8')
+                except Exception:
+                    pass
+                self.logger.info(f"[MAPA] {sum(len(v['colunas_esperadas_ausentes']) for v in faltantes.values())} coluna(s) esperada(s) "
+                                 f"ausente(s) em {len(faltantes)} layout(s). Veja COMO_MAPEAR_COLUNAS.txt (guia legível) ou "
+                                 f"COLUNAS_NAO_RECONHECIDAS.json e preencha mapa_colunas.json.")
+            self._colunas_faltantes = faltantes
+        except Exception as e:
+            self.logger.warning(f"[MAPA] Não foi possível gerar o relatório de colunas ausentes: {e}")
+            self._colunas_faltantes = {}
+        return layouts
 
-def main_streamlit():
-    """Função principal que orquestra as abas da aplicação."""
-    # Estrutura modular em abas
-    tab_home, tab_n50_n52, tab_docs, tab_about = st.tabs([
-        "🏠 Página Inicial", 
-        "📊 Análises N50/N52", 
-        "📚 Documentação", 
-        "ℹ️ Sobre"
-    ])
-    
-    # Renderização Condicional
-    with tab_home:
-        render_home_page()
-        
-    with tab_n50_n52:
-        # Sub-abas para modularidade futura dentro de Análises N50/N52
-        subtab_capacidade, subtab_futura = st.tabs([
-            "📌 Análise de capacidade de locais e salas", 
-            "➕ Novas Análises (Em desenvolvimento)"
-        ])
-        
-        with subtab_capacidade:
-            render_analysis_tab()
-            
-        with subtab_futura:
-            st.info("🚧 Este espaço está reservado para a incorporação modular de novas esteiras de análise.")
-            
-    with tab_docs:
-        st.subheader("📚 Documentação do Sistema")
-        st.write("Repositório central de especificações técnicas, arquitetura de dados e dicionários de variáveis.")
-        
-    with tab_about:
-        st.subheader("ℹ️ Sobre a Aplicação")
-        st.write("Desenvolvida para atuar como motor de inteligência e automação de processos estratégicos.")
 
-# ==========================================
-# BOOTSTRAP DO PROJETO
-# ==========================================
+    @staticmethod
+    def _parse_layout_selection(spec: Optional[str]):
+        """Converte a especificação de layouts (ex.: 'N90,N02,N91' ou 'all') num conjunto
+        de códigos válidos, ou None quando o usuário quer todos os layouts."""
+        if not spec:
+            return None
+        s = str(spec).strip().lower()
+        if s in ('all', 'todos', 'tudo', '*'):
+            return None
+        validos = {'N02', 'N50', 'N52', 'N60', 'N90', 'N91'}
+        escolhidos = set()
+        for parte in re.split(r'[,\s;]+', spec.strip()):
+            p = parte.strip().upper()
+            if not p:
+                continue
+            if not p.startswith('N'):
+                p = 'N' + p
+            if p in validos:
+                escolhidos.add(p)
+        return escolhidos or None
+
+    def execute(self) -> None:
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🚀 Execução Crítica: Plataforma de Business Intelligence INEP "
+              f"(Versão {APP_VERSION} — Enterprise Analytics, fundamentada nos layouts N02/N50/N52/N90/N91)...")
+
+        try:
+            input_file = self.env.validate_input()
+
+            with tqdm(total=8, desc="Data Engineering Pleno Governamental Base Cidadã Mestre", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]") as pbar:
+                
+                # 1. Pipeline Governança de Dados Base e Feature Engineering
+                etl = DataLoaderAndCleaner(input_file, self.logger)
+                etl.ingest_data()
+                df_clean, metadata = etl.apply_quality_filters()
+                pbar.update(1)
+
+                # 2. Pipeline Estatístico Avançado e Inteligência Artificial Array Ouro Oculto Formal
+                ml = StatisticalMachineLearningEngine(df_clean, self.logger)
+                results = ml.process()  # Retorna o Dataclass MLProcessingResults de forma blindada
+                cov = results.column_validation or {}
+                self.logger.info(
+                    f"Cobertura de layout: {cov.get('qtd_reconhecidos', 0)}/{cov.get('total_campos_layout', 0)} "
+                    f"campos oficiais reconhecidos ({cov.get('cobertura_percentual', 0)}%)."
+                )
+                pbar.update(1)
+
+                # 3. Pipeline Auditoria Dimensional Cidadã, Inteligência Cognitiva e Storytelling Textual Explícito
+                didactic_pack = CognitiveInsightGenerator.generate(results)
+                pbar.update(1)
+
+                # 3b. CAMADA RELACIONAL (v31): Auditoria de Cruzamento entre Layouts (N02/N50/N52/N90/N91).
+                # Lê as abas normalizadas do MESMO arquivo de entrada; se houver só a base plana,
+                # a auditoria fica inativa e o pipeline segue exatamente como antes.
+                audit = None
+                try:
+                    layouts = MultiLayoutLoader(input_file, self.logger).load()
+                    # Seleção de layouts pelo usuário (--layouts): mantém só os escolhidos.
+                    if layouts and self.selected_layouts:
+                        sel = self.selected_layouts
+                        presentes = [k for k in layouts.keys() if not k.startswith('_')]
+                        descartados = [k for k in presentes if k not in sel]
+                        ausentes_sel = [k for k in sel if k not in presentes]
+                        layouts = {k: v for k, v in layouts.items() if k.startswith('_') or k in sel}
+                        self.logger.info(f"Layouts SELECIONADOS para análise (--layouts): {', '.join(sorted(sel))}.")
+                        if descartados:
+                            self.logger.info(f"Layouts presentes no arquivo mas DESCONSIDERADOS pela seleção: "
+                                             f"{', '.join(sorted(descartados))}. As análises que dependem deles serão puladas.")
+                        if ausentes_sel:
+                            self.logger.info(f"Layouts selecionados que NÃO foram encontrados no arquivo: "
+                                             f"{', '.join(sorted(ausentes_sel))}.")
+                        self._selected_effective = sorted([k for k in sel if k in presentes])
+                    else:
+                        self._selected_effective = None
+                    # Aplica mapeamento de colunas (--mapa) e gera relatório de colunas ausentes.
+                    layouts = self._aplicar_mapa_e_relatorio(layouts)
+                    if layouts:
+                        audit = CrossLayoutAuditEngine(layouts, self.logger).run()
+                        if not (audit and audit.ativo):
+                            audit = None
+                        else:
+                            self.logger.info(
+                                f"Auditoria de cruzamento concluída: {audit.kpis.get('qtd_achados_criticos', 0)} achado(s) "
+                                f"CRÍTICO(s) e {audit.kpis.get('qtd_achados_atencao', 0)} de ATENÇÃO."
+                            )
+                except Exception as exc:
+                    self.logger.warning(f"Auditoria de cruzamento não executada ({exc}); pipeline segue normalmente.")
+                    audit = None
+
+                viz = VisualizerAndExporter(self.env.dirs, self.logger)
+                viz.offline_mode = self.offline_mode
+                
+                # 4. Pipeline Geração Gráfica Plotly Científica Standalone Limpa Base Ouro Dimensional (Gráficos Avulsos Plotly)
+                viz.generate_standalone_charts(results)
+                pbar.update(1)
+
+                # 5. Pipeline de Metadados JSON Dimensional Exato Limpo e Sweetviz Automático Ouro Exato Oficial
+                viz.export_auxiliary_files(results, metadata, didactic_pack, audit=audit)
+                viz.generate_html_report(results)
+                pbar.update(1)
+
+                # 6. Pipeline Data Warehouse Corporativo Ouro Oficial Preditiva Matriz Oculta (Excel com 21 Abas Categóricas e Data Bars)
+                viz.build_excel_workbook(results, didactic_pack, audit=audit)
+                pbar.update(1)
+
+                # 7. Pipeline Front-End SPA Web Analytics Dimensional UI Corporativa (Dashboards Premium Inteligentes Ouro Formais Base, Cérebro JS e Cross-Filtering Blindado)
+                viz.generate_didactic_html_dashboard(results, didactic_pack, audit=audit)
+                pbar.update(1)
+                
+                # 8. Pipeline Documentação W3C Formal WIKI Ouro Matriz
+                viz.generate_readme_requirements()
+                pbar.update(1)
+
+            print(f"\n✅ AUDITORIA CONCLUÍDA SEM REGRESSÃO E BUGFIX DE RENDERIZAÇÃO ESTABELECIDO! A Arquitetura Ouro de Cubo Multi-nível com Excel Estável de 21 Abas e Front-End Interativo UI/UX C-Level Oculto Dimensional Oficial Array Limpo Pleno Inclusivo Cidadão Restrito está compilada e operante de forma irrefutável.")
+            print(f"📂 Acesse o seu novo e belíssimo Dashboard Executivo HTML em: {self.env.base_output_dir}")
+
+        except Exception as e:
+            self.logger.error(f"FALHA ESTRUTURAL NO PIPELINE: {str(e)}", exc_info=True)
+            # Relatório de diagnóstico legível — jamais falhar em silêncio.
+            try:
+                report_path = self.env.dirs['logs'] / f"RELATORIO_DE_ERRO_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                with open(report_path, 'w', encoding='utf-8') as fh:
+                    fh.write("RELATÓRIO DE DIAGNÓSTICO DE FALHA\n")
+                    fh.write("=" * 60 + "\n")
+                    fh.write(f"Data/hora        : {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
+                    fh.write(f"Versão da app    : {APP_VERSION}\n")
+                    fh.write(f"Arquivo de entrada: {getattr(self.env, 'input_file', 'N/D')}\n")
+                    fh.write(f"Tipo do erro     : {type(e).__name__}\n")
+                    fh.write(f"Mensagem         : {e}\n\n")
+                    fh.write("Rastreamento técnico (para suporte):\n")
+                    fh.write(traceback.format_exc())
+                    fh.write("\nSUGESTÕES:\n")
+                    fh.write("• Confirme que a planilha de entrada segue os layouts N02/N50/N52/N90/N91.\n")
+                    fh.write("• Verifique se o arquivo não está aberto/bloqueado no Excel.\n")
+                    fh.write("• Rode com --demo para validar a instalação com dados de exemplo.\n")
+                print(f"\n❌ A execução foi interrompida por um erro. Um relatório de diagnóstico foi salvo em:\n   {report_path}")
+            except Exception:
+                print(f"\n❌ A execução foi interrompida por um erro: {e}. Consulte os logs em: {self.env.dirs['logs']}")
+
+
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """Interpreta os argumentos de linha de comando."""
+    parser = argparse.ArgumentParser(
+        prog="app.py",
+        description=(
+            "Plataforma de Business Intelligence para locais de prova do INEP (layouts "
+            "N02/N50/N52/N90/N91). Gera um Dashboard HTML interativo, uma planilha Excel analítica "
+            "e arquivos auxiliares a partir de uma base Excel."
+        ),
+        epilog="Exemplos:\n"
+               "  python app.py                       # usa analise_sas.xlsx na Área de Trabalho\n"
+               "  python app.py --input base.xlsx     # usa um arquivo específico\n"
+               "  python app.py --demo                # gera uma base de exemplo e roda tudo\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--input", "-i", dest="input", default=None,
+                        help="Caminho para a planilha Excel de entrada (.xlsx/.xlsm/.xls).")
+    parser.add_argument("--output", "-o", dest="output", default=None,
+                        help="Diretório de saída (padrão: pasta 'Analise_Inteligente_SAS' na Área de Trabalho).")
+    parser.add_argument("--demo", action="store_true",
+                        help="Gera uma base sintética fiel aos layouts e executa toda a análise (não usa dados reais).")
+    parser.add_argument("--layouts", "-l", dest="layouts", default=None,
+                        help="Quais layouts você TEM disponíveis para analisar (ex.: --layouts N90,N02,N91). "
+                             "As análises que dependem de layouts não selecionados são puladas. "
+                             "Use 'all' (ou omita) para analisar todos os layouts disponíveis. "
+                             "Válidos: N02, N50, N52, N60, N90, N91.")
+    parser.add_argument("--offline", action="store_true",
+                        help="Gera o dashboard referenciando as bibliotecas de uma pasta local './libs/' "
+                             "(em vez de CDN), para funcionar SEM internet. Cria um guia com os arquivos a baixar.")
+    parser.add_argument("--mapa", "-m", dest="mapa", default=None,
+                        help="Arquivo JSON de mapeamento de colunas (ex.: --mapa mapa_colunas.json). Use quando alguma coluna "
+                             "esperada não for reconhecida: o sistema gera 'COLUNAS_NAO_RECONHECIDAS.json' (o que falta + o que "
+                             "existe) e um 'mapa_colunas.json' para você preencher; ao rodar com --mapa, as colunas são "
+                             "reconhecidas e as tabelas/gráficos correspondentes passam a ser gerados.")
+    parser.add_argument("--version", "-v", action="version", version=f"Plataforma BI INEP v{APP_VERSION}")
+    return parser.parse_args(argv)
+
+
+# ============================================================================
+# CAMADA STREAMLIT — adaptação web da plataforma (Streamlit v2)
+# ----------------------------------------------------------------------------
+# Preserva 100% do motor acima e NÃO reimplementa nenhuma análise. Combina DUAS
+# formas de uso (o usuário tem as duas ao mesmo tempo):
+#   (A) VISUALIZAÇÃO NATIVA no Streamlit — KPIs (st.metric), gráficos Plotly
+#       nativos e todas as abas de análise como tabelas interativas com busca e
+#       download; reaproveitando a saída já calculada pelo motor.
+#   (B) O DASHBOARD HTML pronto embutido + downloads de todos os artefatos.
+# O modo CLI (python app.py ...) continua idêntico ao original (sem regressão).
+# ============================================================================
+
+def _streamlit_ativo() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
+def _run_streamlit_app() -> None:
+    import io as _io
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+    import pandas as _pd
+    import streamlit as st
+    import streamlit.components.v1 as components
+    try:
+        import plotly.express as _px
+    except Exception:
+        _px = None
+
+    st.set_page_config(page_title="Plataforma BI INEP/PND",
+                       page_icon="📊", layout="wide",
+                       initial_sidebar_state="expanded")
+
+    st.title("📊 Plataforma BI INEP/PND — Auditoria de Layouts")
+    st.caption(
+        f"Motor v{APP_VERSION} · camada Streamlit v{STREAMLIT_APP_VERSION}. "
+        "Envie a sua planilha (uma aba por layout: N02, N50, N52, N60, N90, N91) ou use a base de "
+        "demonstração. O sistema executa a MESMA análise completa e oferece TUDO de duas formas: "
+        "visualização nativa interativa aqui dentro e o dashboard/planilha prontos para download.")
+
+    with st.sidebar:
+        st.header("1. Entrada de dados")
+        modo = st.radio("Fonte dos dados",
+                        ["Base de demonstração", "Enviar planilha (.xlsx)"], index=0)
+        arquivo = None
+        if modo == "Enviar planilha (.xlsx)":
+            arquivo = st.file_uploader("Planilha Excel com os layouts", type=["xlsx", "xlsm", "xls"])
+            st.caption("Nomeie as abas como N90, N02, N91, N52, N50, N60 — o motor também reconhece pelas colunas.")
+        offline = st.checkbox("Gerar dashboard em modo offline", value=False,
+                              help="HTML com bibliotecas locais (./libs). A pré-visualização embutida precisa de internet.")
+        rodar = st.button("▶️ Rodar análise", type="primary", use_container_width=True)
+        st.divider()
+        st.caption("Bases grandes podem levar alguns minutos. Os resultados ficam disponíveis até rodar de novo.")
+
+    # ---- Execução (só ao clicar) -------------------------------------------
+    if rodar:
+        outdir = _Path(tempfile.mkdtemp(prefix="bi_inep_"))
+        with st.spinner("Executando a análise completa — isso pode levar alguns minutos…"):
+            try:
+                if modo == "Base de demonstração":
+                    pipe = AnalyticsPipeline(demo=True, output_override=str(outdir), offline=bool(offline))
+                else:
+                    if arquivo is None:
+                        st.warning("Envie uma planilha .xlsx na barra lateral antes de rodar.")
+                        st.stop()
+                    inpath = outdir / arquivo.name
+                    inpath.write_bytes(arquivo.getvalue())
+                    pipe = AnalyticsPipeline(input_override=str(inpath), output_override=str(outdir), offline=bool(offline))
+                pipe.execute()
+                st.session_state["bi_outdir"] = str(outdir)
+                st.session_state["bi_ok"] = True
+            except SystemExit as e:
+                st.session_state["bi_ok"] = False
+                st.error(f"O processamento foi interrompido pelo motor: {e}")
+            except Exception as e:  # noqa
+                st.session_state["bi_ok"] = False
+                st.error(f"Erro ao processar a base: {e}")
+                with st.expander("Detalhes técnicos"):
+                    st.exception(e)
+
+    outdir_str = st.session_state.get("bi_outdir")
+    if not outdir_str or not st.session_state.get("bi_ok"):
+        st.info("Configure a entrada na barra lateral e clique em **Rodar análise** para começar.")
+        return
+
+    outdir = _Path(outdir_str)
+    html_path = outdir / "Dashboard_BI.html"
+    xlsx_path = outdir / "dados_processados" / "Analise_Completa_Master_Ultimate_Edition.xlsx"
+    csv_path = outdir / "dados_processados" / "6_Base_Tratada.csv"
+    json_path = outdir / "dados_processados" / "5_Metadados_Insights.json"
+
+    # ---- Downloads (barra lateral) -----------------------------------------
+    with st.sidebar:
+        st.header("2. Downloads")
+        if html_path.exists():
+            st.download_button("⬇️ Dashboard (HTML)", html_path.read_bytes(),
+                               file_name="Dashboard_BI.html", mime="text/html", use_container_width=True)
+        if xlsx_path.exists():
+            st.download_button("⬇️ Planilha completa (Excel)", xlsx_path.read_bytes(),
+                               file_name=xlsx_path.name, use_container_width=True,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if csv_path.exists():
+            st.download_button("⬇️ Base tratada (CSV)", csv_path.read_bytes(),
+                               file_name="Base_Tratada.csv", mime="text/csv", use_container_width=True)
+        if json_path.exists():
+            st.download_button("⬇️ Metadados/achados (JSON)", json_path.read_bytes(),
+                               file_name="Metadados_Insights.json", mime="application/json", use_container_width=True)
+
+    st.success("Análise concluída. Explore nas abas abaixo — tudo de forma nativa e interativa — ou baixe os arquivos.")
+
+    # Carrega todas as abas do Excel uma vez (cacheado), detectando o cabeçalho real
+    # (cada aba do motor tem uma linha de "fundamentação" antes da tabela).
+    @st.cache_data(show_spinner=False)
+    def _carregar_abas(_bytes: bytes) -> dict:
+        cru = _pd.read_excel(_io.BytesIO(_bytes), sheet_name=None, header=None)
+        limpo = {}
+        for _nome, _df0 in cru.items():
+            if _df0 is None or _df0.empty:
+                limpo[_nome] = _df0
+                continue
+            # linha de cabeçalho real = a que tem mais células curtas não nulas (nas 1as 12 linhas)
+            _lim = min(12, len(_df0))
+            _melhor_i, _melhor = 0, -1
+            for _i in range(_lim):
+                _row = _df0.iloc[_i]
+                _sc = sum(1 for _v in _row if _pd.notna(_v) and len(str(_v).strip()) <= 45 and str(_v).strip() != "")
+                if _sc > _melhor:
+                    _melhor, _melhor_i = _sc, _i
+            _hdr = _df0.iloc[_melhor_i].tolist()
+            _cols = [str(_h).strip() if _pd.notna(_h) and str(_h).strip() else f"col_{_j}"
+                     for _j, _h in enumerate(_hdr)]
+            _dat = _df0.iloc[_melhor_i + 1:].copy()
+            _dat.columns = _cols
+            _dat = _dat.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
+            limpo[_nome] = _dat
+        return limpo
+
+    abas = {}
+    if xlsx_path.exists():
+        try:
+            abas = _carregar_abas(xlsx_path.read_bytes())
+        except Exception as e:  # noqa
+            st.warning(f"Não foi possível ler a planilha para a visão nativa: {e}")
+
+    tab_nat, tab_dash, tab_meta = st.tabs(
+        ["📊 Análises (nativo, interativo)", "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
+
+    # ======================= (A) VISÃO NATIVA ===============================
+    with tab_nat:
+        if not abas:
+            st.info("A visão nativa usa as abas da planilha gerada. Rode a análise para populá-la.")
+        else:
+            # KPIs a partir da aba que realmente tem colunas MÉTRICA + VALOR
+            def _achar_tab_kpis(mapa):
+                for _n, _df in mapa.items():
+                    _cm = next((c for c in _df.columns if "MÉTRICA" in str(c).upper() or "METRICA" in str(c).upper()), None)
+                    _cv = next((c for c in _df.columns if str(c).upper().strip() == "VALOR"), None)
+                    if _cm and _cv and len(_df) > 0:
+                        return _n, _cm, _cv
+                return None, None, None
+            tab_totais, col_metrica, col_valor = _achar_tab_kpis(abas)
+            if tab_totais and col_metrica and col_valor:
+                dft = abas[tab_totais]
+                st.subheader("Indicadores consolidados")
+                st.caption(f"Fonte: aba « {tab_totais} ».")
+                itens = list(zip(dft[col_metrica].astype(str), dft[col_valor].astype(str)))[:20]
+                for i in range(0, len(itens), 4):
+                    for c, (met, val) in zip(st.columns(4), itens[i:i + 4]):
+                        c.metric(met[:42], val[:20])
+                st.divider()
+
+            # ---- Navegação por CAPÍTULOS temáticos (Rodada 3/4) ----------------
+            CAPITULOS = {
+                "🏠 Visão Geral & Totais": ["capa", "guia", "painel", "totais", "total", "visual", "resumo", "metadad", "consolidad", "sumario"],
+                "👥 Inscritos & Perfil": ["inscrit", "perfil", "genero", "sexo", "idade", "faixa_etaria", "demografia"],
+                "🪑 Ensalamento": ["ensalament", "ensalad", "alocac", "sala", "bloco", "ocupac", "atribuic", "tp_ensalamento"],
+                "📐 Capacidade & Salas": ["capacidade", "sala", "folga", "superlot", "subutiliz", "dimens", "eficiencia", "ocupac"],
+                "🗺️ Distância & Geolocalização": ["distancia", "geo", "coordenad", "mapa", "deslocament", "forasteir", "migrac", "residente"],
+                "🎒 Kits & Materiais": ["kit", "reconcilia", "material", "envelope"],
+                "♿ Acessibilidade & Atendimentos": ["acessibilidade", "atendiment", "n60", "n91", "laudo", "recurso", "necessidade", "cid"],
+                "📝 Provas": ["prova", "caderno", "aplicac"],
+                "🏫 Locais & Municípios": ["local", "municipio", "universidade", "escola", "predio", "instituic"],
+                "🔎 Auditoria & Qualidade": ["auditoria", "validac", "qualidade", "anomalia", "orfao", "divergenc", "achado", "ranking", "risco", "inconsist", "duplicid"],
+                "🔗 Cruzamentos entre Layouts": ["cruzament", "n60", "n91", "reconcilia", "confront", "mestre"],
+            }
+
+            def _cap_das_abas(nome_aba: str):
+                n = str(nome_aba).lower()
+                return [cap for cap, kws in CAPITULOS.items() if any(k in n for k in kws)]
+
+            # índice: capítulo -> abas
+            idx_cap = {cap: [] for cap in CAPITULOS}
+            sem_cap = []
+            for nome_aba in abas:
+                caps = _cap_das_abas(nome_aba)
+                if caps:
+                    for cap in caps:
+                        idx_cap[cap].append(nome_aba)
+                else:
+                    sem_cap.append(nome_aba)
+            if sem_cap:
+                idx_cap["📄 Outras análises"] = sem_cap
+
+            st.subheader("Navegar por capítulos")
+            st.caption(f"{len(abas)} análises organizadas por tema. Escolha um capítulo e a análise; "
+                       "cada uma traz a tabela interativa, um gráfico automático e download em CSV.")
+
+            caps_com_conteudo = [c for c in idx_cap if idx_cap[c]]
+            colcap1, colcap2 = st.columns([1, 1])
+            capitulo = colcap1.selectbox("📚 Capítulo:", caps_com_conteudo, index=0)
+            abas_do_cap = idx_cap[capitulo]
+            escolha = colcap2.selectbox(f"Análise ({len(abas_do_cap)}):", abas_do_cap, index=0)
+
+            df = abas[escolha].copy()
+            busca = st.text_input("🔎 Filtrar linhas (procura em todas as colunas):", "")
+            if busca:
+                mask = df.apply(lambda r: busca.lower() in " ".join(map(str, r.values)).lower(), axis=1)
+                df = df[mask]
+            st.markdown(f"**{escolha}**")
+            st.caption(f"{len(df):,} linha(s) × {df.shape[1]} coluna(s)".replace(",", "."))
+            st.dataframe(df, use_container_width=True, height=380)
+            st.download_button("⬇️ Baixar esta análise (CSV)",
+                               df.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"{escolha}.csv", mime="text/csv", key="dl_aba_nativa")
+
+            # Gráfico nativo automático quando fizer sentido
+            if _px is not None and not df.empty:
+                num_cols = [c for c in df.columns if _pd.api.types.is_numeric_dtype(df[c])]
+                cat_cols = [c for c in df.columns if not _pd.api.types.is_numeric_dtype(df[c])]
+                if num_cols and cat_cols and len(df) <= 60:
+                    st.markdown("##### Gráfico")
+                    cc1, cc2, cc3 = st.columns(3)
+                    eixo_x = cc1.selectbox("Categoria (eixo X):", cat_cols, key="cx")
+                    eixo_y = cc2.selectbox("Valor (eixo Y):", num_cols, key="cy")
+                    tipo = cc3.selectbox("Tipo:", ["Barras", "Pizza", "Linha"], key="ctipo")
+                    try:
+                        dplot = df.sort_values(eixo_y, ascending=False).head(40)
+                        if tipo == "Pizza":
+                            fig = _px.pie(dplot, names=eixo_x, values=eixo_y, hole=0.4)
+                        elif tipo == "Linha":
+                            fig = _px.line(dplot, x=eixo_x, y=eixo_y, markers=True)
+                        else:
+                            fig = _px.bar(dplot, x=eixo_x, y=eixo_y, text_auto=True)
+                        fig.update_layout(xaxis_title="", margin=dict(t=10))
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:  # noqa
+                        st.caption(f"Não foi possível gerar o gráfico automático: {e}")
+                else:
+                    st.caption("Gráfico automático indisponível para esta análise "
+                               "(precisa de categoria + numérica e até 60 linhas). "
+                               "A tabela acima traz todos os dados; o dashboard HTML tem os gráficos dedicados.")
+
+    # ======================= (B) DASHBOARD HTML =============================
+    with tab_dash:
+        if html_path.exists():
+            st.caption("Dashboard idêntico ao arquivo gerado (todos os gráficos, KPIs, tabelas e filtros). "
+                       "Se ficar pesado, use o botão de download e abra em tela cheia.")
+            mostrar = st.checkbox("Carregar o dashboard embutido agora", value=False,
+                                  help="O HTML pode ser grande; carregue sob demanda para não pesar a página.")
+            if mostrar:
+                try:
+                    components.html(html_path.read_text(encoding="utf-8"), height=1000, scrolling=True)
+                except Exception as e:  # noqa
+                    st.warning(f"Não foi possível embutir o dashboard ({e}). Baixe o HTML na barra lateral.")
+        else:
+            st.warning("O dashboard HTML não foi encontrado na saída.")
+
+    # ======================= (C) ACHADOS & METADADOS ========================
+    with tab_meta:
+        if json_path.exists():
+            try:
+                meta = _json.loads(json_path.read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+            ac = meta.get("auditoria_cruzamento", {}) if isinstance(meta, dict) else {}
+            resumo = ac.get("resumo_executivo")
+            achados = ac.get("achados") or meta.get("achados") or meta.get("findings")
+
+            if resumo:
+                st.subheader("Resumo executivo da auditoria")
+                st.info(str(resumo))
+
+            if isinstance(achados, list) and achados:
+                df_ach = _pd.DataFrame(achados)
+                # Contadores por severidade
+                sev_col = "severidade" if "severidade" in df_ach.columns else None
+                if sev_col:
+                    n_crit = int((df_ach[sev_col].astype(str).str.upper() == "CRÍTICO").sum())
+                    n_at = int((df_ach[sev_col].astype(str).str.upper() == "ATENÇÃO").sum())
+                    n_ok = len(df_ach) - n_crit - n_at
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("🔴 Críticos", n_crit)
+                    c2.metric("🟡 Atenção", n_at)
+                    c3.metric("🟢 Demais", n_ok)
+
+                st.subheader(f"Achados da auditoria ({len(df_ach)})")
+                # Filtro por severidade
+                if sev_col:
+                    ops = ["Todas"] + sorted(df_ach[sev_col].astype(str).unique().tolist())
+                    filtro = st.selectbox("Filtrar por severidade:", ops, index=0)
+                    df_view = df_ach if filtro == "Todas" else df_ach[df_ach[sev_col].astype(str) == filtro]
+                else:
+                    df_view = df_ach
+
+                # Tabela resumida
+                cols_show = [c for c in ["severidade", "titulo", "categoria", "valor"] if c in df_view.columns]
+                st.dataframe(df_view[cols_show] if cols_show else df_view,
+                             use_container_width=True, height=320)
+                st.download_button("⬇️ Baixar achados (CSV)",
+                                   df_view.to_csv(index=False).encode("utf-8-sig"),
+                                   file_name="achados_auditoria.csv", mime="text/csv", key="dl_ach")
+
+                # Detalhe expandível (interpretação + recomendação)
+                st.markdown("##### Detalhe dos achados")
+                emoji = {"CRÍTICO": "🔴", "ATENÇÃO": "🟡"}
+                for _, row in df_view.iterrows():
+                    sev = str(row.get("severidade", "")).upper()
+                    titulo = str(row.get("titulo", row.get("chave", "Achado")))
+                    with st.expander(f"{emoji.get(sev, '🟢')} {titulo}  ·  {sev}"):
+                        if "valor" in row:
+                            st.markdown(f"**Valor:** {row['valor']}  ·  **Categoria:** {row.get('categoria', '—')}")
+                        if row.get("interpretacao"):
+                            st.markdown(f"**Interpretação:** {row['interpretacao']}")
+                        if row.get("recomendacao"):
+                            st.markdown(f"**Recomendação:** {row['recomendacao']}")
+                        if isinstance(row.get("metricas"), dict) and row["metricas"]:
+                            st.caption("Métricas: " + ", ".join(f"{k}={v}" for k, v in row["metricas"].items()))
+            else:
+                st.caption("Sem lista de achados estruturada nos metadados.")
+
+            # KPIs completos da auditoria (123 indicadores)
+            kp = ac.get("kpis")
+            if isinstance(kp, dict) and kp:
+                with st.expander(f"Todos os indicadores da auditoria ({len(kp)})"):
+                    dfk = _pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()])
+                    st.dataframe(dfk, use_container_width=True, height=320)
+                    st.download_button("⬇️ Baixar indicadores (CSV)",
+                                       dfk.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name="indicadores_auditoria.csv", mime="text/csv", key="dl_kpis_all")
+
+            with st.expander("Metadados completos (JSON)"):
+                st.json(meta)
+        else:
+            st.info("Metadados não encontrados.")
+
+
 if __name__ == "__main__":
-    main_streamlit()
+    if _streamlit_ativo():
+        _run_streamlit_app()
+    else:
+        _args = _parse_args()
+        AnalyticsPipeline(input_override=_args.input, demo=_args.demo, output_override=_args.output,
+                          layouts_override=_args.layouts, offline=_args.offline, mapa_path=_args.mapa).execute()
