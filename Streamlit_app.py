@@ -209,7 +209,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "4"  # camada Streamlit (incrementa a cada rodada)
+STREAMLIT_APP_VERSION = "7"  # camada Streamlit (incrementa a cada rodada)
 
 # ==========================================
 # CONFIGURAÇÕES GLOBAIS E GOVERNANÇA CORPORATIVA
@@ -10277,11 +10277,70 @@ def _run_streamlit_app() -> None:
             st.caption("Nomeie as abas como N90, N02, N91, N52, N50, N60 — o motor também reconhece pelas colunas.")
         offline = st.checkbox("Gerar dashboard em modo offline", value=False,
                               help="HTML com bibliotecas locais (./libs). A pré-visualização embutida precisa de internet.")
+        st.markdown("**Filtro global (opcional)**")
+        uf_filtro = st.text_input(
+            "Filtrar por UF antes de processar (ex.: AP ou AP,PA)",
+            value="",
+            help="Se preenchido, o motor é reexecutado somente com as linhas dessas UFs — todos os KPIs, "
+                 "gráficos, tabelas e o dashboard passam a refletir esse recorte. Deixe vazio para usar a base inteira.")
         rodar = st.button("▶️ Rodar análise", type="primary", use_container_width=True)
         st.divider()
         st.caption("Bases grandes podem levar alguns minutos. Os resultados ficam disponíveis até rodar de novo.")
 
     # ---- Execução (só ao clicar) -------------------------------------------
+    # ---- RODADA 1 — Pré-visualização dos layouts e colunas detectados -------
+    # Quando o usuário envia um arquivo, mostra ANTES de processar quais layouts e
+    # colunas foram identificados, com amostra — dando visibilidade e confiança.
+    if modo == "Enviar planilha (.xlsx)" and arquivo is not None and not rodar and not st.session_state.get("bi_ok"):
+        st.subheader("🔍 Rodada 1 — Layouts e colunas detectados no seu arquivo")
+        st.caption("Confira o que o sistema reconheceu. Se estiver correto, clique em **Rodar análise** na barra lateral. "
+                   "O motor também reconhece variações de nome, acentos e maiúsculas/minúsculas.")
+        try:
+            import io as _io0
+            import pandas as _pd0
+            _xls = _pd0.ExcelFile(_io0.BytesIO(arquivo.getvalue()))
+            _padroes = {
+                "N90": ["CO_INSCRICAO", "TP_SEXO", "SG_UF_MUNICIPIO_PROVA"],
+                "N02": ["CO_INSCRICAO", "CO_LOCAL", "ID_SALA", "TP_ENSALAMENTO", "NU_DISTANCIA"],
+                "N91": ["CO_INSCRICAO", "ID_ITEM_ATENDIMENTO", "CO_SITUACAO_LAUDO_MEDICO", "ID_KIT_PROVA"],
+                "N52": ["CO_LOCAL", "QT_SALAS", "NU_LATITUDE_LOCAL", "IN_CENTRO"],
+                "N50": ["CO_LOCAL", "ID_SALA", "QT_CAPACIDADE_MAXIMA_SALA", "NU_LARGURA"],
+                "N60": ["CO_LOCAL", "IN_ACESSIBILIDADE"],
+            }
+            def _norm0(s):
+                import unicodedata as _u
+                t = _u.normalize("NFKD", str(s)).encode("ASCII", "ignore").decode("ASCII").upper().strip()
+                for ch in [" ", "-", ".", "/", "(", ")"]:
+                    t = t.replace(ch, "_")
+                while "__" in t:
+                    t = t.replace("__", "_")
+                return t.strip("_")
+            _linhas_det = []
+            for _sh in _xls.sheet_names:
+                _dfp = _pd0.read_excel(_xls, _sh, nrows=50)
+                _cols_norm = {_norm0(c) for c in _dfp.columns}
+                _nome_norm = _norm0(_sh)
+                _melhor_lay, _melhor_hits = None, 0
+                for _lay, _chaves in _padroes.items():
+                    if _lay in _nome_norm:
+                        _melhor_lay, _melhor_hits = _lay, len(_chaves)
+                        break
+                    _hits = sum(1 for _k in _chaves if _norm0(_k) in _cols_norm)
+                    if _hits > _melhor_hits:
+                        _melhor_lay, _melhor_hits = _lay, _hits
+                _linhas_det.append({
+                    "Aba": _sh,
+                    "Layout detectado": _melhor_lay or "— não reconhecido —",
+                    "Nº de colunas": _dfp.shape[1],
+                    "Amostra de colunas": ", ".join(map(str, list(_dfp.columns)[:6])),
+                })
+            st.dataframe(_pd0.DataFrame(_linhas_det), use_container_width=True, hide_index=True)
+            st.info("Detecção automática por nome da aba e pelas colunas-chave de cada layout. "
+                    "Se algum layout aparecer como « não reconhecido », verifique se a aba tem as colunas esperadas — "
+                    "ou use o parâmetro de mapeamento de colunas do motor (o dashboard gera um guia quando falta alguma).")
+        except Exception as _e0:  # noqa
+            st.warning(f"Não foi possível pré-visualizar o arquivo: {_e0}")
+
     if rodar:
         outdir = _Path(tempfile.mkdtemp(prefix="bi_inep_"))
         with st.spinner("Executando a análise completa — isso pode levar alguns minutos…"):
@@ -10294,6 +10353,51 @@ def _run_streamlit_app() -> None:
                         st.stop()
                     inpath = outdir / arquivo.name
                     inpath.write_bytes(arquivo.getvalue())
+                    # RODADA 7 — filtro global por UF (robusto): reescreve o arquivo só com
+                    # as linhas das UFs escolhidas e reexecuta o motor sobre o recorte.
+                    _ufs = [u.strip().upper() for u in str(uf_filtro).replace(";", ",").split(",") if u.strip()]
+                    if _ufs:
+                        try:
+                            import pandas as _pdf
+                            _xin = _pdf.ExcelFile(inpath)
+                            _fpath = outdir / ("FILTRADO_" + arquivo.name)
+                            _tot_antes = _tot_depois = 0
+                            _sheets_out = {}
+                            for _sh in _xin.sheet_names:
+                                _d = _pdf.read_excel(_xin, _sh)
+                                _tot_antes += len(_d)
+                                _up = [str(c).upper() for c in _d.columns]
+                                # preferência: UF de PROVA > UF de município prova > UF genérica
+                                _ufcol = None
+                                for _pref in ("SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA"):
+                                    if _pref in _up:
+                                        _ufcol = _d.columns[_up.index(_pref)]
+                                        break
+                                if _ufcol is None:
+                                    _ufcol = next((c for c in _d.columns
+                                                   if "SG_UF" in str(c).upper() or str(c).upper().strip() == "UF"
+                                                   or str(c).upper().endswith("_UF")), None)
+                                if _ufcol is not None:
+                                    _serie = _d[_ufcol].where(_d[_ufcol].notna(), "").astype(str).str.upper().str.strip()
+                                    _d = _d[_serie.isin(_ufs)]
+                                _tot_depois += len(_d)
+                                _sheets_out[_sh] = _d
+                            if _tot_depois == 0:
+                                st.session_state["bi_ok"] = False
+                                st.error(f"O filtro por UF {_ufs} não deixou nenhuma linha — verifique se essas siglas "
+                                         "existem na sua base (ex.: AP para Amapá). A análise não foi executada. "
+                                         "Corrija a UF ou limpe o campo para usar a base inteira.")
+                                st.stop()
+                            with _pdf.ExcelWriter(_fpath, engine="xlsxwriter") as _w:
+                                for _sh, _d in _sheets_out.items():
+                                    _d.to_excel(_w, sheet_name=_sh[:31], index=False)
+                            inpath = _fpath
+                            st.session_state["bi_uf_info"] = f"Filtro por UF {_ufs}: {_tot_antes:,} → {_tot_depois:,} linhas.".replace(",", ".")
+                        except Exception as _ef:  # noqa
+                            st.warning(f"Não foi possível aplicar o filtro por UF ({_ef}). Rodando com a base completa.")
+                            st.session_state.pop("bi_uf_info", None)
+                    else:
+                        st.session_state.pop("bi_uf_info", None)
                     pipe = AnalyticsPipeline(input_override=str(inpath), output_override=str(outdir), offline=bool(offline))
                 pipe.execute()
                 st.session_state["bi_outdir"] = str(outdir)
@@ -10336,6 +10440,8 @@ def _run_streamlit_app() -> None:
                                file_name="Metadados_Insights.json", mime="application/json", use_container_width=True)
 
     st.success("Análise concluída. Explore nas abas abaixo — tudo de forma nativa e interativa — ou baixe os arquivos.")
+    if st.session_state.get("bi_uf_info"):
+        st.info("🔎 " + st.session_state["bi_uf_info"] + " Todos os números abaixo refletem esse recorte.")
 
     # Carrega todas as abas do Excel uma vez (cacheado), detectando o cabeçalho real
     # (cada aba do motor tem uma linha de "fundamentação" antes da tabela).
@@ -10361,6 +10467,12 @@ def _run_streamlit_app() -> None:
             _dat = _df0.iloc[_melhor_i + 1:].copy()
             _dat.columns = _cols
             _dat = _dat.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
+            # Inferência de tipo: colunas majoritariamente numéricas viram numéricas
+            # (necessário porque a leitura com header=None deixa tudo como texto).
+            for _c in _dat.columns:
+                _conv = _pd.to_numeric(_dat[_c], errors="coerce")
+                if len(_dat) and _conv.notna().sum() >= max(1, int(0.8 * len(_dat))):
+                    _dat[_c] = _conv
             limpo[_nome] = _dat
         return limpo
 
@@ -10478,6 +10590,52 @@ def _run_streamlit_app() -> None:
                     st.caption("Gráfico automático indisponível para esta análise "
                                "(precisa de categoria + numérica e até 60 linhas). "
                                "A tabela acima traz todos os dados; o dashboard HTML tem os gráficos dedicados.")
+
+            # ---- MAPA dedicado: se a análise tiver coordenadas (lat/lon) --------
+            def _acha_col(cols, chaves):
+                for c in cols:
+                    cu = str(c).upper()
+                    if any(k in cu for k in chaves):
+                        return c
+                return None
+            col_lat = _acha_col(df.columns, ["LATITUDE", "_LAT", "NU_LAT"])
+            col_lon = _acha_col(df.columns, ["LONGITUDE", "_LON", "_LNG", "NU_LON"])
+            if col_lat and col_lon and not df.empty:
+                st.markdown("##### 🗺️ Mapa dos locais")
+                try:
+                    mp = df[[col_lat, col_lon]].copy()
+                    mp.columns = ["lat", "lon"]
+                    mp["lat"] = _pd.to_numeric(mp["lat"], errors="coerce")
+                    mp["lon"] = _pd.to_numeric(mp["lon"], errors="coerce")
+                    mp = mp.dropna()
+                    mp = mp[(mp["lat"].between(-90, 90)) & (mp["lon"].between(-180, 180))]
+                    if not mp.empty:
+                        st.map(mp, size=30)
+                        st.caption(f"{len(mp):,} ponto(s) com coordenadas válidas.".replace(",", "."))
+                    else:
+                        st.caption("Colunas de coordenadas encontradas, mas sem valores válidos para plotar.")
+                except Exception as e:  # noqa
+                    st.caption(f"Não foi possível gerar o mapa: {e}")
+
+            # ---- HISTOGRAMA dedicado: para distribuições (ex.: distância) -------
+            if _px is not None and not df.empty:
+                num_todas = [c for c in df.columns if _pd.api.types.is_numeric_dtype(df[c]) and df[c].nunique() > 8]
+                if num_todas:
+                    with st.expander("📊 Histograma de distribuição (ex.: distância, capacidade, ocupação)"):
+                        col_hist = st.selectbox("Coluna numérica:", num_todas, key="hist_col")
+                        try:
+                            figh = _px.histogram(df, x=col_hist, nbins=30)
+                            figh.update_layout(margin=dict(t=10), yaxis_title="Frequência")
+                            st.plotly_chart(figh, use_container_width=True)
+                            serie = _pd.to_numeric(df[col_hist], errors="coerce").dropna()
+                            if not serie.empty:
+                                m1, m2, m3, m4 = st.columns(4)
+                                m1.metric("Mínimo", f"{serie.min():.2f}")
+                                m2.metric("Média", f"{serie.mean():.2f}")
+                                m3.metric("Mediana", f"{serie.median():.2f}")
+                                m4.metric("Máximo", f"{serie.max():.2f}")
+                        except Exception as e:  # noqa
+                            st.caption(f"Não foi possível gerar o histograma: {e}")
 
     # ======================= (B) DASHBOARD HTML =============================
     with tab_dash:
