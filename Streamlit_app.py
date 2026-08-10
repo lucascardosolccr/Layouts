@@ -143,15 +143,44 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+# -------------------------------------------------------------------------------------
+# CORREÇÃO DE ROBUSTEZ (bug real): o console do Windows usa cp1252 por padrão e NÃO
+# suporta os emojis/acentos dos logs do pipeline (UnicodeEncodeError no primeiro print).
+# Forçamos UTF-8 na saída/erro padrão assim que possível, sem depender de variáveis de
+# ambiente (PYTHONUTF8/PYTHONIOENCODING) nem de flags de linha de comando.
+# -------------------------------------------------------------------------------------
+for _stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
+    try:
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # console não reconfigurável (ex.: ambientes sem fila de caracteres) — seguir.
+
 import pandas as pd
 import numpy as np
 import unicodedata
 import re
-from scipy import stats
-from sklearn.cluster import KMeans
-from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import StandardScaler
-import xlsxwriter
+# Imports científicos DEFENSIVOS: se algum pacote faltar, o módulo ainda carrega
+# (a aplicação mostra uma mensagem clara em vez da tela genérica "Oh no"). As
+# análises que dependem de um pacote ausente são simplesmente omitidas.
+_DEPS_FALTANDO = []
+try:
+    from scipy import stats
+except Exception:
+    stats = None
+    _DEPS_FALTANDO.append("scipy")
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.ensemble import IsolationForest
+    from sklearn.preprocessing import StandardScaler
+except Exception:
+    KMeans = IsolationForest = StandardScaler = None
+    _DEPS_FALTANDO.append("scikit-learn")
+try:
+    import xlsxwriter
+except Exception:
+    xlsxwriter = None
+    _DEPS_FALTANDO.append("xlsxwriter")
 
 # -------------------------------------------------------------------------------------
 # CAMADA DE DEPENDÊNCIAS OPCIONAIS (Resiliência de Ambiente)
@@ -209,7 +238,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "18"
+STREAMLIT_APP_VERSION = "19"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine 'calamine' (5–10x mais rápido que o openpyxl);
@@ -1131,12 +1160,13 @@ class EnvironmentManager:
         demo_path = self.base_output_dir / "_demo_base_sintetica.xlsx"
         try:
             layouts = SyntheticDataGenerator.generate_multi_layout(demo_df)
-            with pd.ExcelWriter(demo_path, engine='xlsxwriter') as _w:
-                demo_df.to_excel(_w, sheet_name='BASE_PLANA', index=False)
+            _demo_writer, _ = _criar_excel_writer(demo_path, self.logger)
+            with _demo_writer:
+                demo_df.to_excel(_demo_writer, sheet_name='BASE_PLANA', index=False)
                 for name in ['N52', 'N50', 'N90', 'N02', 'N91', 'N60']:
                     tbl = layouts.get(name)
                     if isinstance(tbl, pd.DataFrame) and not tbl.empty:
-                        tbl.to_excel(_w, sheet_name=name, index=False)
+                        tbl.to_excel(_demo_writer, sheet_name=name, index=False)
             self.logger.info(
                 f"Base de demonstração criada com {len(demo_df):,} salas (aba BASE_PLANA) "
                 f"+ abas normalizadas N52/N50/N90/N02/N91 para auditoria de cruzamento, em {demo_path}"
@@ -2921,6 +2951,899 @@ class CognitiveInsightGenerator:
         }
 
 
+# ============================================================================
+# CAMADA ADAPTATIVA DE DISPONIBILIDADE ANALÍTICA (v34)
+# ----------------------------------------------------------------------------
+# Torna a plataforma TOTALMENTE adaptativa aos layouts realmente presentes na
+# base de entrada (N02/N50/N52/N60/N90/N91). A lógica de "o que pode ser
+# analisado" fica centralizada em UM único motor (AnalyticalAvailability), cujo
+# resultado — um bundle JSON — é consumido IDENTICAMENTE pelo Excel, pelo HTML
+# e pelo Streamlit. Assim:
+#   • nenhuma seção vazia é exibida para um layout ausente;
+#   • distingue-se "layout ausente" × "campo ausente" × "campo vazio" × "dados disponíveis";
+#   • toda análise possível para os layouts presentes é de fato oferecida.
+# O catálogo (ANALYSIS_CATALOG) é declarativo: cada análise declara seus layouts
+# exigidos e os grupos de campos necessários (condição OR dentro de cada grupo).
+# ============================================================================
+
+from itertools import combinations as _combinacoes
+
+#: Layouts oficiais reconhecidos pela plataforma (metadados para o painel).
+LAYOUTS_CONHECIDOS: Dict[str, Dict[str, str]] = {
+    'N02': {'nome': 'N02 — Ensalamento', 'descricao': 'Alocação participante→sala, grupos de curso, atendimento e tipo de ensalamento.'},
+    'N50': {'nome': 'N50 — Salas dos Espaços Físicos', 'descricao': 'Dimensões da sala, capacidade e mobiliário.'},
+    'N52': {'nome': 'N52 — Locação de Espaço Físico', 'descricao': 'Bloco/prédio, endereço, capacidade agregada e georreferenciamento.'},
+    'N60': {'nome': 'N60 — Visita ao Local de Prova', 'descricao': 'Acessibilidade, segurança, conforto, tecnologia e conservação predial.'},
+    'N90': {'nome': 'N90 — Inscritos', 'descricao': 'Dados cadastrais do participante, sexo, nascimento e situação da inscrição.'},
+    'N91': {'nome': 'N91 — Atendimentos Especiais', 'descricao': 'Itens de atendimento/recurso solicitados e situação do laudo médico.'},
+}
+
+#: Colunas candidatas a servirem de chave compartilhada em cruzamentos entre layouts.
+_KEYS_CANDIDATAS: Sequence[str] = (
+    'CO_INSCRICAO_INEP', 'CO_INSCRICAO', 'ID_INSCRICAO', 'ID_PARTICIPANTE', 'ID_PESSOA',
+    'ID_SALA', 'CO_SALA', 'ID_LOCAL', 'CO_LOCAL', 'ID_BLOCO', 'CO_BLOCO',
+    'ID_KIT_PROVA', 'ID_CATEGORIA_ATENDIMENTO', 'ID_TIPO_ATENDIMENTO',
+)
+
+
+@dataclass
+class AnalysisSpec:
+    """Especificação declarativa de UMA análise da plataforma.
+
+    - ``tipo``: 'base' (tabela única) ou 'cruzamento' (relação entre layouts).
+    - ``base``: qual tabela a análise lê ('BASE' = base plana consolidada, ou um layout 'N02'...).
+    - ``layouts``: layouts exigidos (obrigatório para 'cruzamento').
+    - ``campos``: para 'base', dict {grupo: [colunas alternativas]} — basta UMA alternativa
+      presente e não vazia por grupo; para 'cruzamento', dict {LAYOUT: {grupo: [alternativas]}}.
+    - ``implementada``: True se o motor atual já calcula/exibe esta análise.
+    """
+    id: str
+    titulo: str
+    categoria: str
+    campos: Dict[str, Any]
+    interpretacao: str
+    recomendacao: str
+    tipo: str = 'base'
+    base: str = 'BASE'
+    layouts: tuple = ()
+    implementada: bool = True
+
+
+#: Catálogo declarativo de TODAS as análises que a plataforma conhece.
+ANALYSIS_CATALOG: List[AnalysisSpec] = [
+    # ---- Base plana consolidada (result.df) ----------------------------------
+    AnalysisSpec('analise_perfil_sexo', 'Perfil dos participantes por sexo', 'Base Plana',
+                 {'TP_SEXO': ['TP_SEXO']},
+                 'Distribuição de inscritos por sexo (M/F), base da análise demográfica.',
+                 'Usar com faixa etária para perfilar o público do certame.'),
+    AnalysisSpec('analise_faixa_etaria', 'Distribuição etária (faixas)', 'Base Plana',
+                 {'DT_NASCIMENTO': ['DT_NASCIMENTO']},
+                 'Idade derivada da data de nascimento, agrupada em faixas.',
+                 'Comparar com a demanda de atendimento especial por faixa.'),
+    AnalysisSpec('analise_situacao_inscricao', 'Situação da inscrição', 'Base Plana',
+                 {'TP_SITUACAO': ['TP_SITUACAO']},
+                 'Participantes por situação cadastral (Regular/Irregular/Judicial).',
+                 'Investigar irregularidades e judicializadas antes do ensalamento.'),
+    AnalysisSpec('analise_migracao_uf', 'Migração interestadual', 'Base Plana',
+                 {'UF_RESIDENCIA': ['SG_UF_MUNICIPIO_RESIDENCIA', 'SG_UF_RESIDENCIA'],
+                  'UF_PROVA': ['SG_UF_MUNICIPIO_PROVA', 'SG_UF_PROVA', 'SG_UF']},
+                 'Participantes cuja UF de prova difere da UF de residência.',
+                 'Alocar polos extras nos estados de maior atração interestadual.'),
+    AnalysisSpec('analise_geografia_uf', 'Resumo por UF', 'Base Plana',
+                 {'SG_UF': ['SG_UF_PROVA', 'SG_UF_MUNICIPIO_PROVA', 'SG_UF']},
+                 'Contagem e indicadores consolidados por unidade federativa.',
+                 'Usar como corte transversal em todas as demais análises.'),
+    AnalysisSpec('analise_grupos_curso', 'Ranking de grupos de curso', 'Base Plana',
+                 {'CO_GRUPO_CURSO': ['CO_GRUPO_CURSO', 'NO_GRUPO_CURSO']},
+                 'Maiores grupos de curso (áreas de avaliação) do certame.',
+                 'Dimensionar salas por proximidade dos grupos mais volumosos.'),
+    AnalysisSpec('analise_capacidade_uf', 'Capacidade alocada por UF', 'Base Plana',
+                 {'CAP': ['CAP_TOTAL', 'QT_CAPACIDADE_MAXIMA'], 'SG_UF': ['SG_UF_PROVA', 'SG_UF']},
+                 'Capacidade total de locais/salas agrupada por UF.',
+                 'Cotejar com a demanda de inscritos por UF (folga/estreitamento).'),
+    AnalysisSpec('analise_gini', 'Concentração de capacidade (Gini por UF)', 'Base Plana',
+                 {'CAP': ['CAP_TOTAL', 'QT_CAPACIDADE_MAXIMA'], 'SG_UF': ['SG_UF_PROVA', 'SG_UF']},
+                 'Desigualdade da distribuição de vagas entre os locais de cada UF.',
+                 'UFs com Gini alto concentram risco de logística em poucos polos.'),
+    AnalysisSpec('analise_qualidade_predial', 'Qualidade e conservação predial', 'Base Plana',
+                 {'QUALIDADE': ['QUALIDADE_PREDIAL_GLOBAL', 'INDICE_CONSERVACAO', 'DESC_NOTA_OFICIAL_INEP']},
+                 'Índice composto de conservação/qualidade dos espaços de prova.',
+                 'Priorizar manutenção nos locais com pior índice.'),
+    AnalysisSpec('analise_densidade', 'Densidade espacial (m²/candidato)', 'Base Plana',
+                 {'AREA_POR_CANDIDATO_M2': ['AREA_POR_CANDIDATO_M2']},
+                 'Área física disponível por candidato, proxy de conforto e lotação.',
+                 'Evitar salas com densidade abaixo do recomendado.'),
+    AnalysisSpec('analise_atendimento_especial', 'Demanda por atendimento especial', 'Base Plana',
+                 {'ATEND': ['IN_ATENDIMENTO_ESPECIAL', 'IN_RECURSO', 'TP_ITEM_ATENDIMENTO']},
+                 'Volume de inscritos que solicitam atendimento especializado.',
+                 'Casar com os itens do layout N91 para dimensionar recursos.'),
+    AnalysisSpec('analise_correlacao', 'Correlações entre índices derivados', 'Base Plana',
+                 {'INDICES': ['INDICE_ACESSIBILIDADE', 'INDICE_SEGURANCA', 'INDICE_CONFORTO',
+                              'INDICE_TECNOLOGIA', 'INDICE_VULNERABILIDADE', 'INDICE_CONSERVACAO']},
+                 'Matriz de correlação de Pearson entre os índices compostos.',
+                 'Identificar perfis de locais (fortes em acessibilidade vs tecnologia).'),
+
+    # ---- Layouts individuais (tabelas normalizadas) ---------------------------
+    AnalysisSpec('n90_contagem_inscritos', 'Inscritos por UF de residência', 'N90',
+                 {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP'],
+                  'UF': ['SG_UF_MUNICIPIO_RESIDENCIA', 'SG_UF_RESIDENCIA', 'SG_UF']},
+                 'Distribuição dos participantes pela UF onde residem.',
+                 'Detectar provas descentralizadas e folga de capacidade local.',
+                 base='N90'),
+    AnalysisSpec('n02_tipos_ensalamento', 'Distribuição por tipo de ensalamento', 'N02',
+                 {'TP_ENSALAMENTO': ['TP_ENSALAMENTO']},
+                 'Como os inscritos são ensalados (por área, por grupo, etc.).',
+                 'Validar o critério de alocação adotado na prova.',
+                 base='N02'),
+    AnalysisSpec('n02_salas_por_local', 'Quantidade de salas por local', 'N02',
+                 {'ID_SALA': ['ID_SALA', 'CO_SALA'], 'CO_LOCAL': ['CO_LOCAL', 'ID_LOCAL']},
+                 'Número de salas ensaladas em cada local de prova.',
+                 'Cruzado com N52, confronta a capacidade declarada com a real.',
+                 base='N02'),
+    AnalysisSpec('n02_blocos_por_local', 'Blocos por local', 'N02',
+                 {'ID_BLOCO': ['ID_BLOCO', 'CO_BLOCO'], 'CO_LOCAL': ['CO_LOCAL', 'ID_LOCAL']},
+                 'Quantidade de blocos/prédios utilizados por local.',
+                 'Orientar a sinalização interna e a logística de abertura.',
+                 base='N02'),
+    AnalysisSpec('n50_capacidade_salas', 'Capacidade máxima por sala', 'N50',
+                 {'QT_CAPACIDADE_MAXIMA_SALA': ['QT_CAPACIDADE_MAXIMA_SALA']},
+                 'Capacidade física declarada de cada sala dos espaços físicos.',
+                 'Usar como teto seguro de alocação por sala.',
+                 base='N50'),
+    AnalysisSpec('n50_capacidade_por_uf', 'Capacidade agregada por UF (N50)', 'N50',
+                 {'CAP': ['QT_CAPACIDADE_MAXIMA_SALA'], 'SG_UF': ['SG_UF']},
+                 'Somatório de capacidade declarada das salas por UF.',
+                 'Comparar com a demanda de inscritos da UF.',
+                 base='N50'),
+    AnalysisSpec('n52_resumo_local', 'Salas e capacidade por local (N52)', 'N52',
+                 {'QT_SALAS': ['QT_SALAS'], 'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']},
+                 'Resumo agregado de salas e capacidade por espaço físico.',
+                 'Fonte oficial para o planejamento de alocação.',
+                 base='N52'),
+    AnalysisSpec('n52_inscritos_por_local', 'Inscritos por local (N52)', 'N52',
+                 {'QT_INSCRITOS': ['QT_INSCRITOS', 'QT_CANDIDATOS_ALOCADOS']},
+                 'Inscritos alocados em cada espaço físico.',
+                 'Calcular a taxa de ocupação real por local.',
+                 base='N52'),
+    AnalysisSpec('n52_ocupacao', 'Taxa de ocupação (N52)', 'N52',
+                 {'QT_INSCRITOS': ['QT_INSCRITOS', 'QT_CANDIDATOS_ALOCADOS'],
+                  'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']},
+                 'Relação inscritos/capacidade por espaço físico.',
+                 'Locais acima de 100% exigem reensalamento preventivo.',
+                 base='N52'),
+    AnalysisSpec('n60_acessibilidade', 'Acessibilidade dos locais (N60)', 'N60',
+                 {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_RAMPA_ACESSO']},
+                 'Locais com condições de acessibilidade declaradas.',
+                 'Casar com a demanda por atendimento especial (N91).',
+                 base='N60'),
+    AnalysisSpec('n60_salas_adaptadas', 'Salas adaptadas (N60)', 'N60',
+                 {'IN_SALA_ADAPTADA': ['IN_SALA_ADAPTADA']},
+                 'Existência de salas adaptadas no local.',
+                 'Alocar participantes com mobilidade reduzida nesses locais.',
+                 base='N60'),
+    AnalysisSpec('n60_policiamento', 'Policiamento do local (N60)', 'N60',
+                 {'IN_POLICIAMENTO': ['IN_POLICIAMENTO']},
+                 'Locais com policiamento presente no dia da prova.',
+                 'Reforçar segurança nos locais sem policiamento declarado.',
+                 base='N60'),
+    AnalysisSpec('n60_infra_tecnologia', 'Energia e internet (N60)', 'N60',
+                 {'IN_ENERGIA': ['IN_ENERGIA'], 'IN_INTERNET': ['IN_INTERNET']},
+                 'Disponibilidade de energia elétrica e internet no local.',
+                 'Pré-requisito para provas digitais ou leitura de QR.',
+                 base='N60'),
+    AnalysisSpec('n91_itens_atendimento', 'Ranking de itens de atendimento (N91)', 'N91',
+                 {'NO_ITEM_ATENDIMENTO': ['NO_ITEM_ATENDIMENTO', 'ID_ITEM_ATENDIMENTO']},
+                 'Itens de atendimento/recurso mais solicitados.',
+                 'Dimensionar kits e provas adaptadas por item.',
+                 base='N91'),
+    AnalysisSpec('n91_tipos_atendimento', 'Tipos de atendimento (N91)', 'N91',
+                 {'TP_ITEM_ATENDIMENTO': ['TP_ITEM_ATENDIMENTO']},
+                 'Distribuição entre atendimento específico/especializado/recurso.',
+                 'Prever mão de obra especializada (ledor, tradutor, etc.).',
+                 base='N91'),
+    AnalysisSpec('n91_laudo_situacao', 'Situação do laudo médico (N91)', 'N91',
+                 {'CO_SITUACAO_LAUDO_MEDICO': ['CO_SITUACAO_LAUDO_MEDICO']},
+                 'Distribuição da análise do laudo (aprovado/indeferido/em análise).',
+                 'Planejar contingenciamento para indeferimentos no dia.',
+                 base='N91'),
+    AnalysisSpec('n91_laudo_por_uf', 'Taxa de deferimento de laudo por UF (N91)', 'N91',
+                 {'LAUDO': ['CO_SITUACAO_LAUDO_MEDICO'], 'UF': ['SG_UF']},
+                 'Deferimento do laudo médico comparado entre UFs.',
+                 'Investigar UFs com taxa de deferimento atípica.',
+                 base='N91'),
+
+    # ---- Cruzamentos em pares -------------------------------------------------
+    AnalysisSpec('cruza_n02_n50', 'Capacidade real × declarada (N02 × N50)', 'Cruzamento N02×N50',
+                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
+                  'N50': {'QT_CAPACIDADE_MAXIMA_SALA': ['QT_CAPACIDADE_MAXIMA_SALA']}},
+                 'Confronta as salas ensaladas (N02) com a capacidade declarada (N50).',
+                 'Salas ensaladas sem registro em N50 ou com capacidade divergente exigem revisão.',
+                 tipo='cruzamento', layouts=('N02', 'N50')),
+    AnalysisSpec('cruza_n02_n52', 'Ensalamento × resumo do local (N02 × N52)', 'Cruzamento N02×N52',
+                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
+                  'N52': {'QT_SALAS': ['QT_SALAS'], 'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']}},
+                 'Compara as salas efetivamente ensaladas com o resumo oficial do local.',
+                 'Divergência indica local parcialmente utilizado ou resumo desatualizado.',
+                 tipo='cruzamento', layouts=('N02', 'N52')),
+    AnalysisSpec('cruza_n02_n90', 'Participantes × ensalamento (N02 × N90)', 'Cruzamento N02×N90',
+                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
+                  'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']}},
+                 'Relaciona inscritos (N90) com a sala onde foram ensalados (N02).',
+                 'Identifica participantes ensalados sem inscrição e vice-versa.',
+                 tipo='cruzamento', layouts=('N02', 'N90')),
+    AnalysisSpec('cruza_n02_n91', 'Ensalamento × atendimentos (N02 × N91)', 'Cruzamento N02×N91',
+                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
+                  'N91': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']}},
+                 'Casa a sala de prova com os atendimentos especiais solicitados.',
+                 'Garante que o local ofereça os recursos compatíveis com a demanda.',
+                 tipo='cruzamento', layouts=('N02', 'N91')),
+    AnalysisSpec('cruza_n02_n60', 'Ensalamento × acessibilidade (N02 × N60)', 'Cruzamento N02×N60',
+                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA'], 'CO_LOCAL': ['CO_LOCAL', 'ID_LOCAL']},
+                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
+                 'Verifica se os locais ensalados são acessíveis (N60).',
+                 'Participantes com atendimento alocados em local não acessível = alerta.',
+                 tipo='cruzamento', layouts=('N02', 'N60')),
+    AnalysisSpec('cruza_n90_n52', 'Participantes × capacidade do local (N90 × N52)', 'Cruzamento N90×N52',
+                 {'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
+                  'N52': {'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']}},
+                 'Demanda de inscritos versus capacidade oficial dos locais.',
+                 'Locais com demanda superior à capacidade exigem reensalamento.',
+                 tipo='cruzamento', layouts=('N90', 'N52')),
+    AnalysisSpec('cruza_n90_n60', 'Participantes × acessibilidade (N90 × N60)', 'Cruzamento N90×N60',
+                 {'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
+                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
+                 'Coteja a demanda por acessibilidade com a oferta declarada.',
+                 'Locais acessíveis insuficientes para a demanda = plano de mitigação.',
+                 tipo='cruzamento', layouts=('N90', 'N60')),
+    AnalysisSpec('cruza_n90_n91', 'Participantes × atendimentos (N90 × N91)', 'Cruzamento N90×N91',
+                 {'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
+                  'N91': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP'],
+                          'NO_ITEM_ATENDIMENTO': ['NO_ITEM_ATENDIMENTO', 'ID_ITEM_ATENDIMENTO']}},
+                 'Detalha os atendimentos especiais por perfil do participante.',
+                 'Orienta a produção de kits adaptados e a contratação de profissionais.',
+                 tipo='cruzamento', layouts=('N90', 'N91')),
+    AnalysisSpec('cruza_n52_n60', 'Resumo do local × acessibilidade (N52 × N60)', 'Cruzamento N52×N60',
+                 {'N52': {'CO_LOCAL': ['CO_LOCAL', 'ID_LOCAL'], 'QT_SALAS': ['QT_SALAS']},
+                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
+                 'Compara o cadastro do local com as condições de acessibilidade.',
+                 'Locais sem visita N60 não têm acessibilidade garantida.',
+                 tipo='cruzamento', layouts=('N52', 'N60')),
+    AnalysisSpec('cruza_n50_n52', 'Capacidade de sala × resumo do local (N50 × N52)', 'Cruzamento N50×N52',
+                 {'N50': {'ID_SALA': ['ID_SALA', 'CO_SALA'], 'QT_CAPACIDADE_MAXIMA_SALA': ['QT_CAPACIDADE_MAXIMA_SALA']},
+                  'N52': {'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']}},
+                 'Confere se a capacidade agregada (N52) bate com a soma das salas (N50).',
+                 'Divergência indica sala não cadastrada no resumo do local.',
+                 tipo='cruzamento', layouts=('N50', 'N52')),
+
+    # ---- Cruzamentos em trios --------------------------------------------------
+    AnalysisSpec('cruza_n02_n90_n91', 'Ensalamento × participantes × atendimentos', 'Cruzamento N02×N90×N91',
+                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
+                  'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
+                  'N91': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP'],
+                          'NO_ITEM_ATENDIMENTO': ['NO_ITEM_ATENDIMENTO', 'ID_ITEM_ATENDIMENTO']}},
+                 'Rastreio completo: quem, em qual sala, com qual atendimento especial.',
+                 'Visão fim-a-fim para a logística do dia da prova.',
+                 tipo='cruzamento', layouts=('N02', 'N90', 'N91')),
+    AnalysisSpec('cruza_n02_n90_n60', 'Ensalamento × participantes × acessibilidade', 'Cruzamento N02×N90×N60',
+                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
+                  'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
+                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
+                 'Cruza a alocação dos participantes com a acessibilidade do local.',
+                 'Detecta participantes em locais sem condição de acessibilidade.',
+                 tipo='cruzamento', layouts=('N02', 'N90', 'N60')),
+    AnalysisSpec('cruza_n02_n52_n60', 'Ensalamento × resumo × acessibilidade', 'Cruzamento N02×N52×N60',
+                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
+                  'N52': {'QT_SALAS': ['QT_SALAS'], 'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']},
+                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
+                 'Integra a alocação, o cadastro oficial e as condições do local.',
+                 'Triagem completa de risco estrutural por espaço físico.',
+                 tipo='cruzamento', layouts=('N02', 'N52', 'N60')),
+]
+
+
+class AnalyticalAvailability:
+    """Motor único de disponibilidade analítica.
+
+    Resolve, para CADA análise do catálogo, o status real na base carregada
+    (disponível / layout ausente / campo ausente / campo vazio / sem chave) e
+    produz um bundle JSON-serializable consumido em conjunto por Excel, HTML e
+    Streamlit. O mesmo motor decide também quais cruzamentos entre layouts são
+    possíveis e gera a narrativa, os achados e o resumo por UF.
+    """
+
+    def __init__(self, layouts: Optional[Dict[str, pd.DataFrame]] = None,
+                 flat_df: Optional[pd.DataFrame] = None,
+                 selected_layouts: Optional[Sequence[str]] = None,
+                 logger: Optional[logging.Logger] = None) -> None:
+        self.layouts = layouts or {}
+        self.flat_df = flat_df
+        self.selected_layouts = list(selected_layouts) if selected_layouts else None
+        self.logger = logger
+
+    # ---- helpers ---------------------------------------------------------------
+    def _log(self, msg: str, nivel: int = logging.INFO) -> None:
+        if self.logger is not None:
+            try:
+                self.logger.log(nivel, msg)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _colunas_presentes(df: pd.DataFrame) -> set:
+        return set(map(str, df.columns))
+
+    @staticmethod
+    def _alternativas_preenchidas(df: pd.DataFrame, alts: Sequence[str]) -> List[str]:
+        cols = AnalyticalAvailability._colunas_presentes(df)
+        return [a for a in alts if a in cols and not df[a].dropna().empty]
+
+    @staticmethod
+    def _table_ok(df) -> bool:
+        return isinstance(df, pd.DataFrame) and not df.empty
+
+    def _shared_key(self, layouts: tuple) -> Optional[str]:
+        """Encontra uma chave compartilhada entre os dataframes dos layouts."""
+        dfs = [self.layouts.get(k) for k in layouts]
+        if not dfs or not all(self._table_ok(d) for d in dfs):
+            return None
+        comum = set.intersection(*[self._colunas_presentes(d) for d in dfs])
+        for k in _KEYS_CANDIDATAS:
+            if k in comum:
+                return k
+        for k in _KEYS_CANDIDATAS:
+            if all(any(k in c or k in str(c) for c in cols) for cols in (self._colunas_presentes(d) for d in dfs)):
+                return k
+        return None
+
+    def _status_single(self, spec: AnalysisSpec) -> Tuple[str, str]:
+        alvo = self.flat_df if spec.base == 'BASE' else self.layouts.get(spec.base)
+        if not self._table_ok(alvo):
+            if spec.base == 'BASE':
+                return 'layout_ausente', 'Base plana consolidada indisponível'
+            return 'layout_ausente', f"Layout '{spec.base}' não encontrado na base carregada"
+        for grupo, alts in spec.campos.items():
+            preenchidas = self._alternativas_preenchidas(alvo, list(alts))
+            if not preenchidas:
+                if any(a in self._colunas_presentes(alvo) for a in alts):
+                    return 'campo_vazio', f"Campo(s) {', '.join(alts)} presente(s), porém 100% vazio(s)"
+                return 'campo_ausente', f"Campo(s) requerido(s) não encontrado(s): {', '.join(alts)}"
+        return 'disponivel', ''
+
+    def _status_cross(self, spec: AnalysisSpec) -> Tuple[str, str]:
+        for lay in spec.layouts:
+            if not self._table_ok(self.layouts.get(lay)):
+                return 'layout_ausente', f"Layout '{lay}' não encontrado na base carregada"
+        chave = self._shared_key(spec.layouts)
+        if chave is None:
+            return 'sem_chave', 'Nenhuma chave compartilhada encontrada entre os layouts'
+        for lay in spec.layouts:
+            df = self.layouts.get(lay)
+            campos_lay = spec.campos.get(lay, {})
+            for grupo, alts in campos_lay.items():
+                preenchidas = self._alternativas_preenchidas(df, list(alts))
+                if not preenchidas:
+                    if any(a in self._colunas_presentes(df) for a in alts):
+                        return 'campo_vazio', f"[{lay}] Campo(s) {', '.join(alts)} presente(s), porém 100% vazio(s)"
+                    return 'campo_ausente', f"[{lay}] Campo(s) requerido(s) não encontrado(s): {', '.join(alts)}"
+        return 'disponivel', f'Chave compartilhada: {chave}'
+
+    # ---- resolução -------------------------------------------------------------
+    def _layouts_presentes(self) -> List[str]:
+        presentes = [k for k, v in self.layouts.items()
+                     if isinstance(v, pd.DataFrame) and not v.empty and not str(k).startswith('_')]
+        presentes = sorted(set(presentes))
+        if not presentes and self._table_ok(self.flat_df):
+            presentes = ['BASE_PLANA']
+        if self.selected_layouts:
+            sel = [k for k in presentes if k in set(self.selected_layouts)]
+            if sel or any(k not in {'BASE_PLANA'} for k in presentes):
+                presentes = sel
+        return presentes
+
+    def resolve(self) -> Dict[str, Any]:
+        presentes = self._layouts_presentes()
+        resumo_por_layout = {}
+        for k in LAYOUTS_CONHECIDOS:
+            df = self.layouts.get(k)
+            resumo_por_layout[k] = {
+                'presente': k in presentes or (self._table_ok(df)),
+                'linhas': int(len(df)) if self._table_ok(df) else 0,
+                'colunas': int(len(df.columns)) if self._table_ok(df) else 0,
+            }
+        ausentes = [k for k in LAYOUTS_CONHECIDOS if k not in presentes]
+
+        analises = []
+        for spec in ANALYSIS_CATALOG:
+            if spec.tipo == 'cruzamento':
+                status, motivo = self._status_cross(spec)
+            else:
+                status, motivo = self._status_single(spec)
+            analises.append({
+                'id': spec.id, 'titulo': spec.titulo, 'categoria': spec.categoria,
+                'layouts': list(spec.layouts), 'status': status, 'motivo': motivo,
+                'implementada': bool(spec.implementada),
+                'executavel': status == 'disponivel' and bool(spec.implementada),
+            })
+
+        cruzamentos = self._cruzamentos_possiveis(presentes)
+        narrativa = self._narrativa(analises, presentes)
+        achados = self._achados(analises, resumo_por_layout)
+        resumo_uf = self._resumo_uf()
+
+        bundle = {
+            'gerado_em': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'layouts_presentes': presentes,
+            'layouts_ausentes': ausentes,
+            'resumo_por_layout': resumo_por_layout,
+            'analises': analises,
+            'matriz_cobertura': self._matriz_cobertura(analises),
+            'cruzamentos_possiveis': cruzamentos,
+            'narrativa': narrativa,
+            'achados': achados,
+            'resumo_uf': resumo_uf,
+        }
+        self._log(f"Disponibilidade analítica: {len(analises)} análises avaliadas, "
+                  f"{sum(1 for a in analises if a['status'] == 'disponivel')} disponíveis "
+                  f"para {len(presentes)} layout(s) presente(s).")
+        return bundle
+
+    def _matriz_cobertura(self, analises: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [{
+            'analise': a['titulo'], 'id': a['id'], 'categoria': a['categoria'],
+            'layouts': ', '.join(a['layouts']) if a['layouts'] else (a.get('base', '') if 'base' in a else 'BASE'),
+            'status': a['status'], 'motivo': a['motivo'], 'implementada': a['implementada'],
+        } for a in analises]
+
+    def _cruzamentos_possiveis(self, presentes: List[str]) -> List[Dict[str, Any]]:
+        combos = []
+        layout_ids = [k for k in presentes if k != 'BASE_PLANA']
+        for a, b in _combinacoes(sorted(layout_ids), 2):
+            da, db = self.layouts.get(a), self.layouts.get(b)
+            if not self._table_ok(da) or not self._table_ok(db):
+                continue
+            comum = self._colunas_presentes(da) & self._colunas_presentes(db)
+            chave = next((k for k in _KEYS_CANDIDATAS if k in comum), None)
+            combos.append({
+                'layout_esquerdo': a, 'layout_direito': b,
+                'chave': chave or '',
+                'status': 'disponivel' if chave else 'sem_chave',
+                'motivo': f"Chave compartilhada: {chave}" if chave else 'Nenhuma chave compartilhada detectada',
+            })
+        return combos
+
+    def _narrativa(self, analises: List[Dict[str, Any]], presentes: List[str]) -> List[str]:
+        narr = []
+        disp = [a for a in analises if a['status'] == 'disponivel']
+        if not presentes:
+            narr.append('Nenhum layout normalizado (N02/N50/N52/N60/N90/N91) foi reconhecido na base de entrada.')
+            narr.append('Apenas as análises da base plana consolidada podem ser avaliadas.')
+            return narr
+        narr.append(f"Base reconhecida com {len(presentes)} layout(s): {', '.join(sorted(presentes))}.")
+        por_status: Dict[str, int] = {}
+        for a in analises:
+            por_status[a['status']] = por_status.get(a['status'], 0) + 1
+        narr.append(f"Das {len(analises)} análises conhecidas, {len(disp)} estão disponíveis "
+                    f"({por_status.get('layout_ausente', 0)} dependem de layout ausente, "
+                    f"{por_status.get('campo_ausente', 0)} de campo ausente, "
+                    f"{por_status.get('campo_vazio', 0)} de campo vazio e "
+                    f"{por_status.get('sem_chave', 0)} de cruzamento sem chave).")
+        por_cat: Dict[str, int] = {}
+        for a in disp:
+            por_cat[a['categoria']] = por_cat.get(a['categoria'], 0) + 1
+        if por_cat:
+            top = max(por_cat.items(), key=lambda kv: kv[1])
+            narr.append(f"A categoria com mais análises executáveis é '{top[0]}' ({top[1]} análise(s)).")
+        return narr
+
+    def _achados(self, analises: List[Dict[str, Any]], resumo_por_layout: Dict[str, Dict[str, Any]]) -> List[Dict[str, str]]:
+        achados = []
+        indisponiveis = [a for a in analises if a['status'] != 'disponivel']
+        if not indisponiveis:
+            achados.append({'severidade': 'INFO',
+                            'texto': 'Todas as análises aplicáveis aos layouts presentes estão disponíveis.'})
+        else:
+            achados.append({'severidade': 'ATENÇÃO',
+                            'texto': f"{len(indisponiveis)} análise(s) do catálogo não pode(m) ser executada(s) "
+                                     f"com os dados carregados (ver matriz de cobertura para o motivo exato)."})
+            por_motivo: Dict[str, int] = {}
+            for a in indisponiveis:
+                por_motivo[a['status']] = por_motivo.get(a['status'], 0) + 1
+            for status, qtd in sorted(por_motivo.items(), key=lambda kv: -kv[1]):
+                labels = {'layout_ausente': 'dependem de um layout ausente na base',
+                          'campo_ausente': 'estão sem um campo obrigatório na base',
+                          'campo_vazio': 'têm os campos, porém 100% vazios',
+                          'sem_chave': 'exigem cruzamento sem chave compartilhada'}
+                achados.append({'severidade': 'INFO' if status == 'sem_chave' else 'ATENÇÃO',
+                                'texto': f"{qtd} análise(s) {labels.get(status, status)}."})
+        for k, meta in resumo_por_layout.items():
+            if meta.get('presente') and meta.get('colunas', 0) == 0:
+                achados.append({'severidade': 'ATENÇÃO',
+                                'texto': f"Layout {k} detectado, porém sem colunas aproveitáveis."})
+        return achados
+
+    def _resumo_uf(self) -> List[Dict[str, Any]]:
+        df = self.flat_df
+        if not self._table_ok(df):
+            return []
+        uf_col = next((c for c in ('SG_UF', 'SG_UF_PROVA', 'SG_UF_MUNICIPIO_PROVA')
+                       if c in self._colunas_presentes(df) and not df[c].dropna().empty), None)
+        if uf_col is None:
+            return []
+        out = df[uf_col].dropna().value_counts().head(27).reset_index()
+        out.columns = ['UF', 'registros']
+        return out.to_dict('records')
+
+
+class ReportReferenceIngestor:
+    """Framework (scaffold) para INGERIR relatórios/notas técnicas do INEP como
+    referência às interpretações do painel.
+
+    Ainda não há relatórios anexados neste projeto: a classe apenas lê arquivos
+    .txt/.md/.docx/.pdf de um diretório passado com ``--relatorios`` e extrai
+    padrões quantitativos (percentuais, médias, limites) por regex, marcando-os
+    como REFERÊNCIA. Sem o diretório (ou sem arquivos), devolve lista vazia sem
+    falhar — o pipeline segue idêntico ao anterior (sem regressão).
+    """
+
+    def __init__(self, dirpath: Optional[str] = None, logger: Optional[logging.Logger] = None) -> None:
+        self.dirpath = dirpath
+        self.logger = logger
+
+    def ingest(self) -> List[Dict[str, Any]]:
+        if not self.dirpath:
+            return []
+        p = Path(str(self.dirpath))
+        if not p.exists():
+            return []
+        arquivos = sorted(p.rglob('*')) if p.is_dir() else [p]
+        refs = []
+        for f in arquivos:
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in ('.txt', '.md', '.docx', '.pdf'):
+                continue
+            try:
+                texto = self._read_text(f)
+            except Exception:
+                texto = ''
+            if not texto or len(texto) < 10:
+                continue
+            refs.append({
+                'arquivo': f.name,
+                'caminho': str(f),
+                'titulo': self._titulo(texto) or f.stem,
+                'padroes': self._padroes(texto),
+                'caracteres': len(texto),
+            })
+        if refs and self.logger is not None:
+            self.logger.info(f"[REFERÊNCIAS] {len(refs)} relatório(s) de referência ingerido(s) de '{self.dirpath}'.")
+        return refs
+
+    @staticmethod
+    def _read_text(f: Path) -> str:
+        if f.suffix.lower() in ('.txt', '.md'):
+            return f.read_text(encoding='utf-8', errors='ignore').lstrip('\ufeff')
+        if f.suffix.lower() == '.docx':
+            try:
+                import docx  # type: ignore
+                d = docx.Document(str(f))
+                return '\n'.join(p.text for p in d.paragraphs)
+            except Exception:
+                return ''
+        if f.suffix.lower() == '.pdf':
+            try:
+                from PyPDF2 import PdfReader  # type: ignore
+                return '\n'.join((pg.extract_text() or '') for pg in PdfReader(str(f)).pages)
+            except Exception:
+                try:
+                    import fitz  # type: ignore
+                    doc = fitz.open(str(f))
+                    return '\n'.join(pg.get_text() for pg in doc)
+                except Exception:
+                    return ''
+        return ''
+
+    @staticmethod
+    def _titulo(texto: str) -> str:
+        for linha in texto.splitlines():
+            ls = linha.strip()
+            if ls and 3 < len(ls) < 220:
+                return ls
+        return ''
+
+    @staticmethod
+    def _padroes(texto: str) -> List[Dict[str, Any]]:
+        padroes = []
+        for m in re.finditer(r'(\d+(?:[.,]\d+)?)\s*%\s*(?:de|dos|das)?\s*([A-Za-zÀ-ú][A-Za-zÀ-ú ]{2,40})', texto):
+            padroes.append({'tipo': 'percentual', 'valor': m.group(1), 'contexto': m.group(2).strip()})
+        for m in re.finditer(r'm[ée]dia\s*(?:de)?\s*(\d+(?:[.,]\d+)?)', texto, re.IGNORECASE):
+            padroes.append({'tipo': 'media', 'valor': m.group(1)})
+        return padroes[:30]
+
+
+# ============================================================================
+# CAMADA DE COMPATIBILIDADE DE ESCRITA EXCEL (Resiliência Real — v33)
+# ----------------------------------------------------------------------------
+# O construtor de workbook de dezenas de abas é escrito com a API do XlsxWriter
+# (formatos, merge_range, autofilter, cor condicional, gráficos nativos). O
+# XlsxWriter é declarado como dependência OPCIONAL no cabeçalho deste arquivo,
+# porém o pipeline quebrava se ele não estivesse instalado (engine hardcoded).
+# Esta camada traduz — em tempo real e de forma transparente — a MESMA API para
+# o openpyxl, que já acompanha o pandas. Com ela, sem xlsxwriter o Excel ainda é
+# gerado integralmente (dados + cabeçalhos + larguras + mesclagem + cor
+# condicional + filtros + autofiltro), apenas sem os gráficos nativos e com um
+# único aviso no log. Use a variável de ambiente INEP_EXCEL_ENGINE=openpyxl para
+# forçar o fallback mesmo com xlsxwriter instalado (útil em testes/CI).
+# ============================================================================
+
+_CORES_NADAS = {
+    "white": "FFFFFF", "black": "000000", "red": "FF0000", "green": "00FF00",
+    "blue": "0000FF", "yellow": "FFFF00", "cyan": "00FFFF", "magenta": "FF00FF",
+    "gray": "808080", "grey": "808080", "darkgray": "A9A9A9", "darkgrey": "A9A9A9",
+    "lightgray": "D3D3D3", "lightgrey": "D3D3D3", "orange": "FFA500",
+    "purple": "800080", "brown": "A52A2A", "pink": "FFC0CB", "silver": "C0C0C0",
+    "maroon": "800000", "navy": "000080", "olive": "808000", "teal": "008080",
+    "lime": "00FF00", "aqua": "00FFFF", "fuchsia": "FF00FF", "transparent": "00000000",
+}
+
+
+def _px(color):
+    """Normaliza cor hex para o formato aceito pelo openpyxl (sem '#').
+    XlsxWriter aceita nomes de cor ('white'), openpyxl exige aRGB hex — por isso
+    os nomes comuns são convertidos aqui para o valor hexadecimal equivalente."""
+    if not color:
+        return "000000"
+    s = str(color).strip()
+    if s.startswith("#"):
+        return s[1:].upper()
+    if s.lower() in _CORES_NADAS:
+        return _CORES_NADAS[s.lower()]
+    if len(s) in (6, 8) and all(c in "0123456789abcdefABCDEF" for c in s):
+        return s.upper()
+    return s.upper()
+
+
+class _CompatFormat:
+    """Formato compatível com a API do XlsxWriter, aplicado sobre células openpyxl."""
+
+    __slots__ = ("_props",)
+
+    def __init__(self, props=None):
+        object.__setattr__(self, "_props", dict(props or {}))
+
+    def apply(self, cell):
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        p = self._props
+        if p.get("bold") or p.get("font_size") or p.get("font_color"):
+            cell.font = Font(bold=bool(p.get("bold")), size=p.get("font_size", 11),
+                             color=_px(p.get("font_color", "000000")))
+        bg = p.get("bg_color")
+        if bg:
+            cell.fill = PatternFill(fill_type="solid", start_color=_px(bg), end_color=_px(bg))
+        al = {}
+        if p.get("text_wrap"):
+            al["wrap_text"] = True
+        if p.get("valign"):
+            v = str(p.get("valign")).lower()
+            al["vertical"] = {"vcenter": "center", "center": "center"}.get(v, v)
+        if al:
+            cell.alignment = Alignment(**al)
+        if p.get("border"):
+            side = Side(style="thin", color="9CA3AF")
+            cell.border = Border(left=side, right=side, top=side, bottom=side)
+        return cell
+
+
+class _CompatChart:
+    """Gráfico 'nativo' no openpyxl não é implementado de forma idêntica ao
+    XlsxWriter; para manter a resiliência, o objeto é um stub inofensivo que
+    aceita a mesma chamada de API e simplesmente não plota. As abas de DADOS
+    continuam íntegras."""
+
+    def add_series(self, *a, **k):
+        return None
+
+    def set_title(self, *a, **k):
+        return None
+
+    def set_legend(self, *a, **k):
+        return None
+
+    def set_x_axis(self, *a, **k):
+        return None
+
+    def set_y_axis(self, *a, **k):
+        return None
+
+    def set_size(self, *a, **k):
+        return None
+
+
+class _CompatWorksheet:
+    """Aba compatível com a API do XlsxWriter em cima de uma aba openpyxl."""
+
+    __slots__ = ("_ws",)
+
+    def __init__(self, ws):
+        object.__setattr__(self, "_ws", ws)
+
+    def __getattr__(self, name):
+        # Atributos não cobertos aqui são repassados à aba openpyxl subjacente.
+        return getattr(self._ws, name)
+
+    def _cell(self, cell_or_row, col=None):
+        if isinstance(cell_or_row, str):
+            return self._ws[cell_or_row]
+        return self._ws.cell(row=int(cell_or_row) + 1, column=int(col) + 1)
+
+    def write(self, cell_or_row, col=None, value=None, fmt=None):
+        if isinstance(cell_or_row, str):
+            cell = self._ws[cell_or_row]
+            val, f = col, (value if isinstance(value, _CompatFormat) else None)
+        else:
+            cell = self._ws.cell(row=int(cell_or_row) + 1, column=(0 if col is None else int(col)) + 1)
+            val, f = value, fmt
+        if val is not None:
+            cell.value = val
+        if f is not None:
+            f.apply(cell)
+        return cell
+
+    def merge_range(self, range_str, text, fmt=None):
+        from openpyxl.utils.cell import range_boundaries
+        self._ws.merge_cells(range_str)
+        min_col, min_row, max_col, max_row = range_boundaries(range_str)
+        cell = self._ws.cell(row=min_row, column=min_col)
+        cell.value = text
+        if fmt is not None:
+            for r in range(min_row, max_row + 1):
+                for c in range(min_col, max_col + 1):
+                    fmt.apply(self._ws.cell(row=r, column=c))
+        return cell
+
+    def set_column(self, first, last=None, width=None, fmt=None):
+        from openpyxl.utils import get_column_letter, column_index_from_string
+        if isinstance(first, str):
+            if ":" in first:
+                a, b = [x.strip() for x in first.split(":", 1)]
+                c1, c2 = column_index_from_string(a), column_index_from_string(b)
+            else:
+                c1 = c2 = column_index_from_string(first.strip())
+            w = last if isinstance(last, (int, float)) else None
+            f = width if isinstance(width, _CompatFormat) else None
+        else:
+            c1, c2 = int(first) + 1, int(last) + 1
+            w, f = width, fmt
+        for ci in range(c1, c2 + 1):
+            letter = get_column_letter(ci)
+            self._ws.column_dimensions[letter].width = w if w is not None else 18
+            if f is not None:
+                for row in self._ws.iter_rows(min_col=ci, max_col=ci):
+                    for cell in row:
+                        f.apply(cell)
+        return None
+
+    def autofilter(self, r1, c1, r2, c2):
+        from openpyxl.utils import get_column_letter
+        self._ws.auto_filter.ref = (f"{get_column_letter(int(c1) + 1)}{int(r1) + 1}:"
+                                    f"{get_column_letter(int(c2) + 1)}{int(r2) + 1}")
+
+    def conditional_format(self, r1, c1, r2, c2, spec):
+        from openpyxl.utils import get_column_letter
+        from openpyxl.formatting.rule import ColorScaleRule
+        rng = (f"{get_column_letter(int(c1) + 1)}{int(r1) + 1}:"
+               f"{get_column_letter(int(c2) + 1)}{int(r2) + 1}")
+        if spec.get("type") == "3_color_scale":
+            rule = ColorScaleRule(
+                start_type="min", start_color=_px(spec.get("min_color", "#FFFFFF")),
+                mid_type="percentile", mid_value=50, mid_color=_px(spec.get("mid_color", "#FEF08A")),
+                end_type="max", end_color=_px(spec.get("max_color", "#10B981")))
+            self._ws.conditional_formatting.add(rng, rule)
+
+    def hide_gridlines(self, *a, **k):
+        try:
+            self._ws.sheet_view.showGridLines = False
+        except Exception:
+            pass
+
+    def set_row(self, row, height):
+        self._ws.row_dimensions[int(row) + 1].height = height
+
+    def insert_chart(self, *a, **k):
+        # Sem gráficos nativos no fallback openpyxl (comportamento documentado).
+        return None
+
+
+class _CompatWorkbook:
+    """Workbook compatível com a API do XlsxWriter em cima de openpyxl.
+    Quando o engine nativo é o xlsxwriter (compat=False), atua como passagem
+    transparente — comportamento idêntico ao código original."""
+
+    __slots__ = ("_book", "_writer", "_compat", "_registry")
+
+    def __init__(self, book, writer, compat):
+        object.__setattr__(self, "_book", book)
+        object.__setattr__(self, "_writer", writer)
+        object.__setattr__(self, "_compat", compat)
+        object.__setattr__(self, "_registry", {})
+
+    def __getattr__(self, name):
+        return getattr(self._book, name)
+
+    def _wrap(self, ws):
+        return _CompatWorksheet(ws) if (self._compat and not isinstance(ws, _CompatWorksheet)) else ws
+
+    def _current(self):
+        try:
+            return dict(self._writer.sheets)
+        except Exception:
+            return {}
+
+    def _find(self, name):
+        if name in self._registry:
+            return self._registry[name]
+        cur = self._current()
+        if name in cur:
+            return self._wrap(cur[name])
+        return None
+
+    def add_format(self, props=None):
+        if self._compat:
+            return _CompatFormat(props or {})
+        return self._book.add_format(props or {})
+
+    def add_chart(self, spec=None):
+        if self._compat:
+            return _CompatChart()
+        return self._book.add_chart(spec or {})
+
+    def add_worksheet(self, name):
+        ws = self._find(name)
+        if ws is not None:
+            return ws
+        cur = self._current()
+        raw = cur.get(name)
+        if raw is None:
+            try:
+                raw = self._book.add_worksheet(name)
+            except Exception:
+                try:
+                    raw = self._book.create_sheet(title=name)
+                except Exception:
+                    raw = cur.get(name)
+        wrapped = self._wrap(raw)
+        self._registry[name] = wrapped
+        return wrapped
+
+    def get_or_add(self, name):
+        ws = self._find(name)
+        if ws is not None:
+            return ws
+        return self.add_worksheet(name)
+
+
+def _engine_excel_forca_escolha() -> Optional[str]:
+    _v = os.environ.get("INEP_EXCEL_ENGINE", "").strip().lower()
+    return _v if _v in ("openpyxl", "xlsxwriter") else None
+
+
+def _criar_excel_writer(filepath, logger=None):
+    """Cria o ExcelWriter escolhendo o motor com segurança:
+    1) INEP_EXCEL_ENGINE força a escolha; 2) xlsxwriter se instalado;
+    3) openpyxl como fallback SEMPRE disponível (resiliência real)."""
+    forca = _engine_excel_forca_escolha()
+    engine = forca or ("xlsxwriter" if xlsxwriter is not None else "openpyxl")
+    if engine == "xlsxwriter" and xlsxwriter is None:
+        engine = "openpyxl"
+        if logger is not None:
+            logger.warning("INEP_EXCEL_ENGINE=xlsxwriter foi forçado, mas o xlsxwriter não está instalado — "
+                           "usando openpyxl. Instale com: pip install xlsxwriter")
+    if logger is not None:
+        logger.info(f"Motor Excel: {engine} (xlsxwriter nativo em gráficos quando disponível)")
+    writer = pd.ExcelWriter(filepath, engine=engine)
+    return writer, _CompatWorkbook(writer.book, writer, engine != "xlsxwriter")
+
+
 # ==========================================
 # VISUALIZER AND EXPORTER (Renderização Segura, Excel 21 Abas e HTML V27 Ouro UI/UX)
 # ==========================================
@@ -2941,7 +3864,8 @@ class VisualizerAndExporter:
         except Exception as e:
             self.logger.debug(f"Aviso Inofensivo (Kaleido Imagens Ausente no SO, prosseguindo com renderização Web Segura): {e}")
 
-    def export_auxiliary_files(self, results: MLProcessingResults, metadata: dict, didactic_pack: dict, audit=None):
+    def export_auxiliary_files(self, results: MLProcessingResults, metadata: dict, didactic_pack: dict,
+                               audit=None, availability=None, referencias=None):
         self.logger.info("Módulo Auxiliar: Extraindo Backups em Metadados Formais (JSON) e Matrizes Ouro Mestre (CSV)...")
         # CORREÇÃO DE AUDITORIA (v29): `results.quality_report` existe no DTO porém é
         # preenchido com {} (o motor estatístico não recebe o relatório do ETL). O antigo
@@ -2964,6 +3888,12 @@ class VisualizerAndExporter:
                     "achados": audit.findings,
                     "resumo_executivo": audit.resumo_txt,
                 }
+            # v34: disponibilidade analítica adaptativa (mesmo bundle do HTML/Excel/Streamlit).
+            if availability is not None:
+                payload["disponibilidade_analitica"] = availability
+            # v34: relatórios de referência ingeridos (--relatorios).
+            if referencias:
+                payload["referencias_relatorios"] = referencias
             json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
             
         results.df.to_csv(self.dirs["dados_processados"] / "6_Base_Tratada.csv", index=False, encoding='utf-8-sig', sep=';')
@@ -3129,13 +4059,13 @@ class VisualizerAndExporter:
             except Exception as e:
                 self.logger.debug(f"Mapa geográfico standalone ignorado: {e}")
 
-    def build_excel_workbook(self, results: MLProcessingResults, didactic_pack: dict, audit=None):
+    def build_excel_workbook(self, results: MLProcessingResults, didactic_pack: dict, audit=None,
+                             availability=None, referencias=None):
         """Constrói o Data Warehouse Excel Multi-Nível EXTREMO Corporativo com 21 Abas Físicas Mestre Array Ouro Limpo."""
         self.logger.info("Excel C-Level Builder: Gerando 21 Abas Oficiais Nativas de Extração Dimensional Data-Driven...")
         filepath = self.dirs["dados_processados"] / "Analise_Completa_Master_Ultimate_Edition.xlsx"
         
-        writer = pd.ExcelWriter(filepath, engine='xlsxwriter')
-        workbook = writer.book
+        writer, workbook = _criar_excel_writer(filepath, self.logger)
 
         title_fmt = workbook.add_format({'bold': True, 'font_size': 13, 'bg_color': '#1E293B', 'font_color': 'white', 'valign': 'vcenter', 'border': 1})
         subtitle_fmt = workbook.add_format({'bold': True, 'font_size': 12, 'bg_color': '#334155', 'font_color': '#10B981', 'valign': 'vcenter', 'border': 1})
@@ -3155,11 +4085,8 @@ class VisualizerAndExporter:
                 except Exception as _e:
                     self.logger.warning(f"Aba '{safe_name}': falha ao gravar dados ({_e}); criando aba vazia.")
                     has_data = False
-            # Garante que a worksheet exista mesmo sem dados (evita KeyError em writer.sheets).
-            ws = writer.sheets.get(safe_name)
-            if ws is None:
-                ws = writer.book.add_worksheet(safe_name)
-                writer.sheets[safe_name] = ws
+            # Garante que a worksheet exista mesmo sem dados (via camada de compatibilidade).
+            ws = workbook.get_or_add(safe_name)
             ws.set_column('A:A', 35 if has_index else 25)
             ws.merge_range('A1:J1', f" FUNDAMENTAÇÃO CONCEITUAL E STORYTELLING OBRIGATÓRIO DA ABA: {sheet_name.upper()}", title_fmt)
             ws.merge_range('A2:J7', explanation, desc_fmt)
@@ -3694,8 +4621,7 @@ class VisualizerAndExporter:
 
             # ---- Painel Visual: GRÁFICOS NATIVOS do Excel (interativos na planilha) ----
             try:
-                wsv = writer.book.add_worksheet("01_Painel_Visual_Graficos")
-                writer.sheets["01_Painel_Visual_Graficos"] = wsv
+                wsv = workbook.add_worksheet("01_Painel_Visual_Graficos")
                 wsv.set_column('A:A', 3)
                 wsv.merge_range('A1:J1', " PAINEL VISUAL — GRÁFICOS NATIVOS DA PLANILHA (resumo dos principais cruzamentos)", title_fmt)
                 wsv.merge_range('A2:J4', "Estes gráficos são NATIVOS do Excel — clique neles para interagir, redimensionar ou copiar. "
@@ -3723,7 +4649,7 @@ class VisualizerAndExporter:
                         except (ValueError, TypeError):
                             v = 0
                         wsv.write(drow + 1 + i, dcol + 1, v)
-                    ch = writer.book.add_chart({'type': ctype})
+                    ch = workbook.add_chart({'type': ctype})
                     ch.add_series({
                         'name': titulo,
                         'categories': ['01_Painel_Visual_Graficos', drow + 1, dcol, drow + n, dcol],
@@ -3752,11 +4678,80 @@ class VisualizerAndExporter:
             except Exception as _e:
                 self.logger.warning(f"Painel visual de gráficos nativos não pôde ser criado: {_e}")
 
+        # v34: CAMADA ADAPTATIVA — abas de disponibilidade analítica, matriz de cobertura e cruzamentos.
+        try:
+            if availability:
+                _linhas_disp = []
+                for _a in availability.get('analises', []):
+                    _linhas_disp.append({
+                        'Análise': _a.get('titulo', ''), 'ID': _a.get('id', ''),
+                        'Categoria': _a.get('categoria', ''),
+                        'Layouts': ', '.join(_a.get('layouts', [])) or _a.get('base', 'BASE'),
+                        'Status': _a.get('status', ''), 'Motivo': _a.get('motivo', ''),
+                        'Implementada': 'Sim' if _a.get('implementada') else 'Não',
+                        'Executável': 'Sim' if _a.get('executavel') else 'Não',
+                    })
+                _df_disp = pd.DataFrame(_linhas_disp) if _linhas_disp else pd.DataFrame()
+                _lays_txt = ', '.join(availability.get('layouts_presentes', [])) or 'nenhum'
+                _n_disp = sum(1 for a in availability.get('analises', []) if a.get('status') == 'disponivel')
+                _n_tot = len(availability.get('analises', []))
+                _resumo_txt = (f"DISPONIBILIDADE ANALÍTICA ADAPTATIVA (v34) — Layouts presentes: {_lays_txt}. "
+                               f"{_n_disp}/{_n_tot} análises disponíveis para os dados carregados.\n"
+                               + "\n".join(f"• {t}" for t in availability.get('narrativa', [])))
+                create_sheet("0_Disponibilidade_Analitica", _resumo_txt, _df_disp, False)
+
+                _linhas_mat = []
+                for _m in availability.get('matriz_cobertura', []):
+                    _linhas_mat.append({
+                        'Análise': _m.get('analise', ''), 'ID': _m.get('id', ''),
+                        'Categoria': _m.get('categoria', ''), 'Layouts': _m.get('layouts', ''),
+                        'Status': _m.get('status', ''), 'Motivo': _m.get('motivo', ''),
+                        'Implementada': 'Sim' if _m.get('implementada') else 'Não',
+                    })
+                _df_mat = pd.DataFrame(_linhas_mat) if _linhas_mat else pd.DataFrame()
+                create_sheet("00_Matriz_Cobertura",
+                             "MATRIZ DE COBERTURA ANALÍTICA — cada análise do catálogo, os layouts exigidos, "
+                             "o status real na base carregada (disponivel/layout_ausente/campo_ausente/campo_vazio/sem_chave) "
+                             "e o motivo quando não executável.", _df_mat, False)
+
+                _linhas_cruz = []
+                for _c in availability.get('cruzamentos_possiveis', []):
+                    _linhas_cruz.append({
+                        'Layout Esquerdo': _c.get('layout_esquerdo', ''), 'Layout Direito': _c.get('layout_direito', ''),
+                        'Chave Compartilhada': _c.get('chave', ''), 'Status': _c.get('status', ''),
+                        'Motivo': _c.get('motivo', ''),
+                    })
+                _df_cruz = pd.DataFrame(_linhas_cruz) if _linhas_cruz else pd.DataFrame()
+                create_sheet("0a_Cruzamentos_Layouts",
+                             "CRUZAMENTOS POSSÍVEIS — pares de layouts presentes com a chave compartilhada detectada.",
+                             _df_cruz, False)
+        except Exception as _e:
+            self.logger.warning(f"Abas adaptativas de disponibilidade não criadas: {_e}")
+
+        # v34: relatórios de referência ingeridos (--relatorios).
+        try:
+            if referencias:
+                _linhas_ref = []
+                for _r in referencias:
+                    _linhas_ref.append({
+                        'Arquivo': _r.get('arquivo', ''), 'Título': _r.get('titulo', ''),
+                        'Padrões Extraídos': json.dumps(_r.get('padroes', []), ensure_ascii=False, default=str),
+                        'Tamanho (caracteres)': _r.get('caracteres', 0),
+                    })
+                _df_ref = pd.DataFrame(_linhas_ref) if _linhas_ref else pd.DataFrame()
+                create_sheet("43_Referencias_Relatorios",
+                             "RELATÓRIOS DE REFERÊNCIA — notas técnicas ingeridas com --relatorios, com os padrões "
+                             "quantitativos extraídos (percentuais, médias, limites) para contexto das interpretações.",
+                             _df_ref, False)
+        except Exception as _e:
+            self.logger.warning(f"Aba de referências não criada: {_e}")
+
         writer.close()
         self.logger.info("Excel Data Warehouse Enterprise Exportado com Sucesso Extremo Ouro. (O Arquivo Físico Matriz XLSX Ouro Limitadora Array com 21 Abas Formatas na Integralidade e Fórmulas de Color Scale foi descarregado intocado e fechado com segurança).")
 
 
-    def generate_didactic_html_dashboard(self, results: MLProcessingResults, didactic_pack: dict, audit=None):
+    def generate_didactic_html_dashboard(self, results: MLProcessingResults, didactic_pack: dict, audit=None,
+                                         availability=None, referencias=None):
         """
         ========================================================================
         MOTOR EXECUTIVO DO DASHBOARD SINGLE PAGE APPLICATION (SPA HTML) - V27.0 CORPORATIVA
@@ -3874,6 +4869,9 @@ class VisualizerAndExporter:
         conceitos_json_str = json.dumps(didactic_pack.get('conceitos_criados', []), ensure_ascii=True)
         cutoffs_json_str = json.dumps(results.cutoffs or {}, ensure_ascii=True)
         totals_meta_json_str = json.dumps(getattr(results, 'totals_meta', []) or [], ensure_ascii=True, default=str)
+        # v34: disponibilidade analítica adaptativa + relatórios de referência.
+        availability_json_str = json.dumps(availability or {}, ensure_ascii=True, default=str)
+        referencias_json_str = json.dumps(referencias or [], ensure_ascii=True, default=str)
 
         heat_x, heat_y, heat_z = [], [], []
         if not results.crosstab_faixa_ia.empty:
@@ -4166,6 +5164,7 @@ class VisualizerAndExporter:
                 <a href="#sec-atend-demo"><i class="fas fa-chart-column"></i> Atendimento por Faixa Etária (N91 × N90)</a>
                 <a href="#sec-dados"><i class="fas fa-database"></i> Data Explorer Mestre (8 Abas)</a>
                 <a href="#sec-metodologia"><i class="fas fa-book"></i> Metodologia & Dicionário (Novo)</a>
+                <a href="#sec-cobertura"><i class="fas fa-check-double"></i> Cobertura Analítica & Referências (Adaptativo)</a>
             </div>
 
             <div class="main-wrapper">
@@ -5001,6 +6000,67 @@ class VisualizerAndExporter:
                         </table>
                     </div>
                 </section>
+
+                <!-- ================= SEÇÃO ADAPTATIVA (v34): COBERTURA ANALÍTICA & REFERÊNCIAS ================= -->
+                <section id="sec-cobertura">
+                    <div class="section-header">
+                        <h1>VII. Cobertura Analítica &amp; Referências (Plataforma Adaptativa)</h1>
+                        <p>Esta seção mostra o que a plataforma conseguiu avaliar com os layouts realmente presentes na sua base. Cada análise do catálogo recebe um status objetivo: <strong>disponível</strong> (pode ser executada), <strong>layout ausente</strong>, <strong>campo ausente</strong>, <strong>campo vazio</strong> ou <strong>sem chave</strong> (cruzamento sem chave compartilhada). Só é exibido o que os seus dados permitem — nenhuma seção vazia.</p>
+                    </div>
+
+                    <!-- Narrativa de disponibilidade -->
+                    <div class="insight-box" style="border-left:6px solid var(--gold);">
+                        <h3><i class="fas fa-magnifying-glass-chart"></i> Narrativa de disponibilidade</h3>
+                        <div id="avail-narrativa"><p>Carregando narrativa…</p></div>
+                    </div>
+
+                    <!-- Layouts reconhecidos -->
+                    <div class="insight-box" style="border-left:6px solid #3B82F6;">
+                        <h3><i class="fas fa-layer-group"></i> Layouts reconhecidos na base</h3>
+                        <div id="avail-layouts" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px;"></div>
+                    </div>
+
+                    <!-- Achados -->
+                    <div class="insight-box" style="border-left:6px solid #F59E0B;">
+                        <h3><i class="fas fa-triangle-exclamation"></i> Achados de disponibilidade</h3>
+                        <div id="avail-achados"></div>
+                    </div>
+
+                    <!-- Matriz de cobertura -->
+                    <div class="table-container">
+                        <h3><i class="fas fa-table-list"></i> Matriz de cobertura analítica</h3>
+                        <p style="color:var(--txt); font-size:0.9em;">Todas as análises que a plataforma conhece e o status real na sua base (disponível / layout ausente / campo ausente / campo vazio / sem chave).</p>
+                        <table class="display" style="width:100%;">
+                            <thead><tr><th>Análise</th><th>Categoria</th><th>Layouts</th><th>Status</th><th>Motivo</th></tr></thead>
+                            <tbody id="avail-matriz"></tbody>
+                        </table>
+                    </div>
+
+                    <!-- Cruzamentos possíveis -->
+                    <div class="table-container">
+                        <h3><i class="fas fa-link"></i> Cruzamentos entre layouts possíveis</h3>
+                        <p style="color:var(--txt); font-size:0.9em;">Pares de layouts presentes na base e a chave compartilhada detectada para a relação.</p>
+                        <table class="display" style="width:100%;">
+                            <thead><tr><th>Layout (esquerdo)</th><th>Layout (direito)</th><th>Chave compartilhada</th><th>Status</th></tr></thead>
+                            <tbody id="avail-cruzamentos"></tbody>
+                        </table>
+                    </div>
+
+                    <!-- Resumo por UF -->
+                    <div class="table-container">
+                        <h3><i class="fas fa-map-location-dot"></i> Resumo por UF (base plana)</h3>
+                        <table class="display" style="width:100%;">
+                            <thead><tr><th>UF</th><th>Registros</th></tr></thead>
+                            <tbody id="avail-uf"></tbody>
+                        </table>
+                    </div>
+
+                    <!-- Referências -->
+                    <div class="table-container">
+                        <h3><i class="fas fa-book-medical"></i> Relatórios de referência (--relatorios)</h3>
+                        <div id="avail-referencias"><p>Nenhum relatório de referência anexado. Use <code>--relatorios DIR</code> para servir de contexto às interpretações.</p></div>
+                    </div>
+                </section>
             </div>
 
             <!-- MOTOR JAVASCRIPT DE CONECTIVIDADE, CROSS-FILTERING BLINDADO, EXPLAINABLE AI E RENDERIZAÇÃO ESTATÍSTICA (ANTI-CRASH INCORPORADO E INJEÇÃO REPLACE MATRIZ FORMAL JSON PURA ARRAY LIMITADORA MESTRE C-LEVEL) -->
@@ -5015,6 +6075,10 @@ class VisualizerAndExporter:
                 const ufData = JSON_UF_DATA;
                 const munData = JSON_MUN_DATA;
                 const blocoData = JSON_BLOCO_DATA;
+                
+                // v34: disponibilidade analítica adaptativa + relatórios de referência.
+                const availData = JSON_AVAILABILITY;
+                const refData = JSON_REFERENCIAS;
                 
                 // Matrizes de Calor Multi-Nível Ouro Limitadora Formativa
                 const heatX = JSON_HEAT_X; 
@@ -6779,6 +7843,93 @@ class VisualizerAndExporter:
                     })();
 
                     // ============================================================
+                    // RENDERIZADOR ADAPTATIVO (v34) — Cobertura Analítica & Referências
+                    // Consome o MESMO bundle de disponibilidade do motor Python
+                    // (JSON_AVAILABILITY) e os relatórios de referência (JSON_REFERENCIAS).
+                    // ============================================================
+                    (function availabilityRenderer(){
+                        try {
+                            var av = availData || {};
+                            var statusBadge = function(s){
+                                var cores = { 'disponivel':'#10B981', 'layout_ausente':'#EF4444', 'campo_ausente':'#F59E0B', 'campo_vazio':'#F59E0B', 'sem_chave':'#8B5CF6' };
+                                var rot = { 'disponivel':'Disponível', 'layout_ausente':'Layout ausente', 'campo_ausente':'Campo ausente', 'campo_vazio':'Campo vazio', 'sem_chave':'Sem chave' };
+                                return '<span style="display:inline-block; padding:2px 10px; border-radius:20px; font-size:0.75rem; font-weight:700; color:#fff; background:'+(cores[s]||'#64748B')+';">'+(rot[s]||s)+'</span>';
+                            };
+                            // Narrativa
+                            var narr = av.narrativa || [];
+                            var elN = document.getElementById('avail-narrativa');
+                            if(elN){ elN.innerHTML = narr.length ? '<ul style="margin:0; padding-left:18px; line-height:1.8;">' + narr.map(function(t){ return '<li>'+t+'</li>'; }).join('') + '</ul>' : '<p>Sem narrativa de disponibilidade.</p>'; }
+                            // Layouts reconhecidos
+                            var resumo = av.resumo_por_layout || {};
+                            var elL = document.getElementById('avail-layouts');
+                            if(elL){
+                                var lays = Object.keys(resumo);
+                                if(lays.length){
+                                    elL.innerHTML = lays.map(function(k){
+                                        var r = resumo[k] || {};
+                                        var cor = r.presente ? '#10B981' : '#94A3B8';
+                                        return '<div style="background:#F8FAFC; border-radius:10px; padding:12px; border-top:4px solid '+cor+';">'+
+                                            '<strong style="font-size:0.95rem;">'+k+'</strong><br>'+
+                                            '<span style="font-size:0.8rem; color:'+(r.presente?'#16A34A':'#64748B')+';">'+(r.presente?('Presente · '+r.linhas+' linhas · '+r.colunas+' colunas'):'Ausente na base')+'</span></div>';
+                                    }).join('');
+                                } else { elL.innerHTML = '<p>Nenhum layout normalizado reconhecido na base.</p>'; }
+                            }
+                            // Achados
+                            var ach = av.achados || [];
+                            var elA = document.getElementById('avail-achados');
+                            if(elA){
+                                if(ach.length){
+                                    elA.innerHTML = ach.map(function(a){
+                                        var cor = a.severidade === 'ATENÇÃO' ? '#F59E0B' : '#3B82F6';
+                                        return '<div style="padding:8px 12px; margin-bottom:8px; border-left:4px solid '+cor+'; background:#F8FAFC; border-radius:6px; font-size:0.9rem;">'+
+                                            '<span style="font-weight:700; color:'+cor+';">['+a.severidade+']</span> '+a.texto+'</div>';
+                                    }).join('');
+                                } else { elA.innerHTML = '<p>Sem achados de disponibilidade.</p>'; }
+                            }
+                            // Matriz de cobertura
+                            var mat = av.matriz_cobertura || [];
+                            var elM = document.getElementById('avail-matriz');
+                            if(elM){
+                                if(mat.length){
+                                    elM.innerHTML = mat.map(function(m){
+                                        return '<tr><td><strong>'+m.analise+'</strong></td><td>'+m.categoria+'</td><td>'+m.layouts+'</td><td>'+statusBadge(m.status)+'</td><td style="color:#475569;">'+m.motivo+'</td></tr>';
+                                    }).join('');
+                                } else { elM.innerHTML = '<tr><td colspan="5">Sem matriz de cobertura disponível.</td></tr>'; }
+                            }
+                            // Cruzamentos possíveis
+                            var cruz = av.cruzamentos_possiveis || [];
+                            var elC = document.getElementById('avail-cruzamentos');
+                            if(elC){
+                                if(cruz.length){
+                                    elC.innerHTML = cruz.map(function(c){
+                                        return '<tr><td>'+c.layout_esquerdo+'</td><td>'+c.layout_direito+'</td><td><code>'+(c.chave||'—')+'</code></td><td>'+statusBadge(c.status)+'</td></tr>';
+                                    }).join('');
+                                } else { elC.innerHTML = '<tr><td colspan="4">Nenhum cruzamento possível com os layouts presentes.</td></tr>'; }
+                            }
+                            // Resumo por UF
+                            var ufs = av.resumo_uf || [];
+                            var elU = document.getElementById('avail-uf');
+                            if(elU){
+                                if(ufs.length){
+                                    elU.innerHTML = ufs.map(function(u){ return '<tr><td>'+u.UF+'</td><td>'+u.registros+'</td></tr>'; }).join('');
+                                } else { elU.innerHTML = '<tr><td colspan="2">Coluna de UF não encontrada na base plana.</td></tr>'; }
+                            }
+                            // Referências
+                            var refs = refData || [];
+                            var elR = document.getElementById('avail-referencias');
+                            if(elR && refs.length){
+                                elR.innerHTML = refs.map(function(r){
+                                    var pat = (r.padroes || []);
+                                    var patTxt = pat.length ? pat.map(function(p){ return (p.tipo==='percentual') ? (p.valor+'% — '+p.contexto) : ('média '+p.valor); }).join('; ') : 'sem padrões extraídos';
+                                    return '<div style="padding:10px 14px; margin-bottom:8px; background:#F8FAFC; border-left:4px solid #8B5CF6; border-radius:6px;">'+
+                                        '<strong>'+r.titulo+'</strong> <span style="color:#64748B; font-size:0.78rem;">('+r.arquivo+')</span><br>'+
+                                        '<span style="font-size:0.85rem; color:#475569;">Padrões extraídos: '+patTxt+'</span></div>';
+                                }).join('');
+                            }
+                        } catch(err){ console.warn('Cobertura analítica não pôde ser renderizada:', err); }
+                    })();
+
+                    // ============================================================
                     // SELETOR DE LAYOUTS — mostra/oculta seções conforme os layouts marcados
                     // ============================================================
                     (function layoutSelector(){
@@ -7152,12 +8303,23 @@ class VisualizerAndExporter:
                 html_content = html_content.replace(_tok, 'n/d')
         # Layouts efetivamente disponíveis/usados (para iniciar as caixas de seleção do dashboard).
         try:
-            _avail = sorted([k for k in (audit.L.keys() if (audit is not None and hasattr(audit, 'L')) else []) if not str(k).startswith('_')])
+            _avail = []
+            # v34: prefere o bundle adaptativo (fonte única), cai para a auditoria e depois assume todos.
+            try:
+                _avail = sorted([k for k in (availability or {}).get('layouts_presentes', [])
+                                 if str(k) != 'BASE_PLANA'])
+            except Exception:
+                _avail = []
+            if not _avail:
+                _avail = sorted([k for k in (audit.L.keys() if (audit is not None and hasattr(audit, 'L')) else []) if not str(k).startswith('_')])
         except Exception:
             _avail = []
         if not _avail:
             _avail = ['N02', 'N50', 'N52', 'N60', 'N90', 'N91']  # sem info → assume todos
         html_content = html_content.replace('JSON_AVAILABLE_LAYOUTS', json.dumps(_avail, ensure_ascii=True))
+        # v34: disponibilidade analítica adaptativa + referências.
+        html_content = html_content.replace('JSON_AVAILABILITY', availability_json_str)
+        html_content = html_content.replace('JSON_REFERENCIAS', referencias_json_str)
         html_content = html_content.replace('JSON_DICT_IDX_DATA', dict_idx_json_str)
         html_content = html_content.replace('JSON_DICT_DATA', dict_json_str)
         html_content = html_content.replace('JSON_CORR_VARS', corr_vars_str)
@@ -7420,10 +8582,10 @@ as novidades foram adicionadas de forma incremental.
             "numpy>=1.26.0\n"
             "scipy>=1.11.0\n"
             "scikit-learn>=1.3.0\n"
-            "xlsxwriter>=3.1.0\n"
             "openpyxl>=3.1.0\n"
             "\n"
             "# Dependências OPCIONAIS (enriquecem a saída; a aplicação roda sem elas)\n"
+            "xlsxwriter>=3.1.0      # gráficos nativos DENTRO das abas Excel (fallback: openpyxl)\n"
             "plotly>=5.18.0        # gráficos standalone (.html/.png)\n"
             "kaleido>=0.2.1        # exportação de imagens .png dos gráficos Plotly\n"
             "sweetviz>=2.3.0       # relatório EDA automático complementar\n"
@@ -9965,7 +11127,8 @@ class AnalyticsPipeline:
 
     def __init__(self, input_override: Optional[str] = None, demo: bool = False,
                  output_override: Optional[str] = None, layouts_override: Optional[str] = None,
-                 offline: bool = False, mapa_path: Optional[str] = None) -> None:
+                 offline: bool = False, mapa_path: Optional[str] = None,
+                 relatorios_dir: Optional[str] = None) -> None:
         self.env = EnvironmentManager(input_override=input_override, demo=demo, output_override=output_override)
         self.logger = self.env.logger
         self.offline_mode = bool(offline)
@@ -9973,6 +11136,9 @@ class AnalyticsPipeline:
         self.selected_layouts = self._parse_layout_selection(layouts_override)
         # Mapeamento de colunas (--mapa arquivo.json): {COLUNA_ESPERADA: "coluna_na_minha_base"}.
         self.column_map = self._carregar_mapa_colunas(mapa_path)
+        # Diretório de relatórios de referência (--relatorios): serve de contexto às interpretações.
+        self.relatorios_dir = relatorios_dir
+        self._availability_bundle: Optional[Dict[str, Any]] = None
 
     def _carregar_mapa_colunas(self, caminho: Optional[str]):
         if not caminho:
@@ -10191,6 +11357,26 @@ class AnalyticsPipeline:
                     self.logger.warning(f"Auditoria de cruzamento não executada ({exc}); pipeline segue normalmente.")
                     audit = None
 
+                # 3c. CAMADA ADAPTATIVA (v34): disponibilidade analítica por layout + referências.
+                # O MESMO bundle é consumido pelo Excel, pelo HTML e pelo Streamlit (uma única lógica).
+                availability = None
+                try:
+                    availability = AnalyticalAvailability(
+                        layouts=layouts if isinstance(layouts, dict) else {},
+                        flat_df=results.df,
+                        selected_layouts=getattr(self, '_selected_effective', None),
+                        logger=self.logger,
+                    ).resolve()
+                    self._availability_bundle = availability
+                except Exception as exc:
+                    self.logger.warning(f"Disponibilidade analítica não computada ({exc}); prosseguindo sem ela.")
+                    availability = None
+                referencias = []
+                try:
+                    referencias = ReportReferenceIngestor(self.relatorios_dir, self.logger).ingest()
+                except Exception as exc:
+                    self.logger.warning(f"Ingestão de relatórios de referência não executada ({exc}).")
+
                 viz = VisualizerAndExporter(self.env.dirs, self.logger)
                 viz.offline_mode = self.offline_mode
                 
@@ -10199,16 +11385,19 @@ class AnalyticsPipeline:
                 pbar.update(1)
 
                 # 5. Pipeline de Metadados JSON Dimensional Exato Limpo e Sweetviz Automático Ouro Exato Oficial
-                viz.export_auxiliary_files(results, metadata, didactic_pack, audit=audit)
+                viz.export_auxiliary_files(results, metadata, didactic_pack, audit=audit,
+                                           availability=availability, referencias=referencias)
                 viz.generate_html_report(results)
                 pbar.update(1)
 
                 # 6. Pipeline Data Warehouse Corporativo Ouro Oficial Preditiva Matriz Oculta (Excel com 21 Abas Categóricas e Data Bars)
-                viz.build_excel_workbook(results, didactic_pack, audit=audit)
+                viz.build_excel_workbook(results, didactic_pack, audit=audit,
+                                         availability=availability, referencias=referencias)
                 pbar.update(1)
 
                 # 7. Pipeline Front-End SPA Web Analytics Dimensional UI Corporativa (Dashboards Premium Inteligentes Ouro Formais Base, Cérebro JS e Cross-Filtering Blindado)
-                viz.generate_didactic_html_dashboard(results, didactic_pack, audit=audit)
+                viz.generate_didactic_html_dashboard(results, didactic_pack, audit=audit,
+                                                     availability=availability, referencias=referencias)
                 pbar.update(1)
                 
                 # 8. Pipeline Documentação W3C Formal WIKI Ouro Matriz
@@ -10276,6 +11465,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "esperada não for reconhecida: o sistema gera 'COLUNAS_NAO_RECONHECIDAS.json' (o que falta + o que "
                              "existe) e um 'mapa_colunas.json' para você preencher; ao rodar com --mapa, as colunas são "
                              "reconhecidas e as tabelas/gráficos correspondentes passam a ser gerados.")
+    parser.add_argument("--relatorios", "-r", dest="relatorios", default=None,
+                        help="Diretório (ou arquivo) com relatórios/notas técnicas do INEP (.txt/.md/.docx/.pdf) para servirem "
+                             "de REFERÊNCIA às interpretações do painel. Padrões quantitativos (percentuais, médias, limites) são "
+                             "extraídos automaticamente e exibidos na seção de Cobertura Analítica.")
     parser.add_argument("--version", "-v", action="version", version=f"Plataforma BI INEP v{APP_VERSION}")
     return parser.parse_args(argv)
 
@@ -10323,6 +11516,14 @@ def _run_streamlit_app() -> None:
         "Envie a sua planilha (uma aba por layout: N02, N50, N52, N60, N90, N91) ou use a base de "
         "demonstração. O sistema executa a MESMA análise completa e oferece TUDO de duas formas: "
         "visualização nativa interativa aqui dentro e o dashboard/planilha prontos para download.")
+
+    if _DEPS_FALTANDO:
+        st.error(
+            "⚠️ Faltam pacotes necessários para a análise completa: **" + ", ".join(_DEPS_FALTANDO) + "**.\n\n"
+            "Instale todas as dependências com o comando abaixo (no mesmo ambiente onde você roda o Streamlit) "
+            "e recarregue a página:")
+        st.code("pip install -r requirements.txt", language="bash")
+        st.info("Sem esses pacotes, algumas análises não rodam. Após instalar, o erro desaparece.")
 
     with st.sidebar:
         st.header("1. Entrada de dados")
@@ -10550,9 +11751,10 @@ def _run_streamlit_app() -> None:
                                 st.error(f"O filtro (UF={_ufs or '—'}, Município={_muns or '—'}) não deixou nenhuma linha. "
                                          "Verifique se essas siglas/códigos/nomes existem na base. A análise não foi executada.")
                                 st.stop()
-                            with _pdf.ExcelWriter(_fpath, engine="xlsxwriter") as _w:
+                            _w2, _ = _criar_excel_writer(_fpath, logger=None)
+                            with _w2:
                                 for _sh, _d in _sheets_out.items():
-                                    _d.to_excel(_w, sheet_name=_sh[:31], index=False)
+                                    _d.to_excel(_w2, sheet_name=_sh[:31], index=False)
                             inpath = _fpath
                             _desc = []
                             if _ufs:
@@ -10658,10 +11860,14 @@ def _run_streamlit_app() -> None:
          "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
 
     # Carrega metadados da auditoria (KPIs, achados, resumo) uma vez
+    # v34: também carrega a disponibilidade analítica adaptativa (mesma fonte do HTML/Excel).
     _meta_ac = {}
+    _meta_dispon = {}
     if json_path.exists():
         try:
-            _meta_ac = _json.loads(json_path.read_text(encoding="utf-8")).get("auditoria_cruzamento", {})
+            _meta_bruto = _json.loads(json_path.read_text(encoding="utf-8"))
+            _meta_ac = _meta_bruto.get("auditoria_cruzamento", {}) if isinstance(_meta_bruto, dict) else {}
+            _meta_dispon = _meta_bruto.get("disponibilidade_analitica", {}) if isinstance(_meta_bruto, dict) else {}
         except Exception:
             _meta_ac = {}
 
@@ -10674,11 +11880,19 @@ def _run_streamlit_app() -> None:
 
         # --- Dados carregados: layouts detectados (adaptativo) ---
         st.subheader("Dados carregados")
+        # v34: a contagem usa o bundle de disponibilidade (fonte única), com fallback para os KPIs da auditoria.
+        _dispon_resumo = _meta_dispon.get("resumo_por_layout", {}) if isinstance(_meta_dispon, dict) else {}
+        _presentes_avail = [str(k) for k in (_meta_dispon.get("layouts_presentes", []) or []) if str(k) != 'BASE_PLANA']
         layouts_det = []
         for lay in ["N90", "N02", "N91", "N52", "N50", "N60"]:
             chave = f"total_registros_{lay.lower()}"
+            qt = None
             if chave in kp:
-                layouts_det.append((lay, kp[chave]))
+                qt = kp[chave]
+            elif _dispon_resumo and lay in _dispon_resumo and _dispon_resumo[lay].get("presente"):
+                qt = _dispon_resumo[lay].get("linhas", 0)
+            if qt is not None and (qt or lay in _presentes_avail):
+                layouts_det.append((lay, qt))
         if layouts_det:
             cols_l = st.columns(len(layouts_det))
             for c, (lay, qt) in zip(cols_l, layouts_det):
@@ -10686,7 +11900,7 @@ def _run_streamlit_app() -> None:
                     c.metric(lay, f"{int(qt):,}".replace(",", "."), help=f"Registros no layout {lay}.")
                 except Exception:
                     c.metric(lay, str(qt))
-            st.caption(f"{len(layouts_det)} de 6 layouts presentes · {len(abas)} análises geradas. "
+            st.caption(f"{len(layouts_det)} layout(s) em análise · {len(abas)} análises geradas. "
                        "As análises que dependem de layouts ausentes não são exibidas (adaptativo).")
         else:
             st.info("Layouts detectados aparecerão aqui após a execução.")
@@ -11198,6 +12412,40 @@ def _run_streamlit_app() -> None:
             resumo = ac.get("resumo_executivo")
             achados = ac.get("achados") or meta.get("achados") or meta.get("findings")
 
+            # v34: cobertura analítica adaptativa — mesma fonte (bundle) do Excel e do HTML.
+            dispon = meta.get("disponibilidade_analitica", {}) if isinstance(meta, dict) else {}
+            if isinstance(dispon, dict) and dispon:
+                st.subheader("Cobertura analítica (adaptativa)")
+                disp_analises = dispon.get("analises") or []
+                disp_presentes = [str(k) for k in (dispon.get("layouts_presentes") or []) if str(k) != 'BASE_PLANA']
+                if disp_presentes or disp_analises:
+                    cA, cB, cC = st.columns(3)
+                    cA.metric("Layouts em análise", len(disp_presentes))
+                    cB.metric("Análises disponíveis", f"{sum(1 for a in disp_analises if a.get('status') == 'disponivel')}/{len(disp_analises)}")
+                    cC.metric("Análises executáveis", sum(1 for a in disp_analises if a.get("executavel")))
+                for narr_txt in (dispon.get("narrativa") or []):
+                    st.info(str(narr_txt))
+                if disp_analises:
+                    df_disp = _pd.DataFrame([{
+                        "Análise": a.get("titulo", ""), "Categoria": a.get("categoria", ""),
+                        "Layouts": ", ".join(a.get("layouts", [])) or a.get("base", "BASE"),
+                        "Status": a.get("status", ""), "Motivo": a.get("motivo", ""),
+                    } for a in disp_analises])
+                    st.markdown(f"##### Matriz de cobertura ({len(df_disp)})")
+                    st.dataframe(df_disp, use_container_width=True, height=320)
+                    st.download_button("⬇️ Baixar matriz de cobertura (CSV)",
+                                       df_disp.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name="matriz_cobertura.csv", mime="text/csv", key="dl_matriz")
+                cruz = dispon.get("cruzamentos_possiveis") or []
+                if cruz:
+                    st.markdown("##### Cruzamentos possíveis entre layouts")
+                    st.dataframe(_pd.DataFrame(cruz), use_container_width=True, height=240)
+                ufs = dispon.get("resumo_uf") or []
+                if ufs:
+                    st.markdown("##### Resumo por UF (base plana)")
+                    st.dataframe(_pd.DataFrame(ufs), use_container_width=True, height=240)
+                st.markdown("---")
+
             if resumo:
                 st.subheader("Resumo executivo da auditoria")
                 st.info(str(resumo))
@@ -11283,4 +12531,5 @@ if __name__ == "__main__":
     else:
         _args = _parse_args()
         AnalyticsPipeline(input_override=_args.input, demo=_args.demo, output_override=_args.output,
-                          layouts_override=_args.layouts, offline=_args.offline, mapa_path=_args.mapa).execute()
+                          layouts_override=_args.layouts, offline=_args.offline, mapa_path=_args.mapa,
+                          relatorios_dir=_args.relatorios).execute()
