@@ -11,3 +11,6 @@ openpyxl>=3.1
 python-calamine>=0.2
 # Opcional (gráficos "standalone" extras do motor; o dashboard e o Excel não dependem disto):
 plotly>=5.20
+kaleido>=0.2.1 
+sweetviz>=2.3.0 
+tqdm>=4.66.0 
