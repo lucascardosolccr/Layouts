@@ -209,25 +209,43 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "17"
+STREAMLIT_APP_VERSION = "18"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine 'calamine' (5–10x mais rápido que o openpyxl);
     se o pacote não estiver instalado ou falhar, cai automaticamente para o engine
-    padrão. O resultado é o mesmo — só muda a velocidade. Sem regressão."""
+    padrão. Reposiciona o buffer entre tentativas (evita leitura corrompida quando a
+    fonte é um BytesIO). O resultado é o mesmo — só muda a velocidade. Sem regressão."""
     import pandas as _pd
+    def _rewind():
+        try:
+            if hasattr(_src, "seek"):
+                _src.seek(0)
+        except Exception:
+            pass
+    _rewind()
     try:
         return _pd.read_excel(_src, engine="calamine", **kwargs)
     except Exception:
+        _rewind()
         return _pd.read_excel(_src, **kwargs)
 
 
 def _excelfile_fast(_src):
-    """Abre um ExcelFile priorizando o engine 'calamine', com fallback ao padrão."""
+    """Abre um ExcelFile priorizando o engine 'calamine', com fallback ao padrão e
+    reposicionamento do buffer entre tentativas."""
     import pandas as _pd
+    def _rewind():
+        try:
+            if hasattr(_src, "seek"):
+                _src.seek(0)
+        except Exception:
+            pass
+    _rewind()
     try:
         return _pd.ExcelFile(_src, engine="calamine")
     except Exception:
+        _rewind()
         return _pd.ExcelFile(_src)
 
 
@@ -11250,7 +11268,18 @@ def _run_streamlit_app() -> None:
 
 if __name__ == "__main__":
     if _streamlit_ativo():
-        _run_streamlit_app()
+        try:
+            _run_streamlit_app()
+        except Exception as _err_top:  # noqa
+            # Em vez da tela genérica "Oh no", mostra o erro real para diagnóstico.
+            import traceback as _tb
+            try:
+                import streamlit as _st_err
+                _st_err.error("Ocorreu um erro ao executar a aplicação. Detalhes abaixo "
+                              "(copie e envie para suporte, se necessário):")
+                _st_err.code("".join(_tb.format_exception(type(_err_top), _err_top, _err_top.__traceback__)))
+            except Exception:
+                raise
     else:
         _args = _parse_args()
         AnalyticsPipeline(input_override=_args.input, demo=_args.demo, output_override=_args.output,
