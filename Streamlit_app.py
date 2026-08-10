@@ -209,7 +209,26 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "7"  # camada Streamlit (incrementa a cada rodada)
+STREAMLIT_APP_VERSION = "16"
+
+def _dist_km(serie):
+    """Converte NU_DISTANCIA para KM com AUTO-DETECÇÃO de unidade.
+    Os microdados reais do INEP trazem NU_DISTANCIA já em km (mediana de poucos
+    km; ex.: MT com média ~3 km, máx ~117 km). Bases sintéticas/antigas podem vir
+    em metros (mediana de milhares). Regra: se a mediana dos valores positivos for
+    >= 100, assume METROS e divide por 1000; caso contrário, já está em KM.
+    Isso mantém o comportamento correto tanto no demo (metros) quanto na base real
+    (km), sem regressão."""
+    import pandas as _pd
+    _s = _pd.to_numeric(serie, errors="coerce")
+    _pos = _s[_s.notna() & (_s > 0)]
+    try:
+        if len(_pos) and float(_pos.median()) >= 100:
+            return _s / 1000.0
+    except Exception:
+        pass
+    return _s
+  # camada Streamlit (incrementa a cada rodada)
 
 # ==========================================
 # CONFIGURAÇÕES GLOBAIS E GOVERNANÇA CORPORATIVA
@@ -1450,7 +1469,7 @@ class DataLoaderAndCleaner:
 
         # --- FAIXA DE DISTÂNCIA / DESLOCAMENTO (N02: NU_DISTANCIA) ------------------
         if 'NU_DISTANCIA' in self.df.columns:
-            dist_km = pd.to_numeric(self.df['NU_DISTANCIA'], errors='coerce') / 1000.0
+            dist_km = _dist_km(self.df['NU_DISTANCIA'])
             self.df['DISTANCIA_KM'] = dist_km.round(2)
             dist_conds = [dist_km <= 5, dist_km <= 20, dist_km <= 50, dist_km > 50]
             dist_labels = ['Até 5 km', '5-20 km', '20-50 km', 'Acima de 50 km']
@@ -7783,7 +7802,7 @@ class CrossLayoutAuditEngine:
         n02 = self.L.get('N02')
         if n02 is None or n02.empty or 'NU_DISTANCIA' not in n02.columns:
             return
-        dist_km = pd.to_numeric(n02['NU_DISTANCIA'], errors='coerce') / 1000.0
+        dist_km = _dist_km(n02['NU_DISTANCIA'])
         dist_km = dist_km[dist_km.notna() & (dist_km >= 0)]
         if dist_km.empty:
             return
@@ -7819,7 +7838,7 @@ class CrossLayoutAuditEngine:
         crit_cols = [c for c in ['CO_INSCRICAO', 'CO_LOCAL', 'CO_MUNICIPIO_PROVA', 'NU_DISTANCIA'] if c in n02.columns]
         crit_df = n02[(dist_km > self.DIST_CRITICA_KM).reindex(n02.index, fill_value=False).values][crit_cols].copy() if crit_cols else pd.DataFrame()
         if not crit_df.empty and 'NU_DISTANCIA' in crit_df.columns:
-            crit_df['DISTANCIA_KM'] = (pd.to_numeric(crit_df['NU_DISTANCIA'], errors='coerce') / 1000.0).round(2)
+            crit_df['DISTANCIA_KM'] = (_dist_km(crit_df['NU_DISTANCIA'])).round(2)
             crit_df = crit_df.sort_values('DISTANCIA_KM', ascending=False)
         self.tabelas['casos_criticos_distancia'] = crit_df.head(500).reset_index(drop=True)
         self._add('distancia_critica', f'Deslocamentos Críticos (> {self.DIST_CRITICA_KM:.0f} km) — N02',
@@ -8524,7 +8543,7 @@ class CrossLayoutAuditEngine:
 
         # Distância / faixa
         dist = pd.to_numeric(col(i02, 'NU_DISTANCIA', default=np.nan), errors='coerce')
-        dist_km = (dist / 1000.0).round(2)
+        dist_km = _dist_km(dist).round(2)
         m['DISTANCIA_KM'] = dist_km
         faixas = pd.cut(dist_km, bins=[-0.01, 1, 5, 10, 15, 20, np.inf],
                         labels=['<1 km', '1-5 km', '5-10 km', '10-15 km', '15-20 km', '>20 km'])
@@ -8734,7 +8753,7 @@ class CrossLayoutAuditEngine:
         series = {}
         # Distância (km) — N02
         if isinstance(n02, pd.DataFrame) and not n02.empty and 'NU_DISTANCIA' in n02.columns:
-            d = pd.to_numeric(n02['NU_DISTANCIA'], errors='coerce').dropna() / 1000.0
+            d = _dist_km(n02['NU_DISTANCIA']).dropna()
             if len(d) >= 5:
                 series['Distância de deslocamento (km) — N02'] = d
         # Participantes por local e por município — N02
@@ -9065,7 +9084,7 @@ class CrossLayoutAuditEngine:
 
         agg = {}
         if 'NU_DISTANCIA' in n02x.columns:
-            n02x['_DIST_KM'] = pd.to_numeric(n02x['NU_DISTANCIA'], errors='coerce') / 1000.0
+            n02x['_DIST_KM'] = _dist_km(n02x['NU_DISTANCIA'])
         # Capacidade por local (N50 ou N52)
         cap_por_local = None
         n50, n52 = self.L.get('N50'), self.L.get('N52')
@@ -9269,7 +9288,7 @@ class CrossLayoutAuditEngine:
 
         # Sinal 3 — distância média dos participantes do local
         if 'NU_DISTANCIA' in n02l.columns:
-            n02l['_DKM'] = pd.to_numeric(n02l['NU_DISTANCIA'], errors='coerce') / 1000.0
+            n02l['_DKM'] = _dist_km(n02l['NU_DISTANCIA'])
             dmap = n02l.groupby('CO_LOCAL')['_DKM'].mean()
             base['DISTANCIA_MEDIA_KM'] = base['CO_LOCAL'].map(dmap.to_dict()).round(2)
         else:
@@ -9396,7 +9415,7 @@ class CrossLayoutAuditEngine:
             return
         LIMIAR_ATENCAO_MIN, LIMIAR_CRITICO = 15.0, 20.0  # km
         d = n02.copy()
-        d['_KM'] = pd.to_numeric(d['NU_DISTANCIA'], errors='coerce') / 1000.0
+        d['_KM'] = _dist_km(d['NU_DISTANCIA'])
         d = d[d['_KM'].notna()]
         if d.empty:
             return
@@ -10275,14 +10294,59 @@ def _run_streamlit_app() -> None:
         if modo == "Enviar planilha (.xlsx)":
             arquivo = st.file_uploader("Planilha Excel com os layouts", type=["xlsx", "xlsm", "xls"])
             st.caption("Nomeie as abas como N90, N02, N91, N52, N50, N60 — o motor também reconhece pelas colunas.")
+        # v16 — planilha OPCIONAL com as distâncias do INEP (calculadas à parte)
+        arquivo_inep = st.file_uploader(
+            "🛰️ (Opcional) Planilha com as distâncias do INEP",
+            type=["xlsx", "xlsm", "xls", "csv"],
+            help="Como as distâncias do INEP não vêm nos layouts, anexe aqui uma planilha com CO_INSCRICAO e a "
+                 "distância do INEP. O app cruza com a distância da FGV (NU_DISTANCIA) e calcula as diferenças por "
+                 "participante. Veja o resultado na aba « 🛰️ FGV × INEP ».")
+        if arquivo_inep is not None:
+            st.session_state["bi_inep_bytes"] = arquivo_inep.getvalue()
+            st.session_state["bi_inep_nome"] = arquivo_inep.name
         offline = st.checkbox("Gerar dashboard em modo offline", value=False,
                               help="HTML com bibliotecas locais (./libs). A pré-visualização embutida precisa de internet.")
         st.markdown("**Filtro global (opcional)**")
-        uf_filtro = st.text_input(
-            "Filtrar por UF antes de processar (ex.: AP ou AP,PA)",
+        # v13 — multiselect de UF populado a partir do próprio arquivo (adaptativo).
+        _uf_opcoes = []
+        if modo == "Enviar planilha (.xlsx)" and arquivo is not None:
+            @st.cache_data(show_spinner=False)
+            def _ufs_do_arquivo(_bytes):
+                import io as _io2
+                import pandas as _p2
+                _ufs = set()
+                try:
+                    _x = _p2.ExcelFile(_io2.BytesIO(_bytes))
+                    for _s in _x.sheet_names:
+                        _df = _p2.read_excel(_x, _s)
+                        _up = [str(c).upper() for c in _df.columns]
+                        for _pref in ("SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA", "SG_UF"):
+                            if _pref in _up:
+                                _col = _df.columns[_up.index(_pref)]
+                                _ufs |= set(_df[_col].dropna().astype(str).str.upper().str.strip().unique())
+                                break
+                except Exception:
+                    pass
+                return sorted(u for u in _ufs if u and len(u) <= 3)
+            try:
+                _uf_opcoes = _ufs_do_arquivo(arquivo.getvalue())
+            except Exception:
+                _uf_opcoes = []
+        if _uf_opcoes:
+            _uf_sel = st.multiselect(
+                "Filtrar por UF (detectadas na sua base)", _uf_opcoes, default=[],
+                help="Só aparecem as UFs realmente presentes no arquivo. Vazio = todas. Combina com o filtro de município.")
+            uf_filtro = ",".join(_uf_sel)   # reaproveita a lógica de filtro já validada
+        else:
+            uf_filtro = st.text_input(
+                "Filtrar por UF antes de processar (ex.: AP ou AP,PA)", value="",
+                help="Envie um arquivo para escolher as UFs numa lista. Sem arquivo (ex.: demo), digite as siglas. "
+                     "Vazio = base inteira.")
+        mun_filtro = st.text_input(
+            "Filtrar por município (código IBGE ou nome, ex.: 1600303 ou Macapá)",
             value="",
-            help="Se preenchido, o motor é reexecutado somente com as linhas dessas UFs — todos os KPIs, "
-                 "gráficos, tabelas e o dashboard passam a refletir esse recorte. Deixe vazio para usar a base inteira.")
+            help="Adaptativo: só tem efeito se a base tiver coluna de município (CO_MUNICIPIO_PROVA ou "
+                 "NO_MUNICIPIO_PROVA). Aceita código(s) ou nome(s), separados por vírgula. Combina com o filtro de UF.")
         rodar = st.button("▶️ Rodar análise", type="primary", use_container_width=True)
         st.divider()
         st.caption("Bases grandes podem levar alguns minutos. Os resultados ficam disponíveis até rodar de novo.")
@@ -10338,6 +10402,48 @@ def _run_streamlit_app() -> None:
             st.info("Detecção automática por nome da aba e pelas colunas-chave de cada layout. "
                     "Se algum layout aparecer como « não reconhecido », verifique se a aba tem as colunas esperadas — "
                     "ou use o parâmetro de mapeamento de colunas do motor (o dashboard gera um guia quando falta alguma).")
+
+            # v12 — VARREDURA de estrutura e qualidade por coluna (seções 1, 2, 8, 41)
+            st.markdown("##### 🔬 Estrutura e qualidade por coluna")
+            st.caption("Para cada aba: tipo, % preenchido e nº de valores distintos por coluna — transparência total "
+                       "sobre o que existe nos dados antes de processar.")
+
+            @st.cache_data(show_spinner=False)
+            def _scan_estrutura(_bytes):
+                import pandas as _p
+                _res = {}
+                _x = _pd0.ExcelFile(_io0.BytesIO(_bytes))
+                for _s in _x.sheet_names:
+                    _df = _p.read_excel(_x, _s)
+                    _n = len(_df)
+                    _rows = []
+                    for _c in _df.columns:
+                        _pre = int(_df[_c].notna().sum())
+                        _rows.append({
+                            "Coluna": str(_c),
+                            "Tipo": "numérico" if _p.api.types.is_numeric_dtype(_df[_c]) else "texto/categórico",
+                            "% preenchido": round(_pre / _n * 100, 1) if _n else 0.0,
+                            "Vazios": _n - _pre,
+                            "Distintos": int(_df[_c].nunique(dropna=True)),
+                        })
+                    _res[_s] = (_n, _df.shape[1], _p.DataFrame(_rows))
+                return _res
+
+            try:
+                _scan = _scan_estrutura(arquivo.getvalue())
+                for _s, (_nr, _nc, _dfq) in _scan.items():
+                    _vazias_n = int((_dfq["% preenchido"] == 0).sum())
+                    _rotulo = f"{_s} — {_nr:,} linhas × {_nc} colunas".replace(",", ".")
+                    if _vazias_n:
+                        _rotulo += f"  ·  ⚠️ {_vazias_n} coluna(s) totalmente vazia(s)"
+                    with st.expander(_rotulo):
+                        st.dataframe(_dfq, use_container_width=True, hide_index=True, height=260)
+                        st.download_button("⬇️ Baixar estrutura desta aba (CSV)",
+                                           _dfq.to_csv(index=False).encode("utf-8-sig"),
+                                           file_name=f"estrutura_{_s}.csv", mime="text/csv",
+                                           key=f"dl_estrut_{_s}")
+            except Exception as _es:  # noqa
+                st.caption(f"Varredura de estrutura indisponível: {_es}")
         except Exception as _e0:  # noqa
             st.warning(f"Não foi possível pré-visualizar o arquivo: {_e0}")
 
@@ -10353,10 +10459,11 @@ def _run_streamlit_app() -> None:
                         st.stop()
                     inpath = outdir / arquivo.name
                     inpath.write_bytes(arquivo.getvalue())
-                    # RODADA 7 — filtro global por UF (robusto): reescreve o arquivo só com
-                    # as linhas das UFs escolhidas e reexecuta o motor sobre o recorte.
+                    # RODADA 7/11 — filtro global por UF e/ou MUNICÍPIO (robusto):
+                    # reescreve o arquivo só com as linhas do recorte e reexecuta o motor.
                     _ufs = [u.strip().upper() for u in str(uf_filtro).replace(";", ",").split(",") if u.strip()]
-                    if _ufs:
+                    _muns = [u.strip().upper() for u in str(mun_filtro).replace(";", ",").split(",") if u.strip()]
+                    if _ufs or _muns:
                         try:
                             import pandas as _pdf
                             _xin = _pdf.ExcelFile(inpath)
@@ -10367,39 +10474,64 @@ def _run_streamlit_app() -> None:
                                 _d = _pdf.read_excel(_xin, _sh)
                                 _tot_antes += len(_d)
                                 _up = [str(c).upper() for c in _d.columns]
-                                # preferência: UF de PROVA > UF de município prova > UF genérica
-                                _ufcol = None
-                                for _pref in ("SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA"):
-                                    if _pref in _up:
-                                        _ufcol = _d.columns[_up.index(_pref)]
-                                        break
-                                if _ufcol is None:
-                                    _ufcol = next((c for c in _d.columns
-                                                   if "SG_UF" in str(c).upper() or str(c).upper().strip() == "UF"
-                                                   or str(c).upper().endswith("_UF")), None)
-                                if _ufcol is not None:
-                                    _serie = _d[_ufcol].where(_d[_ufcol].notna(), "").astype(str).str.upper().str.strip()
-                                    _d = _d[_serie.isin(_ufs)]
+                                # --- filtro UF (preferência: UF de prova) ---
+                                if _ufs:
+                                    _ufcol = None
+                                    for _pref in ("SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA"):
+                                        if _pref in _up:
+                                            _ufcol = _d.columns[_up.index(_pref)]
+                                            break
+                                    if _ufcol is None:
+                                        _ufcol = next((c for c in _d.columns
+                                                       if "SG_UF" in str(c).upper() or str(c).upper().strip() == "UF"
+                                                       or str(c).upper().endswith("_UF")), None)
+                                    if _ufcol is not None:
+                                        _s = _d[_ufcol].where(_d[_ufcol].notna(), "").astype(str).str.upper().str.strip()
+                                        _d = _d[_s.isin(_ufs)]
+                                # --- filtro MUNICÍPIO (código OU nome) ---
+                                if _muns and len(_d):
+                                    _codcol = next((c for c in _d.columns if str(c).upper() in
+                                                    ("CO_MUNICIPIO_PROVA", "CO_MUNICIPIO")), None)
+                                    _nomecol = next((c for c in _d.columns if str(c).upper() in
+                                                     ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                                    if _codcol is not None or _nomecol is not None:
+                                        _mask = _pdf.Series(False, index=_d.index)
+                                        if _codcol is not None:
+                                            _sc = _d[_codcol].where(_d[_codcol].notna(), "").astype(str).str.upper().str.strip()
+                                            # remove .0 de códigos lidos como float
+                                            _sc = _sc.str.replace(r"\.0$", "", regex=True)
+                                            _mask = _mask | _sc.isin(_muns)
+                                        if _nomecol is not None:
+                                            _sn = _d[_nomecol].where(_d[_nomecol].notna(), "").astype(str).str.upper().str.strip()
+                                            _mask = _mask | _sn.isin(_muns)
+                                        _d = _d[_mask]
                                 _tot_depois += len(_d)
                                 _sheets_out[_sh] = _d
                             if _tot_depois == 0:
                                 st.session_state["bi_ok"] = False
-                                st.error(f"O filtro por UF {_ufs} não deixou nenhuma linha — verifique se essas siglas "
-                                         "existem na sua base (ex.: AP para Amapá). A análise não foi executada. "
-                                         "Corrija a UF ou limpe o campo para usar a base inteira.")
+                                st.error(f"O filtro (UF={_ufs or '—'}, Município={_muns or '—'}) não deixou nenhuma linha. "
+                                         "Verifique se essas siglas/códigos/nomes existem na base. A análise não foi executada.")
                                 st.stop()
                             with _pdf.ExcelWriter(_fpath, engine="xlsxwriter") as _w:
                                 for _sh, _d in _sheets_out.items():
                                     _d.to_excel(_w, sheet_name=_sh[:31], index=False)
                             inpath = _fpath
-                            st.session_state["bi_uf_info"] = f"Filtro por UF {_ufs}: {_tot_antes:,} → {_tot_depois:,} linhas.".replace(",", ".")
+                            _desc = []
+                            if _ufs:
+                                _desc.append(f"UF {_ufs}")
+                            if _muns:
+                                _desc.append(f"Município {_muns}")
+                            st.session_state["bi_uf_info"] = (" e ".join(_desc) + f": {_tot_antes:,} → {_tot_depois:,} linhas.").replace(",", ".")
                         except Exception as _ef:  # noqa
-                            st.warning(f"Não foi possível aplicar o filtro por UF ({_ef}). Rodando com a base completa.")
+                            st.warning(f"Não foi possível aplicar o filtro ({_ef}). Rodando com a base completa.")
                             st.session_state.pop("bi_uf_info", None)
                     else:
                         st.session_state.pop("bi_uf_info", None)
                     pipe = AnalyticsPipeline(input_override=str(inpath), output_override=str(outdir), offline=bool(offline))
+                import time as _time
+                _t0 = _time.time()
                 pipe.execute()
+                st.session_state["bi_tempo"] = round(_time.time() - _t0, 1)
                 st.session_state["bi_outdir"] = str(outdir)
                 st.session_state["bi_ok"] = True
             except SystemExit as e:
@@ -10483,8 +10615,191 @@ def _run_streamlit_app() -> None:
         except Exception as e:  # noqa
             st.warning(f"Não foi possível ler a planilha para a visão nativa: {e}")
 
-    tab_nat, tab_dash, tab_meta = st.tabs(
-        ["📊 Análises (nativo, interativo)", "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
+    tab_vg, tab_nat, tab_fgv, tab_dash, tab_meta = st.tabs(
+        ["🏠 Visão Geral", "📊 Análises (nativo, interativo)", "🛰️ FGV × INEP",
+         "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
+
+    # Carrega metadados da auditoria (KPIs, achados, resumo) uma vez
+    _meta_ac = {}
+    if json_path.exists():
+        try:
+            _meta_ac = _json.loads(json_path.read_text(encoding="utf-8")).get("auditoria_cruzamento", {})
+        except Exception:
+            _meta_ac = {}
+
+    # ======================= (0) VISÃO GERAL (dashboard executivo) ===========
+    with tab_vg:
+        st.caption("Resumo executivo, dados carregados e principais alertas — só com o que os layouts enviados permitem calcular.")
+        kp = _meta_ac.get("kpis") or {}
+        achados_vg = _meta_ac.get("achados") or []
+        resumo_vg = _meta_ac.get("resumo_executivo")
+
+        # --- Dados carregados: layouts detectados (adaptativo) ---
+        st.subheader("Dados carregados")
+        layouts_det = []
+        for lay in ["N90", "N02", "N91", "N52", "N50", "N60"]:
+            chave = f"total_registros_{lay.lower()}"
+            if chave in kp:
+                layouts_det.append((lay, kp[chave]))
+        if layouts_det:
+            cols_l = st.columns(len(layouts_det))
+            for c, (lay, qt) in zip(cols_l, layouts_det):
+                try:
+                    c.metric(lay, f"{int(qt):,}".replace(",", "."), help=f"Registros no layout {lay}.")
+                except Exception:
+                    c.metric(lay, str(qt))
+            st.caption(f"{len(layouts_det)} de 6 layouts presentes · {len(abas)} análises geradas. "
+                       "As análises que dependem de layouts ausentes não são exibidas (adaptativo).")
+        else:
+            st.info("Layouts detectados aparecerão aqui após a execução.")
+
+        # --- Principais indicadores (só os que existem) ---
+        st.subheader("Principais indicadores")
+        _rotulos = [
+            ("total_inscritos", "Inscritos"), ("total_ensalados", "Ensalados"),
+            ("total_nao_ensalados", "Não ensalados"), ("pct_ensalamento", "Taxa ensalamento (%)"),
+            ("tg_locais", "Locais"), ("tg_salas", "Salas"),
+            ("distancia_media_km", "Distância média (km)"), ("total_forasteiros", "Forasteiros"),
+            ("tg_capacidade_total", "Capacidade instalada"), ("kit_tipos_so_n91", "Kits só no N91"),
+            ("validacoes_divergentes", "Validações divergentes"), ("total_indicadores_consolidados", "Totais consolidados"),
+        ]
+        presentes = [(k, r) for k, r in _rotulos if k in kp]
+        if presentes:
+            for i in range(0, len(presentes), 4):
+                for c, (k, r) in zip(st.columns(4), presentes[i:i + 4]):
+                    c.metric(r, str(kp[k]))
+        else:
+            st.caption("Indicadores aparecerão conforme os layouts disponíveis.")
+        with st.expander(f"Ver todos os indicadores calculados ({len(kp)})"):
+            if kp:
+                st.dataframe(_pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()]),
+                             use_container_width=True, height=300)
+
+        # --- Principais alertas (achados críticos/atenção) ---
+        if isinstance(achados_vg, list) and achados_vg:
+            df_a = _pd.DataFrame(achados_vg)
+            if "severidade" in df_a.columns:
+                sevu = df_a["severidade"].astype(str).str.upper()
+                crit = df_a[sevu == "CRÍTICO"]
+                aten = df_a[sevu == "ATENÇÃO"]
+                st.subheader("Principais alertas")
+                cA, cB, cC = st.columns(3)
+                cA.metric("🔴 Críticos", len(crit))
+                cB.metric("🟡 Atenção", len(aten))
+                cC.metric("🟢 Demais", len(df_a) - len(crit) - len(aten))
+                top = crit if not crit.empty else aten
+                for _, row in top.head(5).iterrows():
+                    titulo = str(row.get("titulo", row.get("chave", "Achado")))
+                    st.markdown(f"- **{titulo}** — {str(row.get('recomendacao', row.get('interpretacao', '')))[:160]}")
+                st.caption("Veja todos na aba « 🧾 Achados & Metadados ».")
+
+        # --- Narrativa analítica automática (seções 26 e 42) ---
+        st.subheader("📝 Narrativa analítica")
+        st.caption("Texto gerado a partir dos números efetivamente calculados — auditável, sem justificativas inventadas.")
+
+        def _fmt(v, casas=0):
+            try:
+                if casas:
+                    return f"{float(v):,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                return f"{int(float(v)):,}".replace(",", ".")
+            except Exception:
+                return str(v)
+
+        _frases = []
+        _ins = kp.get("total_inscritos")
+        _ens = kp.get("total_ensalados")
+        _pct = kp.get("pct_ensalamento")
+        if _ins is not None and _ens is not None:
+            _fr = f"Foram analisados **{_fmt(_ins)}** inscritos, dos quais **{_fmt(_ens)}** foram ensalados"
+            if _pct is not None:
+                _fr += f", correspondendo a **{_fmt(_pct, 1)}%** do universo"
+            _frases.append(_fr + ".")
+            try:
+                _nao = int(float(_ins)) - int(float(_ens))
+                if _nao > 0:
+                    _frases.append(f"Há **{_fmt(_nao)}** inscrito(s) ainda **sem ensalamento**, que exigem atenção.")
+            except Exception:
+                pass
+        _for = kp.get("total_forasteiros")
+        if _for is not None:
+            _fr = f"Foram identificados **{_fmt(_for)}** forasteiros (participantes cuja UF de residência difere da UF de prova)"
+            if _ins:
+                try:
+                    _fr += f", equivalentes a **{_fmt(int(float(_for)) / int(float(_ins)) * 100, 1)}%** dos inscritos"
+                except Exception:
+                    pass
+            _frases.append(_fr + ".")
+        _dm = kp.get("distancia_media_km")
+        _crit = kp.get("distancia_criticos") or kp.get("locais_criticos_distancia")
+        if _dm is not None:
+            _fr = f"A distância média de deslocamento foi de **{_fmt(_dm, 2)} km**"
+            _frases.append(_fr + ".")
+        if _crit is not None:
+            _frases.append(f"Foram identificados **{_fmt(_crit)}** caso(s) crítico(s) de deslocamento (acima do limite contratual de 20 km).")
+        _sup = kp.get("locais_superlotados") or kp.get("salas_superlotadas")
+        _cap = kp.get("tg_capacidade_total")
+        if _sup is not None:
+            _fr = f"A análise de capacidade identificou **{_fmt(_sup)}** ocorrência(s) de superlotação"
+            if _cap is not None:
+                _fr += f", ainda que a capacidade total instalada seja de **{_fmt(_cap)}** assentos"
+            _frases.append(_fr + ".")
+        _ssf = kp.get("locais_sem_sala_extra")
+        if _ssf is not None:
+            _frases.append(f"Foram identificados **{_fmt(_ssf)}** local(is) **sem sala extra** de contingência.")
+        _divk = kp.get("kit_tipos_so_n91")
+        if _divk is not None and int(float(_divk)) > 0:
+            _frases.append(f"Na reconciliação de kits, **{_fmt(_divk)}** tipo(s) constam no N91 mas ainda não no N02 "
+                           "(o ID_KIT_PROVA do N02 deveria espelhar o N91 já validado).")
+        _vd = kp.get("validacoes_divergentes")
+        if _vd is not None:
+            if int(float(_vd)) == 0:
+                _frases.append("Todas as verificações automáticas de consistência (KPIs × tabelas × layouts) **conferem**.")
+            else:
+                _frases.append(f"**{_fmt(_vd)}** verificação(ões) de consistência apresentaram **divergência** e requerem investigação.")
+
+        if _frases:
+            st.markdown("\n\n".join(f"- {f}" for f in _frases))
+        else:
+            st.info("Os dados disponíveis não permitem gerar a narrativa — verifique se os layouts com os campos "
+                    "necessários (N90, N02, N91…) foram enviados.")
+
+        # --- Resumo executivo ---
+        if resumo_vg:
+            st.subheader("Resumo executivo")
+            st.info(str(resumo_vg))
+
+        # --- Painel técnico / observabilidade (item 13) ---
+        with st.expander("🔧 Painel técnico e qualidade dos dados"):
+            _tempo = st.session_state.get("bi_tempo")
+            _c1, _c2, _c3, _c4 = st.columns(4)
+            _c1.metric("Motor (versão)", str(APP_VERSION))
+            _c2.metric("Camada Streamlit", f"v{STREAMLIT_APP_VERSION}")
+            _c3.metric("Tempo de processamento", f"{_tempo}s" if _tempo is not None else "—")
+            _c4.metric("Análises geradas", len(abas))
+            # tamanhos dos artefatos
+            def _kb(p):
+                try:
+                    return f"{p.stat().st_size // 1024} KB"
+                except Exception:
+                    return "—"
+            st.caption(f"Dashboard: {_kb(html_path)} · Planilha: {_kb(xlsx_path)} · "
+                       f"Base tratada: {_kb(csv_path)} · Metadados: {_kb(json_path)}")
+            # Qualidade dos dados: colunas totalmente vazias por análise
+            _vazias = []
+            for _n, _d in abas.items():
+                if _d is None or _d.empty:
+                    continue
+                _cols_vazias = [c for c in _d.columns if _d[c].isna().all()]
+                if _cols_vazias:
+                    _vazias.append({"Análise": _n, "Colunas vazias": len(_cols_vazias),
+                                    "Quais": ", ".join(map(str, _cols_vazias))[:80]})
+            if _vazias:
+                st.markdown("**Colunas totalmente vazias detectadas** (transparência de qualidade):")
+                st.dataframe(_pd.DataFrame(_vazias), use_container_width=True, hide_index=True, height=180)
+            else:
+                st.caption("Nenhuma coluna totalmente vazia nas análises geradas. ✓")
+            if st.session_state.get("bi_uf_info"):
+                st.caption("Recorte ativo: " + st.session_state["bi_uf_info"])
 
     # ======================= (A) VISÃO NATIVA ===============================
     with tab_nat:
@@ -10636,6 +10951,188 @@ def _run_streamlit_app() -> None:
                                 m4.metric("Máximo", f"{serie.max():.2f}")
                         except Exception as e:  # noqa
                             st.caption(f"Não foi possível gerar o histograma: {e}")
+
+            # ---- v9: GALERIA de gráficos de TODO o capítulo -------------------
+            if _px is not None:
+                st.divider()
+                st.subheader(f"📈 Galeria de gráficos — {capitulo}")
+                st.caption("Gráficos gerados automaticamente para as análises deste capítulo que têm dados "
+                           "adequados. Cada um vem da mesma tabela que você pode abrir acima (mesma fonte do HTML).")
+                mostrar_gal = st.checkbox("Gerar a galeria de gráficos deste capítulo", value=False, key="galeria")
+                if mostrar_gal:
+                    def _fig_auto(_df, _titulo):
+                        """Escolhe automaticamente o melhor gráfico para uma tabela; None se não der."""
+                        try:
+                            _num = [c for c in _df.columns if _pd.api.types.is_numeric_dtype(_df[c])]
+                            _cat = [c for c in _df.columns if not _pd.api.types.is_numeric_dtype(_df[c])]
+                            if not _num:
+                                return None
+                            # série longa e única numérica -> histograma
+                            if _df[_num[0]].nunique() > 12 and (not _cat or len(_df) > 60):
+                                return _px.histogram(_df, x=_num[0], nbins=30, title=_titulo)
+                            # categoria + numérica e poucas linhas -> barras
+                            if _cat and 1 <= len(_df) <= 40:
+                                _d = _df.sort_values(_num[0], ascending=False).head(25)
+                                return _px.bar(_d, x=_cat[0], y=_num[0], title=_titulo, text_auto=True)
+                            # muitas linhas com categoria -> top 20 barras
+                            if _cat and len(_df) > 40:
+                                _d = _df.sort_values(_num[0], ascending=False).head(20)
+                                return _px.bar(_d, x=_cat[0], y=_num[0], title=_titulo + " (top 20)", text_auto=True)
+                            return None
+                        except Exception:
+                            return None
+
+                    _figs = []
+                    for _nome_aba in abas_do_cap:
+                        _dfg = abas[_nome_aba]
+                        if _dfg is None or _dfg.empty:
+                            continue
+                        _f = _fig_auto(_dfg, _nome_aba)
+                        if _f is not None:
+                            _f.update_layout(margin=dict(t=40, b=10), height=340, xaxis_title="")
+                            _figs.append((_nome_aba, _f))
+                    if _figs:
+                        st.caption(f"{len(_figs)} gráfico(s) gerado(s) para este capítulo.")
+                        for _i in range(0, len(_figs), 2):
+                            _par = _figs[_i:_i + 2]
+                            _colsg = st.columns(len(_par))
+                            for _cg, (_nm, _fg) in zip(_colsg, _par):
+                                with _cg:
+                                    st.plotly_chart(_fg, use_container_width=True, key=f"gal_{_nm}")
+                    else:
+                        st.info("Nenhuma análise deste capítulo tem formato adequado para gráfico automático. "
+                                "As tabelas completas seguem disponíveis acima e no Excel.")
+
+    # ======================= (FGV × INEP) COMPARATIVO DE DISTÂNCIAS ==========
+    with tab_fgv:
+        st.subheader("Comparativo de distâncias: FGV × INEP")
+        st.caption("As distâncias do INEP são calculadas fora dos layouts. Anexe a planilha do INEP na barra lateral "
+                   "(com CO_INSCRICAO e a distância) para cruzar com a distância da FGV (NU_DISTANCIA) e ver as diferenças.")
+        _inep_bytes = st.session_state.get("bi_inep_bytes")
+        if not _inep_bytes:
+            st.info("Nenhuma planilha de distâncias do INEP anexada ainda. Use o campo « 🛰️ (Opcional) Planilha com as "
+                    "distâncias do INEP » na barra lateral.")
+        elif arquivo is None:
+            st.warning("Envie também a planilha principal (com o N02/NU_DISTANCIA) para permitir o cruzamento.")
+        else:
+            try:
+                import io as _io3
+                import pandas as _pd3
+
+                def _achar_col(_cols, _chaves):
+                    for _c in _cols:
+                        _u = str(_c).upper()
+                        if any(_k in _u for _k in _chaves):
+                            return _c
+                    return None
+
+                # --- FGV: CO_INSCRICAO + NU_DISTANCIA (da planilha principal) ---
+                _fgv = None
+                _xf = _pd3.ExcelFile(_io3.BytesIO(arquivo.getvalue()))
+                for _sh in _xf.sheet_names:
+                    _d = _pd3.read_excel(_xf, _sh)
+                    _ki = _achar_col(_d.columns, ["CO_INSCRICAO", "NU_INSCRICAO", "INSCRICAO"])
+                    _kd = _achar_col(_d.columns, ["NU_DISTANCIA", "DISTANCIA"])
+                    if _ki and _kd:
+                        _fgv = _d[[_ki, _kd]].copy()
+                        _fgv.columns = ["CO_INSCRICAO", "DIST_FGV"]
+                        break
+
+                # --- INEP: CO_INSCRICAO + distância (da planilha anexada) ---
+                _nome_inep = st.session_state.get("bi_inep_nome", "inep")
+                if str(_nome_inep).lower().endswith(".csv"):
+                    _di = _pd3.read_csv(_io3.BytesIO(_inep_bytes))
+                else:
+                    _di = _pd3.read_excel(_io3.BytesIO(_inep_bytes))
+                _ki2 = _achar_col(_di.columns, ["CO_INSCRICAO", "NU_INSCRICAO", "INSCRICAO"])
+                _kd2 = _achar_col(_di.columns, ["DIST", "KM", "DISTANCIA"])
+                st.caption(f"Planilha INEP: {len(_di):,} linhas · colunas: {', '.join(map(str, list(_di.columns)[:8]))}".replace(",", "."))
+
+                # Permite ajuste manual das colunas do INEP
+                _cols_i = list(_di.columns)
+                _c1, _c2 = st.columns(2)
+                _ki2 = _c1.selectbox("Coluna de inscrição (INEP):", _cols_i,
+                                     index=_cols_i.index(_ki2) if _ki2 in _cols_i else 0)
+                _kd2 = _c2.selectbox("Coluna de distância (INEP):", _cols_i,
+                                     index=_cols_i.index(_kd2) if _kd2 in _cols_i else (1 if len(_cols_i) > 1 else 0))
+
+                if _fgv is None:
+                    st.error("Não encontrei CO_INSCRICAO + NU_DISTANCIA na planilha principal (necessário o N02).")
+                else:
+                    _inep = _di[[_ki2, _kd2]].copy()
+                    _inep.columns = ["CO_INSCRICAO", "DIST_INEP"]
+                    # normaliza chave e distâncias (auto-detecção de unidade via helper do motor)
+                    for _df_ in (_fgv, _inep):
+                        _df_["CO_INSCRICAO"] = _df_["CO_INSCRICAO"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+                    _fgv["DIST_FGV"] = _dist_km(_fgv["DIST_FGV"]).round(2)
+                    _inep["DIST_INEP"] = _dist_km(_inep["DIST_INEP"]).round(2)
+                    _mrg = _fgv.merge(_inep, on="CO_INSCRICAO", how="inner").dropna(subset=["DIST_FGV", "DIST_INEP"])
+                    if _mrg.empty:
+                        st.warning("O cruzamento por CO_INSCRICAO não encontrou correspondências. "
+                                   "Verifique se as inscrições das duas planilhas são as mesmas.")
+                    else:
+                        _mrg["DIFERENCA_KM"] = (_mrg["DIST_INEP"] - _mrg["DIST_FGV"]).round(2)
+                        _mrg["DIFERENCA_ABS"] = _mrg["DIFERENCA_KM"].abs()
+                        def _classif(_x):
+                            if _x <= 1:
+                                return "Concordam (≤1 km)"
+                            if _x <= 5:
+                                return "Divergência leve (1–5 km)"
+                            if _x <= 20:
+                                return "Divergência relevante (5–20 km)"
+                            return "Divergência crítica (>20 km)"
+                        _mrg["CLASSIFICACAO"] = _mrg["DIFERENCA_ABS"].apply(_classif)
+
+                        # KPIs
+                        _n = len(_mrg)
+                        _k1, _k2, _k3, _k4 = st.columns(4)
+                        _k1.metric("Participantes cruzados", f"{_n:,}".replace(",", "."))
+                        _k2.metric("Média FGV (km)", f"{_mrg['DIST_FGV'].mean():.2f}")
+                        _k3.metric("Média INEP (km)", f"{_mrg['DIST_INEP'].mean():.2f}")
+                        _k4.metric("Diferença média (km)", f"{_mrg['DIFERENCA_KM'].mean():.2f}")
+                        _crit_fgv = int((_mrg["DIST_FGV"] > 20).sum())
+                        _crit_inep = int((_mrg["DIST_INEP"] > 20).sum())
+                        _k5, _k6, _k7 = st.columns(3)
+                        _k5.metric("Críticos por FGV (>20 km)", f"{_crit_fgv:,}".replace(",", "."))
+                        _k6.metric("Críticos por INEP (>20 km)", f"{_crit_inep:,}".replace(",", "."))
+                        _k7.metric("Divergências >5 km", f"{int((_mrg['DIFERENCA_ABS'] > 5).sum()):,}".replace(",", "."))
+
+                        # Distribuição por classificação
+                        _dist_cls = _mrg["CLASSIFICACAO"].value_counts().reset_index()
+                        _dist_cls.columns = ["Classificação", "Participantes"]
+                        if _px is not None:
+                            _fig1 = _px.bar(_dist_cls, x="Classificação", y="Participantes",
+                                            title="Participantes por grau de divergência FGV × INEP", text_auto=True)
+                            _fig1.update_layout(xaxis_title="", margin=dict(t=40))
+                            st.plotly_chart(_fig1, use_container_width=True)
+                            # dispersão FGV vs INEP
+                            _amostra = _mrg.sample(min(3000, _n), random_state=1)
+                            _fig2 = _px.scatter(_amostra, x="DIST_FGV", y="DIST_INEP",
+                                                title="Dispersão: distância FGV × INEP (km) — linha = concordância perfeita",
+                                                opacity=0.4, labels={"DIST_FGV": "FGV (km)", "DIST_INEP": "INEP (km)"})
+                            _lim = float(max(_amostra["DIST_FGV"].max(), _amostra["DIST_INEP"].max()))
+                            _fig2.add_shape(type="line", x0=0, y0=0, x1=_lim, y1=_lim,
+                                            line=dict(dash="dash", color="red"))
+                            st.plotly_chart(_fig2, use_container_width=True)
+
+                        # Tabela detalhada (maiores divergências primeiro) + download
+                        st.markdown("##### Detalhamento por participante (maiores divergências primeiro)")
+                        _tab = _mrg.sort_values("DIFERENCA_ABS", ascending=False)
+                        st.dataframe(_tab.head(1000), use_container_width=True, height=360)
+                        st.download_button("⬇️ Baixar comparativo completo (CSV)",
+                                           _tab.to_csv(index=False).encode("utf-8-sig"),
+                                           file_name="comparativo_fgv_inep.csv", mime="text/csv", key="dl_fgv_inep")
+
+                        # Casos onde INEP é crítico mas FGV não (necessidade de investigação)
+                        _invest = _mrg[(_mrg["DIST_INEP"] > 20) & (_mrg["DIST_FGV"] <= 20)]
+                        if not _invest.empty:
+                            st.warning(f"⚠️ {len(_invest):,} participante(s) são **críticos pela distância do INEP (>20 km) "
+                                       "mas não pela FGV** — casos que merecem investigação (possível barreira geográfica "
+                                       "real ou erro cadastral).".replace(",", "."))
+            except Exception as _efi:  # noqa
+                st.error(f"Não foi possível montar o comparativo: {_efi}")
+                with st.expander("Detalhes técnicos"):
+                    st.exception(_efi)
 
     # ======================= (B) DASHBOARD HTML =============================
     with tab_dash:
