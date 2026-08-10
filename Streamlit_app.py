@@ -209,7 +209,27 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "16"
+STREAMLIT_APP_VERSION = "17"
+
+def _read_excel_fast(_src, **kwargs):
+    """Lê Excel priorizando o engine 'calamine' (5–10x mais rápido que o openpyxl);
+    se o pacote não estiver instalado ou falhar, cai automaticamente para o engine
+    padrão. O resultado é o mesmo — só muda a velocidade. Sem regressão."""
+    import pandas as _pd
+    try:
+        return _pd.read_excel(_src, engine="calamine", **kwargs)
+    except Exception:
+        return _pd.read_excel(_src, **kwargs)
+
+
+def _excelfile_fast(_src):
+    """Abre um ExcelFile priorizando o engine 'calamine', com fallback ao padrão."""
+    import pandas as _pd
+    try:
+        return _pd.ExcelFile(_src, engine="calamine")
+    except Exception:
+        return _pd.ExcelFile(_src)
+
 
 def _dist_km(serie):
     """Converte NU_DISTANCIA para KM com AUTO-DETECÇÃO de unidade.
@@ -10316,7 +10336,7 @@ def _run_streamlit_app() -> None:
                 import pandas as _p2
                 _ufs = set()
                 try:
-                    _x = _p2.ExcelFile(_io2.BytesIO(_bytes))
+                    _x = _excelfile_fast(_io2.BytesIO(_bytes))
                     for _s in _x.sheet_names:
                         _df = _p2.read_excel(_x, _s)
                         _up = [str(c).upper() for c in _df.columns]
@@ -10362,7 +10382,7 @@ def _run_streamlit_app() -> None:
         try:
             import io as _io0
             import pandas as _pd0
-            _xls = _pd0.ExcelFile(_io0.BytesIO(arquivo.getvalue()))
+            _xls = _excelfile_fast(_io0.BytesIO(arquivo.getvalue()))
             _padroes = {
                 "N90": ["CO_INSCRICAO", "TP_SEXO", "SG_UF_MUNICIPIO_PROVA"],
                 "N02": ["CO_INSCRICAO", "CO_LOCAL", "ID_SALA", "TP_ENSALAMENTO", "NU_DISTANCIA"],
@@ -10412,7 +10432,7 @@ def _run_streamlit_app() -> None:
             def _scan_estrutura(_bytes):
                 import pandas as _p
                 _res = {}
-                _x = _pd0.ExcelFile(_io0.BytesIO(_bytes))
+                _x = _excelfile_fast(_io0.BytesIO(_bytes))
                 for _s in _x.sheet_names:
                     _df = _p.read_excel(_x, _s)
                     _n = len(_df)
@@ -10579,7 +10599,7 @@ def _run_streamlit_app() -> None:
     # (cada aba do motor tem uma linha de "fundamentação" antes da tabela).
     @st.cache_data(show_spinner=False)
     def _carregar_abas(_bytes: bytes) -> dict:
-        cru = _pd.read_excel(_io.BytesIO(_bytes), sheet_name=None, header=None)
+        cru = _read_excel_fast(_io.BytesIO(_bytes), sheet_name=None, header=None)
         limpo = {}
         for _nome, _df0 in cru.items():
             if _df0 is None or _df0.empty:
@@ -11028,7 +11048,7 @@ def _run_streamlit_app() -> None:
 
                 # --- FGV: CO_INSCRICAO + NU_DISTANCIA (da planilha principal) ---
                 _fgv = None
-                _xf = _pd3.ExcelFile(_io3.BytesIO(arquivo.getvalue()))
+                _xf = _excelfile_fast(_io3.BytesIO(arquivo.getvalue()))
                 for _sh in _xf.sheet_names:
                     _d = _pd3.read_excel(_xf, _sh)
                     _ki = _achar_col(_d.columns, ["CO_INSCRICAO", "NU_INSCRICAO", "INSCRICAO"])
@@ -11043,7 +11063,7 @@ def _run_streamlit_app() -> None:
                 if str(_nome_inep).lower().endswith(".csv"):
                     _di = _pd3.read_csv(_io3.BytesIO(_inep_bytes))
                 else:
-                    _di = _pd3.read_excel(_io3.BytesIO(_inep_bytes))
+                    _di = _read_excel_fast(_io3.BytesIO(_inep_bytes))
                 _ki2 = _achar_col(_di.columns, ["CO_INSCRICAO", "NU_INSCRICAO", "INSCRICAO"])
                 _kd2 = _achar_col(_di.columns, ["DIST", "KM", "DISTANCIA"])
                 st.caption(f"Planilha INEP: {len(_di):,} linhas · colunas: {', '.join(map(str, list(_di.columns)[:8]))}".replace(",", "."))
