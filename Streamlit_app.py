@@ -3865,7 +3865,7 @@ class VisualizerAndExporter:
             self.logger.debug(f"Aviso Inofensivo (Kaleido Imagens Ausente no SO, prosseguindo com renderização Web Segura): {e}")
 
     def export_auxiliary_files(self, results: MLProcessingResults, metadata: dict, didactic_pack: dict,
-                               audit=None, availability=None, referencias=None):
+                               audit=None, availability=None, referencias=None, reverse=None):
         self.logger.info("Módulo Auxiliar: Extraindo Backups em Metadados Formais (JSON) e Matrizes Ouro Mestre (CSV)...")
         # CORREÇÃO DE AUDITORIA (v29): `results.quality_report` existe no DTO porém é
         # preenchido com {} (o motor estatístico não recebe o relatório do ETL). O antigo
@@ -3894,6 +3894,24 @@ class VisualizerAndExporter:
             # v34: relatórios de referência ingeridos (--relatorios).
             if referencias:
                 payload["referencias_relatorios"] = referencias
+            # v34: engenharia reversa dos relatórios (LOTE RO / LOTE 3).
+            if reverse is not None and getattr(reverse, 'ativo', False):
+                payload["engenharia_reversa_relatorios"] = {
+                    "kpis": reverse.kpis,
+                    "achados": reverse.achados,
+                    "resumo_executivo": reverse.resumo_txt,
+                    "modulos": reverse.modulos,
+                    "matriz_relatorio_aplicacao": (
+                        reverse.matriz_relatorio_aplicacao.to_dict(orient='records')
+                        if isinstance(reverse.matriz_relatorio_aplicacao, pd.DataFrame)
+                        else []
+                    ),
+                    "matriz_analise_dados": (
+                        reverse.matriz_analise_dados.to_dict(orient='records')
+                        if isinstance(reverse.matriz_analise_dados, pd.DataFrame)
+                        else []
+                    ),
+                }
             json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
             
         results.df.to_csv(self.dirs["dados_processados"] / "6_Base_Tratada.csv", index=False, encoding='utf-8-sig', sep=';')
@@ -3916,6 +3934,20 @@ class VisualizerAndExporter:
                 texto += f"    Interpretação: {f_['interpretacao']}\n"
                 if f_.get('recomendacao'):
                     texto += f"    Recomendação : {f_['recomendacao']}\n"
+                texto += "\n"
+
+        # v34: seção de engenharia reversa dos relatórios no laudo (reconstrução dinâmica).
+        if reverse is not None and getattr(reverse, 'ativo', False):
+            texto += "\n=========================================================================================\n"
+            texto += "ENGENHARIA REVERSA DOS RELATÓRIOS DE REFERÊNCIA (LOTE RO / LOTE 3)\n"
+            texto += "=========================================================================================\n\n"
+            texto += reverse.resumo_txt + "\n\n"
+            for m_ in reverse.modulos:
+                texto += f"[{m_.get('classificacao', '')}] {m_.get('titulo', '')}\n"
+                if m_.get('regra'):
+                    texto += f"    Regra: {m_['regra']}\n"
+                if m_.get('motivo'):
+                    texto += f"    Motivo (não avaliável): {m_['motivo']}\n"
                 texto += "\n"
 
         with open(self.dirs["arquivos_auxiliares"] / "3_Laudo_Insights_Consolidados.txt", "w", encoding="utf-8") as f:
@@ -4060,7 +4092,7 @@ class VisualizerAndExporter:
                 self.logger.debug(f"Mapa geográfico standalone ignorado: {e}")
 
     def build_excel_workbook(self, results: MLProcessingResults, didactic_pack: dict, audit=None,
-                             availability=None, referencias=None):
+                             availability=None, referencias=None, reverse=None):
         """Constrói o Data Warehouse Excel Multi-Nível EXTREMO Corporativo com 21 Abas Físicas Mestre Array Ouro Limpo."""
         self.logger.info("Excel C-Level Builder: Gerando 21 Abas Oficiais Nativas de Extração Dimensional Data-Driven...")
         filepath = self.dirs["dados_processados"] / "Analise_Completa_Master_Ultimate_Edition.xlsx"
@@ -4746,12 +4778,79 @@ class VisualizerAndExporter:
         except Exception as _e:
             self.logger.warning(f"Aba de referências não criada: {_e}")
 
+        # v34: abas da engenharia reversa dos relatórios (LOTE RO / LOTE 3).
+        if reverse is not None and getattr(reverse, 'ativo', False):
+            try:
+                _linhas_mod = []
+                for _m in reverse.modulos:
+                    _linhas_mod.append({
+                        'ID': _m.get('id', ''),
+                        'Módulo': _m.get('titulo', ''),
+                        'Categoria': _m.get('categoria', ''),
+                        'Classificação': _m.get('classificacao', ''),
+                        'Status': _m.get('status', ''),
+                        'Regra': _m.get('regra', ''),
+                        'Motivo (não avaliável)': _m.get('motivo', '') or '',
+                    })
+                _df_mod = pd.DataFrame(_linhas_mod) if _linhas_mod else pd.DataFrame()
+                if not _df_mod.empty:
+                    create_sheet("100_Modulos_Engenharia_Reversa",
+                                 "OBJETIVO: módulos da engenharia reversa dos relatórios LOTE RO/LOTE 3 — classificação "
+                                 "(Conforme/Atenção/Crítico/Não avaliável), regra explícita e motivo. APLICAÇÃO: rastrear "
+                                 "quais análises dos relatórios foram reconstruídas dinamicamente da base.", _df_mod, False)
+                if isinstance(reverse.matriz_relatorio_aplicacao, pd.DataFrame) and not reverse.matriz_relatorio_aplicacao.empty:
+                    create_sheet("101_Matriz_Relatorio_Aplicacao",
+                                 "OBJETIVO: confronto entre as análises dos relatórios de referência (LOTE RO/LOTE 3) e "
+                                 "os módulos do app — o que é implementado dinamicamente e o que não é implementável "
+                                 "(com justificativa). APLICAÇÃO: auditoria de cobertura da engenharia reversa.",
+                                 reverse.matriz_relatorio_aplicacao, False)
+                if isinstance(reverse.matriz_analise_dados, pd.DataFrame) and not reverse.matriz_analise_dados.empty:
+                    create_sheet("102_Matriz_Analise_Dados",
+                                 "OBJETIVO: análise × dados necessários × fonte nas layouts — mostra a dependência de "
+                                 "dados de cada análise e os casos marcados como 'Não avaliável'. APLICAÇÃO: entender "
+                                 "por que uma análise não é calculada (nunca inventamos números).",
+                                 reverse.matriz_analise_dados, False)
+                _rev_tabs = [
+                    ("103_Distancia_Municipio", 'dist_mun_resumo',
+                     "OBJETIVO: distância média/mediana/p90/máx por município e casos extremos (>20 km e >30 km) — "
+                     "reconstrução do LOTE RO/LOTE 3. APLICAÇÃO: priorizar municípios com deslocamentos críticos."),
+                    ("104_Distancia_Faixas", 'dist_mun_faixas',
+                     "OBJETIVO: distribuição das faixas de distância por município (top 15). APLICAÇÃO: comparar "
+                     "com os histogramas dos relatórios."),
+                    ("105_Distancia_Extremos_30", 'dist_extremos_30',
+                     "OBJETIVO: casos de deslocamento > 30 km. APLICAÇÃO: investigação caso a caso."),
+                    ("106_Distancia_Extremos_20", 'dist_extremos_20',
+                     "OBJETIVO: casos de deslocamento entre 20 e 30 km. APLICAÇÃO: antecipar risco de ausência."),
+                    ("107_Distancia_Faixas_Gerais", 'dist_faixas_gerais',
+                     "OBJETIVO: histograma geral das faixas de distância. APLICAÇÃO: visão macro do deslocamento."),
+                    ("108_Capacidade_Salas", 'cap_salas',
+                     "OBJETIVO: ocupação de cada sala (capacidade × ensalados, % e diferença). APLICAÇÃO: localizar "
+                     "superlotadas e subutilizadas."),
+                    ("109_Capacidade_Locais", 'cap_locais',
+                     "OBJETIVO: ocupação agregada por LOCAL de prova. APLICAÇÃO: visão por prédio."),
+                    ("110_Capacidade_Superlotadas", 'cap_salas_superlotadas',
+                     "OBJETIVO: apenas as salas acima de 100% da capacidade. APLICAÇÃO: rebalanceamento imediato."),
+                    ("111_Capacidade_Histograma", 'cap_histograma',
+                     "OBJETIVO: histograma da diferença capacidade − ensalados. APLICAÇÃO: entender folga/aperto global."),
+                    ("112_Geolocalizacao_Qualidade", 'geo_qualidade',
+                     "OBJETIVO: qualidade das coordenadas dos locais (N52) e ensalados em locais sem coordenada "
+                     "válida. APLICAÇÃO: completar/corrigir georreferenciamento."),
+                    ("113_Ensalamento_Municipio", 'ens_mun_resumo',
+                     "OBJETIVO: taxa de ensalamento por município (N90 × N02). APLICAÇÃO: cobrir municípios com taxa baixa."),
+                ]
+                for _tab_name, _tab_key, _tab_expl in _rev_tabs:
+                    _df_t = reverse.tabelas.get(_tab_key, pd.DataFrame())
+                    if isinstance(_df_t, pd.DataFrame) and not _df_t.empty:
+                        create_sheet(_tab_name, _tab_expl, _df_t, False)
+            except Exception as _e:
+                self.logger.warning(f"Abas de engenharia reversa não criadas: {_e}")
+
         writer.close()
         self.logger.info("Excel Data Warehouse Enterprise Exportado com Sucesso Extremo Ouro. (O Arquivo Físico Matriz XLSX Ouro Limitadora Array com 21 Abas Formatas na Integralidade e Fórmulas de Color Scale foi descarregado intocado e fechado com segurança).")
 
 
     def generate_didactic_html_dashboard(self, results: MLProcessingResults, didactic_pack: dict, audit=None,
-                                         availability=None, referencias=None):
+                                         availability=None, referencias=None, reverse=None):
         """
         ========================================================================
         MOTOR EXECUTIVO DO DASHBOARD SINGLE PAGE APPLICATION (SPA HTML) - V27.0 CORPORATIVA
@@ -4872,6 +4971,27 @@ class VisualizerAndExporter:
         # v34: disponibilidade analítica adaptativa + relatórios de referência.
         availability_json_str = json.dumps(availability or {}, ensure_ascii=True, default=str)
         referencias_json_str = json.dumps(referencias or [], ensure_ascii=True, default=str)
+
+        # v34: engenharia reversa dos relatórios (LOTE RO / LOTE 3).
+        rev_ativo = bool(reverse is not None and getattr(reverse, 'ativo', False))
+        if rev_ativo:
+            rev_modulos_json_str = json.dumps(reverse.modulos, ensure_ascii=True, default=str)
+            rev_kpis_json_str = json.dumps(reverse.kpis or {}, ensure_ascii=True, default=str)
+            rev_achados_json_str = json.dumps(reverse.achados or [], ensure_ascii=True, default=str)
+            rev_matriz_rel_json_str = _df_json(reverse.matriz_relatorio_aplicacao)
+            rev_matriz_ana_json_str = _df_json(reverse.matriz_analise_dados)
+            rev_dist_mun_faixas_json_str = _df_json(reverse.tabelas.get('dist_mun_faixas', pd.DataFrame()))
+            rev_cap_hist_json_str = _df_json(reverse.tabelas.get('cap_histograma', pd.DataFrame()))
+            rev_resumo_str = json.dumps(reverse.resumo_txt or "", ensure_ascii=True)
+        else:
+            rev_modulos_json_str = "[]"
+            rev_kpis_json_str = "{}"
+            rev_achados_json_str = "[]"
+            rev_matriz_rel_json_str = "[]"
+            rev_matriz_ana_json_str = "[]"
+            rev_dist_mun_faixas_json_str = "[]"
+            rev_cap_hist_json_str = "[]"
+            rev_resumo_str = '""'
 
         heat_x, heat_y, heat_z = [], [], []
         if not results.crosstab_faixa_ia.empty:
@@ -5157,6 +5277,7 @@ class VisualizerAndExporter:
                 <a href="#sec-inscritos"><i class="fas fa-users"></i> Inscritos &amp; Ensalamento (N02/N90)</a>
                 <a href="#sec-atendimentos"><i class="fas fa-universal-access"></i> Atendimentos &amp; Recursos (N91)</a>
                 <a href="#sec-auditoria-cruz"><i class="fas fa-clipboard-check"></i> Auditoria de Cruzamento (Relacional)</a>
+                <a href="#sec-eng-reversa"><i class="fas fa-rotate"></i> Engenharia Reversa dos Relatórios (LOTE RO/LOTE 3)</a>
                 <a href="#sec-mestre"><i class="fas fa-table-list"></i> Tabela Mestre dos Candidatos (Interativa)</a>
                 <a href="#sec-kits-tipos"><i class="fas fa-boxes-stacked"></i> Tipos de Kit (Contagem)</a>
                 <a href="#sec-n60-acess"><i class="fas fa-wheelchair"></i> Acessibilidade da Rede (N60 × Equidade)</a>
@@ -5868,6 +5989,53 @@ class VisualizerAndExporter:
                     </div>
                 </section>
 
+                <!-- ============================================================
+                     SEC VIII — ENGENHARIA REVERSA DOS RELATÓRIOS (v34)
+                     ============================================================ -->
+                <section id="sec-eng-reversa">
+                    <div class="section-header">
+                        <h1>VIII. Engenharia Reversa dos Relatórios (LOTE RO · LOTE 3)</h1>
+                        <p>Esta seção reconstrói <strong>dinamicamente</strong>, a partir das layouts N02/N50/N52/N90/N91, as análises que os relatórios de referência <strong>LOTE RO</strong> e <strong>LOTE 3</strong> apresentam em formato estático: distância de deslocamento por município e casos extremos, capacidade/ocupação das salas (superlotadas, subutilizadas, densidade), qualidade da geolocalização, divergência de distância e ensalamento por município. Tudo é <strong>recalculado da base carregada</strong> — nenhum número de relatório é embutido. Análises que dependem de dados externos às layouts (posição de assentos, confiança de geolocalização da comissão, solução do otimizador) são marcadas <strong>Não avaliável</strong> com o motivo, nunca inventadas.</p>
+                    </div>
+
+                    <div id="revVazio" class="card" style="display:none;">
+                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Engenharia reversa inativa:</strong> o arquivo processado não contém os layouts necessários (N02/N50/N52/N90/N91).</div>
+                    </div>
+
+                    <div id="revConteudo">
+                        <div class="card" style="border-left: 5px solid var(--s);">
+                            <div class="card-title"><i class="fas fa-file-signature"></i> Resumo executivo</div>
+                            <div id="revResumoTxt" class="aula-box">Carregando...</div>
+                        </div>
+
+                        <div class="card" style="border-left: 5px solid var(--s);">
+                            <div class="card-title"><i class="fas fa-gauge-high"></i> Classificação dos módulos (Conforme · Atenção · Crítico · Não avaliável)</div>
+                            <div id="revModulosCards" class="kpi-grid"></div>
+                            <div id="revModulosDetalhe"></div>
+                        </div>
+
+                        <div class="card" style="border-left: 5px solid var(--s);">
+                            <div class="card-title"><i class="fas fa-chart-column"></i> Distância por município — faixas empilhadas (top 15 municípios)</div>
+                            <div id="revDistMunChart"></div>
+                        </div>
+
+                        <div class="card" style="border-left: 5px solid var(--s);">
+                            <div class="card-title"><i class="fas fa-chart-bar"></i> Histograma da diferença capacidade − ensalados</div>
+                            <div id="revCapHistChart"></div>
+                        </div>
+
+                        <div class="card" style="border-left: 5px solid var(--s);">
+                            <div class="card-title"><i class="fas fa-table"></i> Matriz Relatório × Aplicação</div>
+                            <div id="revMatrizRel"></div>
+                        </div>
+
+                        <div class="card" style="border-left: 5px solid var(--s);">
+                            <div class="card-title"><i class="fas fa-table"></i> Matriz Análise × Dados Necessários</div>
+                            <div id="revMatrizAna"></div>
+                        </div>
+                    </div>
+                </section>
+
                 <!-- ================= NOVA SEÇÃO VI (v28): METODOLOGIA, DICIONÁRIO DE DADOS & NOVAS ANÁLISES ================= -->
                 <section id="sec-metodologia">
                     <div class="section-header">
@@ -6143,6 +6311,16 @@ class VisualizerAndExporter:
                 const auditMasterRows = JSON_AUDIT_MASTER_ROWS;
                 const auditMasterTotal = JSON_AUDIT_MASTER_TOTAL;
                 const auditResumo = JSON_AUDIT_RESUMO;
+
+                // v34 — Engenharia reversa dos relatórios (LOTE RO / LOTE 3).
+                const revModulos = JSON_REV_MODULOS;
+                const revKpis = JSON_REV_KPIS;
+                const revAchados = JSON_REV_ACHADOS;
+                const revMatrizRel = JSON_REV_MATRIZ_REL;
+                const revMatrizAna = JSON_REV_MATRIZ_ANA;
+                const revDistMunFaixas = JSON_REV_DIST_MUN_FAIXAS;
+                const revCapHist = JSON_REV_CAP_HIST;
+                const revResumo = JSON_REV_RESUMO;
 
                 // ============================================================
                 // RESPONSIVIDADE DOS GRÁFICOS (wrapper único do Plotly)
@@ -7622,6 +7800,122 @@ class VisualizerAndExporter:
                         } catch(err){ console.warn('Auditoria de Cruzamento não pôde ser renderizada:', err); }
                     })();
 
+                    // ================================================================
+                    // ENGENHARIA REVERSA DOS RELATÓRIOS (v34) — renderização única.
+                    // Reconstrução dinâmica das análises dos relatórios LOTE RO / LOTE 3.
+                    // ================================================================
+                    (function initEngReversa(){
+                        try {
+                            var mods = (typeof revModulos !== 'undefined' && revModulos) ? revModulos : [];
+                            var esc = function(s){ if(s===null||s===undefined) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+                            var num = function(x){ return (typeof x === 'number' && isFinite(x)) ? x : 0; };
+                            var ativo = !!(mods && mods.length);
+                            var vazio = document.getElementById('revVazio');
+                            var conteudo = document.getElementById('revConteudo');
+                            if(!ativo){
+                                if(vazio) vazio.style.display = 'block';
+                                if(conteudo) conteudo.style.display = 'none';
+                                return;
+                            }
+                            if(vazio) vazio.style.display = 'none';
+                            if(conteudo) conteudo.style.display = 'block';
+
+                            // Resumo executivo.
+                            var rtxt = document.getElementById('revResumoTxt');
+                            if(rtxt && typeof revResumo === 'string' && revResumo) rtxt.textContent = revResumo;
+
+                            // Cards de classificação dos módulos (Conforme · Atenção · Crítico · Não avaliável).
+                            var cardsDiv = document.getElementById('revModulosCards');
+                            if(cardsDiv && mods.length){
+                                var coresCl = { 'Conforme':'#10b981', 'Atenção':'#f59e0b', 'Crítico':'#ef4444', 'Não avaliável':'#64748b' };
+                                cardsDiv.innerHTML = mods.map(function(m){
+                                    var cor = coresCl[m.classificacao] || '#64748b';
+                                    return '<div class="kpi-box" style="border-left:4px solid '+cor+';">'
+                                         + '<div class="kpi-val" style="color:'+cor+';">'+ esc(m.classificacao||'—') +'</div>'
+                                         + '<div class="kpi-lbl" style="font-size:12px;line-height:1.3;">'+ esc(m.titulo||'') +'</div>'
+                                         + '</div>';
+                                }).join('\n');
+                            }
+
+                            // Detalhe por módulo (narrativa + regra + motivo + evidências).
+                            var detalheDiv = document.getElementById('revModulosDetalhe');
+                            if(detalheDiv && mods.length){
+                                var coresCl2 = { 'Conforme':'#10b981', 'Atenção':'#f59e0b', 'Crítico':'#ef4444', 'Não avaliável':'#64748b' };
+                                detalheDiv.innerHTML = mods.map(function(m){
+                                    var cor = coresCl2[m.classificacao] || '#64748b';
+                                    var ev = (m.evidencias && m.evidencias.length) ?
+                                        '<ul style="font-size:11px;margin:6px 0 0 18px;color:#334155;">'
+                                        + m.evidencias.map(function(e){ return '<li>'+esc(e)+'</li>'; }).join('')
+                                        + '</ul>' : '';
+                                    return '<div class="card" style="border-left:5px solid '+cor+';margin-bottom:10px;">'
+                                         + '<div class="card-title"><span style="background:'+cor+';color:#fff;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700;margin-right:6px;">'+ esc(m.classificacao||'—') +'</span> '+ esc(m.titulo||'') +'</div>'
+                                         + '<div class="aula-box" style="font-size:12px;">'+ esc(m.narrativa||'') +'</div>'
+                                         + '<div style="font-size:11px;margin-top:6px;"><strong>Regra:</strong> '+ esc(m.regra||'') +'</div>'
+                                         + (m.motivo ? '<div style="font-size:11px;margin-top:4px;"><strong>Motivo (não avaliável):</strong> '+ esc(m.motivo) +'</div>' : '')
+                                         + ev
+                                         + '</div>';
+                                }).join('\n');
+                            }
+
+                            // Gráfico: faixas de distância por município (barras empilhadas, top 15).
+                            var munDiv = document.getElementById('revDistMunChart');
+                            if(munDiv && typeof Plotly !== 'undefined' && (typeof revDistMunFaixas !== 'undefined') && revDistMunFaixas && revDistMunFaixas.length){
+                                var faixas = ['<1 km','1–3 km','3–5 km','5–10 km','10–20 km','20–30 km','>30 km'];
+                                var coresFaixa = ['#6366f1','#22d3ee','#34d399','#fbbf24','#f97316','#ef4444','#7c3aed'];
+                                var munNomes = revDistMunFaixas.map(function(d){ return d['MUNICÍPIO'] !== undefined ? esc(d['MUNICÍPIO']) : esc(d['MUNICIPIO'] || ''); });
+                                var traces = faixas.map(function(fb, idx){
+                                    var vals = revDistMunFaixas.map(function(d){ return num(d[fb]); });
+                                    return { x: munNomes, y: vals, type:'bar', name: fb, marker:{ color: coresFaixa[idx % coresFaixa.length] } };
+                                });
+                                var mlayout = { barmode:'stack', height:360, margin:{l:70,r:20,t:50,b:90},
+                                   title:{text:'Distância por município — faixas empilhadas (top 15 por participantes)', font:{size:14}},
+                                   xaxis:{title:'Município', tickangle:-35}, yaxis:{title:'Participantes'} };
+                                try { Plotly.newPlot('revDistMunChart', traces, mlayout, {responsive:true, displaylogo:false}); }
+                                catch(e){ munDiv.innerHTML = '<div class="aula-box">Gráfico indisponível.</div>'; }
+                            }
+
+                            // Gráfico: histograma da diferença capacidade − ensalados.
+                            var capDiv = document.getElementById('revCapHistChart');
+                            if(capDiv && typeof Plotly !== 'undefined' && (typeof revCapHist !== 'undefined') && revCapHist && revCapHist.length){
+                                var capX = revCapHist.map(function(d){ return d['FAIXA']||''; });
+                                var capY = revCapHist.map(function(d){ return num(d['SALAS']); });
+                                var clayout = { height:320, margin:{l:70,r:20,t:50,b:120},
+                                   title:{text:'Diferença capacidade − ensalados por sala', font:{size:14}},
+                                   xaxis:{title:'Diferença (ensalados − capacidade)', tickangle:-25}, yaxis:{title:'Salas'} };
+                                try { Plotly.newPlot('revCapHistChart', [{x: capX, y: capY, type:'bar', marker:{color:'#6366f1'}}], clayout, {responsive:true, displaylogo:false}); }
+                                catch(e){ capDiv.innerHTML = '<div class="aula-box">Gráfico indisponível.</div>'; }
+                            }
+
+                            // Matriz Relatório × Aplicação (tabela).
+                            var mRel = document.getElementById('revMatrizRel');
+                            if(mRel && (typeof revMatrizRel !== 'undefined') && revMatrizRel && revMatrizRel.length){
+                                var hdrs = ['Relatório','Análise no relatório','Módulo no app','Status','Justificativa'];
+                                var rows = revMatrizRel.map(function(d){
+                                    return [d['RELATÓRIO']||d['RELATORIO']||'—', d['ANÁLISE NO RELATÓRIO']||d['ANALISE NO RELATORIO']||'—', d['MÓDULO NO APP']||d['MODULO NO APP']||'—', d['STATUS']||'—', d['JUSTIFICATIVA']||'—'].map(esc);
+                                });
+                                mRel.innerHTML = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>'
+                                    + hdrs.map(function(h){ return '<th style="background:#1E293B;color:#fff;padding:8px;text-align:left;">'+esc(h)+'</th>'; }).join('') +'</tr></thead><tbody>'
+                                    + rows.map(function(r){ return '<tr>'+ r.map(function(c){ return '<td style="border:1px solid #E2E8F0;padding:6px;">'+c+'</td>'; }).join('') +'</tr>'; }).join('')
+                                    + '</tbody></table></div>';
+                            }
+
+                            // Matriz Análise × Dados Necessários (tabela).
+                            var mAna = document.getElementById('revMatrizAna');
+                            if(mAna && (typeof revMatrizAna !== 'undefined') && revMatrizAna && revMatrizAna.length){
+                                var hdrs2 = ['Análise','Dados necessários','Fonte nas layouts','Disponível','Status','Motivo'];
+                                var rows2 = revMatrizAna.map(function(d){
+                                    return [d['ANÁLISE']||d['ANALISE']||'—', d['DADOS NECESSÁRIOS']||'—', d['FONTE NAS LAYOUTS']||'—', d['DISPONÍVEL']||'—', d['STATUS']||'—', d['MOTIVO']||'—'].map(esc);
+                                });
+                                mAna.innerHTML = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>'
+                                    + hdrs2.map(function(h){ return '<th style="background:#1E293B;color:#fff;padding:8px;text-align:left;">'+esc(h)+'</th>'; }).join('') +'</tr></thead><tbody>'
+                                    + rows2.map(function(r){ return '<tr>'+ r.map(function(c){ return '<td style="border:1px solid #E2E8F0;padding:6px;">'+c+'</td>'; }).join('') +'</tr>'; }).join('')
+                                    + '</tbody></table></div>';
+                            }
+
+                            console.log('Engenharia Reversa dos Relatórios renderizada com sucesso.');
+                        } catch(err){ console.warn('Engenharia Reversa dos Relatórios não pôde ser renderizada:', err); }
+                    })();
+
                     // ================= TABELA MESTRE INTERATIVA =================
                     (function initMasterTable(){
                         try {
@@ -8284,6 +8578,15 @@ class VisualizerAndExporter:
         html_content = html_content.replace('JSON_AUDIT_MASTER_ROWS', audit_master_json_str)
         html_content = html_content.replace('JSON_AUDIT_MASTER_TOTAL', str(audit_master_total))
         html_content = html_content.replace('JSON_AUDIT_RESUMO', audit_resumo_str)
+        # v34: engenharia reversa dos relatórios (LOTE RO / LOTE 3).
+        html_content = html_content.replace('JSON_REV_MODULOS', rev_modulos_json_str)
+        html_content = html_content.replace('JSON_REV_KPIS', rev_kpis_json_str)
+        html_content = html_content.replace('JSON_REV_ACHADOS', rev_achados_json_str)
+        html_content = html_content.replace('JSON_REV_MATRIZ_REL', rev_matriz_rel_json_str)
+        html_content = html_content.replace('JSON_REV_MATRIZ_ANA', rev_matriz_ana_json_str)
+        html_content = html_content.replace('JSON_REV_DIST_MUN_FAIXAS', rev_dist_mun_faixas_json_str)
+        html_content = html_content.replace('JSON_REV_CAP_HIST', rev_cap_hist_json_str)
+        html_content = html_content.replace('JSON_REV_RESUMO', rev_resumo_str)
         # Metadados de rastreabilidade (rodapé do painel de layouts).
         try:
             _cov = getattr(results, 'column_validation', {}) or {}
@@ -11113,6 +11416,835 @@ class CrossLayoutAuditEngine:
         self.resumo_txt = " ".join(partes)
 
 
+class ReportAnalyticsReverseEngineer:
+    """ENGENHARIA REVERSA DAS ANÁLISES DOS RELATÓRIOS DE REFERÊNCIA (LOTE RO / LOTE 3).
+
+    Reconstrói DINAMICAMENTE, a partir dos layouts N02/N50/N52/N90/N91, as análises que
+    os relatórios de referência (LOTE RO e LOTE 3) apresentam em formato estático:
+
+      1. Distância de deslocamento por município (faixas <1, 1–3, 3–5, 5–10, 10–20,
+         20–30 e >30 km) + casos extremos (>20 km ATENÇÃO e >30 km CRÍTICO).
+      2. Capacidade e ocupação: salas acima da capacidade, subutilizadas, densidade
+         (m²/pessoa) e histograma da diferença capacidade − ensalados.
+      3. Geolocalização: qualidade das coordenadas dos locais (N52) e o quanto dos
+         ensalados (N02) está em locais sem coordenada válida.
+      4. Divergência de distância (NU_DISTANCIA × distância calculada por coordenadas):
+         só é calculada quando a base oferece as DUAS coordenadas (residência + local);
+         caso contrário a análise é marcada "Não avaliável" com o motivo explícito.
+      5. Ensalamento por município (N90 × N02): taxa e ranking.
+
+    As análises dos relatórios que dependem de dados EXTERNOS às layouts (posição de
+    assentos, confiança de geolocalização da comissão, coordenadas do censo, solução do
+    otimizador) NÃO são inventadas: entram na Matriz Relatório × Aplicação como "Não
+    implementável", com a justificativa de cada uma.
+
+    Princípios:
+      - Nunca embute número de relatório: tudo é recalculado da base carregada.
+      - Cada módulo entrega KPIs + achados + tabelas + narrativa + CLASSIFICAÇÃO
+        (Conforme / Atenção / Crítico / Não avaliável) com a REGRA usada e as EVIDÊNCIAS.
+      - Falhas isoladas nunca derrubam os demais módulos (motor defensivo).
+    """
+
+    FAIXAS = [-0.01, 1, 3, 5, 10, 20, 30, np.inf]
+    LABELS = ['<1 km', '1–3 km', '3–5 km', '5–10 km', '10–20 km', '20–30 km', '>30 km']
+    LIMIAR_EXTREMO_KM = 20.0   # alinhado às faixas dos relatórios (20–30 km)
+    LIMIAR_CRITICO_KM = 30.0   # casos > 30 km dos relatórios (LOTE RO: 125; LOTE 3: 1027)
+    RES_COLS = [
+        ('NU_LATITUDE_RESIDENCIA', 'NU_LONGITUDE_RESIDENCIA'),
+        ('NU_LATITUDE_END_RESIDENCIAL', 'NU_LONGITUDE_END_RESIDENCIAL'),
+        ('NU_LATITUDE_RESIDENCIAL', 'NU_LONGITUDE_RESIDENCIAL'),
+        ('NU_LATITUDE_END', 'NU_LONGITUDE_END'),
+        ('LAT_RESIDENCIA', 'LON_RESIDENCIA'),
+    ]
+
+    def __init__(self, layouts: Dict[str, pd.DataFrame], logger):
+        self.L = {k: (v.copy() if isinstance(v, pd.DataFrame) else pd.DataFrame()) for k, v in (layouts or {}).items()}
+        self.logger = logger
+        self.ativo = False
+        self.kpis: Dict[str, Any] = {}
+        self.achados: List[Dict[str, Any]] = []
+        self.tabelas: Dict[str, pd.DataFrame] = {}
+        self.modulos: List[Dict[str, Any]] = []
+        self.matriz_relatorio_aplicacao = pd.DataFrame()
+        self.matriz_analise_dados = pd.DataFrame()
+        self.resumo_txt = ""
+
+    # ---- helpers ----------------------------------------------------------------
+    @staticmethod
+    def _num(serie):
+        return pd.to_numeric(serie, errors='coerce')
+
+    @staticmethod
+    def _haversine_km(lat1, lon1, lat2, lon2):
+        R = 6371.0
+        phi1, phi2 = np.radians(lat1), np.radians(lat2)
+        dphi = np.radians(lat2 - lat1)
+        dlam = np.radians(lon2 - lon1)
+        a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
+        return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+    def _key_col(self, df: pd.DataFrame) -> Optional[str]:
+        for c in ('CO_INSCRICAO_INEP', 'CO_INSCRICAO'):
+            if c in df.columns:
+                return c
+        return None
+
+    def _add(self, modulo, chave, titulo, categoria, severidade, valor, metricas, interpretacao, recomendacao=""):
+        self.achados.append({
+            'modulo': modulo, 'chave': chave, 'titulo': titulo, 'categoria': categoria,
+            'severidade': severidade, 'valor': valor, 'metricas': metricas or {},
+            'interpretacao': interpretacao, 'recomendacao': recomendacao,
+        })
+
+    def _register(self, mod: Dict[str, Any]) -> None:
+        tabelas = mod.get('tabelas') or {}
+        mod['tabelas'] = list(tabelas.keys())
+        self.modulos.append(mod)
+        self.kpis[f"{mod['id']}::classificacao"] = mod['classificacao']
+        for k, v in (mod.get('kpis') or {}).items():
+            self.kpis[f"{mod['id']}::{k}"] = v
+        for k, df in tabelas.items():
+            if isinstance(df, pd.DataFrame):
+                self.tabelas[k] = df
+
+    # ---- orquestração -----------------------------------------------------------
+    def run(self) -> "ReportAnalyticsReverseEngineer":
+        presentes = [k for k, v in self.L.items() if isinstance(v, pd.DataFrame) and not v.empty and not k.startswith('_')]
+        if not presentes:
+            return self
+        self.ativo = True
+        self.logger.info("Executando ENGENHARIA REVERSA das análises dos relatórios de referência (LOTE RO / LOTE 3)...")
+        etapas = [
+            ('distancia_municipio', self._mod_distancia_municipio),
+            ('capacidade_ocupacao', self._mod_capacidade_ocupacao),
+            ('geolocalizacao', self._mod_geolocalizacao),
+            ('divergencia_distancia', self._mod_divergencia_distancia),
+            ('ensalamento_municipio', self._mod_ensalamento_municipio),
+        ]
+        for nome, fn in etapas:
+            try:
+                fn()
+            except Exception as exc:
+                self.logger.warning(f"Engenharia reversa: módulo '{nome}' falhou de forma não fatal ({exc}).")
+        self._build_matrizes()
+        self._build_resumo()
+        return self
+
+    # ---- 1) Distância por município + casos extremos ---------------------------
+    def _mod_distancia_municipio(self):
+        n02 = self.L.get('N02')
+        base_ok = isinstance(n02, pd.DataFrame) and not n02.empty and 'NU_DISTANCIA' in n02.columns
+        if not base_ok:
+            self._register({
+                'id': 'distancia_municipio',
+                'titulo': 'Distância de deslocamento por município e casos extremos',
+                'categoria': 'Distâncias & Logística', 'status': 'nao_avaliavel',
+                'motivo': 'Layout N02 ausente ou sem a coluna NU_DISTANCIA (distância de deslocamento).',
+                'classificacao': 'Não avaliável',
+                'regra': 'Requer N02.NU_DISTANCIA e o município de prova para recompor faixas e casos extremos.',
+                'narrativa': 'Os relatórios LOTE RO e LOTE 3 reportam distância média por município e casos '
+                             'extremos de deslocamento. Sem NU_DISTANCIA não é possível recalcular.',
+                'kpis': {}, 'achados': [], 'tabelas': {},
+                'evidencias': ['N02.NU_DISTANCIA ausente'],
+            })
+            return
+        mcol = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
+        dist = _dist_km(n02['NU_DISTANCIA'])
+        tmp = n02.assign(_dist=dist).copy()
+        tmp = tmp[tmp['_dist'].notna() & (tmp['_dist'] >= 0)]
+        if tmp.empty:
+            self._register({
+                'id': 'distancia_municipio',
+                'titulo': 'Distância de deslocamento por município e casos extremos',
+                'categoria': 'Distâncias & Logística', 'status': 'nao_avaliavel',
+                'motivo': 'NU_DISTANCIA presente, porém sem valores válidos (vazio/zero) para recalcular.',
+                'classificacao': 'Não avaliável',
+                'regra': 'Exige ao menos um NU_DISTANCIA válido e >= 0.',
+                'narrativa': 'Não há deslocamentos válidos para recompor a análise dos relatórios.',
+                'kpis': {}, 'achados': [], 'tabelas': {},
+                'evidencias': ['NU_DISTANCIA 100% vazio'],
+            })
+            return
+        d = tmp['_dist']
+        stats = {
+            'media_km': round(float(d.mean()), 2), 'mediana_km': round(float(d.median()), 2),
+            'p90_km': round(float(d.quantile(0.90)), 2), 'max_km': round(float(d.max()), 2),
+        }
+        n_ext20 = int((d > self.LIMIAR_EXTREMO_KM).sum())
+        n_ext30 = int((d > self.LIMIAR_CRITICO_KM).sum())
+        kpis = {'participantes': int(len(tmp)), **stats, 'casos_acima_20km': n_ext20, 'casos_acima_30km': n_ext30}
+
+        # faixas gerais (histograma do relatório)
+        faixas = pd.cut(d, bins=self.FAIXAS, labels=self.LABELS)
+        fgeral = faixas.value_counts().reindex(self.LABELS).fillna(0).astype(int).reset_index()
+        fgeral.columns = ['FAIXA', 'QUANTIDADE']
+        total_f = int(fgeral['QUANTIDADE'].sum())
+        fgeral['PERCENTUAL (%)'] = (fgeral['QUANTIDADE'] / total_f * 100).round(2) if total_f else 0.0
+        tabelas = {'dist_faixas_gerais': fgeral}
+        evidencias = [f"Faixa com maior volume: {fgeral.loc[fgeral['QUANTIDADE'].idxmax(), 'FAIXA']} "
+                      f"({int(fgeral.loc[fgeral['QUANTIDADE'].idxmax(), 'QUANTIDADE']):,} participantes)"] if total_f else []
+
+        achados = []
+        if mcol:
+            agg = (tmp.groupby(mcol)['_dist'].agg(['mean', 'median', 'max', 'count'])
+                   .reset_index())
+            p90 = tmp.groupby(mcol)['_dist'].apply(lambda s: float(s.quantile(0.90))).reset_index(name='p90')
+            agg = agg.merge(p90, on=mcol, how='left')
+            agg.columns = ['MUNICÍPIO', 'DIST_MEDIA_KM', 'DIST_MEDIANA_KM', 'DIST_MAX_KM', 'PARTICIPANTES', 'DIST_P90_KM']
+            agg['DIST_MEDIA_KM'] = agg['DIST_MEDIA_KM'].round(2)
+            agg['DIST_MEDIANA_KM'] = agg['DIST_MEDIANA_KM'].round(2)
+            agg['DIST_P90_KM'] = agg['DIST_P90_KM'].round(2)
+            agg['DIST_MAX_KM'] = agg['DIST_MAX_KM'].round(2)
+            ext20 = tmp[tmp['_dist'] > self.LIMIAR_EXTREMO_KM]
+            ext30 = tmp[tmp['_dist'] > self.LIMIAR_CRITICO_KM]
+            cnt20 = ext20.groupby(mcol).size()
+            cnt30 = ext30.groupby(mcol).size()
+            agg['ACIMA_20KM'] = agg['MUNICÍPIO'].map(cnt20).fillna(0).astype(int)
+            agg['ACIMA_30KM'] = agg['MUNICÍPIO'].map(cnt30).fillna(0).astype(int)
+            agg = agg.sort_values(['ACIMA_30KM', 'DIST_MAX_KM'], ascending=False).reset_index(drop=True)
+            tabelas['dist_mun_resumo'] = agg
+            # faixas empilhadas por município (top 15) — alimenta o gráfico do dashboard.
+            band = pd.cut(tmp['_dist'], bins=self.FAIXAS, labels=self.LABELS)
+            pb = tmp.assign(_band=band).groupby([mcol, '_band'], observed=False).size().unstack(fill_value=0)
+            pb = pb.reindex(columns=self.LABELS, fill_value=0)
+            pb['PARTICIPANTES'] = pb.sum(axis=1)
+            pb = pb.sort_values('PARTICIPANTES', ascending=False).head(15)
+            pb.index.name = 'MUNICÍPIO'
+            tabelas['dist_mun_faixas'] = pb.reset_index()
+            # casos extremos (rastreáveis)
+            def _ext_lista(df_ext, chave):
+                if df_ext.empty:
+                    return pd.DataFrame()
+                cols = [c for c in ['CO_INSCRICAO', 'CO_INSCRICAO_INEP', mcol, 'CO_LOCAL'] if c in df_ext.columns]
+                out = df_ext[cols].copy()
+                out['DISTANCIA_KM'] = df_ext['_dist'].round(2)
+                return out.sort_values('DISTANCIA_KM', ascending=False).head(500).reset_index(drop=True)
+            tabelas['dist_extremos_20'] = _ext_lista(ext20, 'dist_extremos_20')
+            tabelas['dist_extremos_30'] = _ext_lista(ext30, 'dist_extremos_30')
+            top = agg[agg['ACIMA_30KM'] > 0].head(3)
+            if not top.empty:
+                evidencias.append("Municípios com mais casos >30 km: "
+                                  + ", ".join(f"{r['MUNICÍPIO']} ({int(r['ACIMA_30KM'])})" for _, r in top.iterrows()))
+            elif n_ext30:
+                evidencias.append(f"{n_ext30:,} caso(s) >30 km sem município identificável (coluna ausente).")
+
+        if n_ext30:
+            cl, sev = 'Crítico', 'CRÍTICO'
+        elif n_ext20:
+            cl, sev = 'Atenção', 'ATENÇÃO'
+        else:
+            cl, sev = 'Conforme', 'OK'
+        achados.append({
+            'modulo': 'distancia_municipio', 'chave': 'distancia_extremos',
+            'titulo': 'Casos extremos de deslocamento (>20 km e >30 km) — N02',
+            'categoria': 'Distâncias & Logística', 'severidade': sev,
+            'valor': n_ext30 if n_ext30 else n_ext20,
+            'metricas': {'media_km': stats['media_km'], 'mediana_km': stats['mediana_km'],
+                         'p90_km': stats['p90_km'], 'max_km': stats['max_km'],
+                         'casos_acima_20km': n_ext20, 'casos_acima_30km': n_ext30},
+            'interpretacao': (f"A distância média de deslocamento é {stats['media_km']:.2f} km "
+                              f"(mediana {stats['mediana_km']:.2f} km; p90 {stats['p90_km']:.2f} km; máx {stats['max_km']:.2f} km). "
+                              f"Existem {n_ext20:,} caso(s) acima de {self.LIMIAR_EXTREMO_KM:.0f} km e "
+                              f"{n_ext30:,} acima de {self.LIMIAR_CRITICO_KM:.0f} km. Os relatórios de referência "
+                              f"tratam deslocamentos >30 km como inconsistência de distância (LOTE RO: 125 casos em "
+                              f"Porto Velho; LOTE 3: 1027 casos). Estes valores foram RECALCULADOS da base."),
+            'recomendacao': ('Revisar a alocação dos casos >30 km (possível barreira geográfica real ou erro de '
+                             'georreferência); confirmar CEP único/confiança de geolocalização caso a caso.'
+                             if n_ext30 else ('Revisar os casos entre 20 e 30 km para antecipar risco de ausência.'
+                                              if n_ext20 else 'Deslocamentos dentro dos padrões dos relatórios.')),
+        })
+        self._register({
+            'id': 'distancia_municipio',
+            'titulo': 'Distância de deslocamento por município e casos extremos',
+            'categoria': 'Distâncias & Logística', 'status': 'disponivel',
+            'motivo': '',
+            'classificacao': cl,
+            'regra': (f"Faixas de {self.LABELS[0]} a {self.LABELS[-1]} (limiares dos relatórios). "
+                      f"{self.LIMIAR_EXTREMO_KM:.0f} km < deslocamento <= {self.LIMIAR_CRITICO_KM:.0f} km → ATENÇÃO; "
+                      f"> {self.LIMIAR_CRITICO_KM:.0f} km → CRÍTICO; senão CONFORME."),
+            'narrativa': (f"{kpis['participantes']:,} deslocamento(s) validado(s). Média {stats['media_km']:.2f} km, "
+                          f"mediana {stats['mediana_km']:.2f} km, p90 {stats['p90_km']:.2f} km, máximo {stats['max_km']:.2f} km. "
+                          f"{n_ext30:,} caso(s) >{self.LIMIAR_CRITICO_KM:.0f} km e {n_ext20:,} >{self.LIMIAR_EXTREMO_KM:.0f} km."),
+            'kpis': kpis, 'achados': achados, 'tabelas': tabelas, 'evidencias': evidencias,
+        })
+
+    # ---- 2) Capacidade & ocupação ----------------------------------------------
+    def _mod_capacidade_ocupacao(self):
+        n02, n50 = self.L.get('N02'), self.L.get('N50')
+        ok = (isinstance(n02, pd.DataFrame) and not n02.empty and isinstance(n50, pd.DataFrame) and not n50.empty
+              and all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA'])
+              and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns)
+        if not ok:
+            self._register({
+                'id': 'capacidade_ocupacao',
+                'titulo': 'Capacidade e ocupação das salas (superlotadas, subutilizadas, densidade)',
+                'categoria': 'Capacidade & Ocupação', 'status': 'nao_avaliavel',
+                'motivo': 'Requer N02 (ensalados por CO_LOCAL/CO_BLOCO/ID_SALA) e N50 (QT_CAPACIDADE_MAXIMA_SALA).',
+                'classificacao': 'Não avaliável',
+                'regra': 'Ocupação = ensalados (N02) ÷ capacidade (N50). Sem capacidade declarada não há teto para avaliar.',
+                'narrativa': 'Os relatórios LOTE RO e LOTE 3 reportam salas acima da capacidade (RO: 7/353 = 1,9%; '
+                             'LOTE 3: 169/1979 = 8,5% acima da fórmula(1)). Sem capacidade/ensalados não é recalculável.',
+                'kpis': {}, 'achados': [], 'tabelas': {},
+                'evidencias': ['N50.QT_CAPACIDADE_MAXIMA_SALA ausente'],
+            })
+            return
+        key = ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']
+        occ = n02.groupby(key).size().reset_index(name='ENSALADOS')
+        cap = n50[key + ['QT_CAPACIDADE_MAXIMA_SALA']].drop_duplicates(subset=key)
+        m = cap.merge(occ, on=key, how='left')
+        m['ENSALADOS'] = m['ENSALADOS'].fillna(0).astype(int)
+        m['CAPACIDADE'] = self._num(m['QT_CAPACIDADE_MAXIMA_SALA'])
+        m = m[m['CAPACIDADE'].notna()]
+        if m.empty:
+            self._register({'id': 'capacidade_ocupacao',
+                            'titulo': 'Capacidade e ocupação das salas',
+                            'categoria': 'Capacidade & Ocupação', 'status': 'nao_avaliavel',
+                            'motivo': 'Capacidade declarada 100% vazia no N50.',
+                            'classificacao': 'Não avaliável',
+                            'regra': 'Exige QT_CAPACIDADE_MAXIMA_SALA preenchida.',
+                            'narrativa': 'Sem capacidade válida não há como medir superlotação.',
+                            'kpis': {}, 'achados': [], 'tabelas': {}, 'evidencias': ['Capacidade vazia']})
+            return
+        m['OCUPACAO (%)'] = np.where(m['CAPACIDADE'] > 0, (m['ENSALADOS'] / m['CAPACIDADE'] * 100).round(1), np.nan)
+        m['DIFERENCA'] = (m['ENSALADOS'] - m['CAPACIDADE']).astype(int)
+        if 'NU_LARGURA' in n50.columns and 'NU_COMPRIMENTO' in n50.columns:
+            dim = n50[key + ['NU_LARGURA', 'NU_COMPRIMENTO']].drop_duplicates(subset=key)
+            m = m.merge(dim, on=key, how='left')
+            area = (self._num(m['NU_LARGURA']) / 100.0) * (self._num(m['NU_COMPRIMENTO']) / 100.0)
+            m['DENSIDADE_PLANEJADA (m²/pessoa)'] = np.where(area > 0, (area / m['CAPACIDADE']).round(2), np.nan)
+            m['DENSIDADE_REAL (m²/pessoa)'] = np.where((area > 0) & (m['ENSALADOS'] > 0), (area / m['ENSALADOS']).round(2), np.nan)
+        superlot = m[m['OCUPACAO (%)'] > 100]
+        subutil = m[m['OCUPACAO (%)'] < 50]
+        dens_apertada = int((m['DENSIDADE_REAL (m²/pessoa)'] < 1.0).sum()) if 'DENSIDADE_REAL (m²/pessoa)' in m.columns else 0
+        n_salas = len(m)
+        cap_total = int(m['CAPACIDADE'].sum())
+        ens_total = int(m['ENSALADOS'].sum())
+        ocp_media = round(float(m['OCUPACAO (%)'].mean()), 1) if m['OCUPACAO (%)'].notna().any() else 0.0
+        n_sup = len(superlot)
+        n_sub = len(subutil)
+        kpis = {
+            'qtd_salas': n_salas, 'capacidade_total': cap_total, 'ensalados_em_salas': ens_total,
+            'ocupacao_media_pct': ocp_media, 'qtd_superlotadas': n_sup,
+            'pct_superlotadas': round(100 * n_sup / n_salas, 2) if n_salas else 0.0,
+            'qtd_subutilizadas': n_sub, 'pct_subutilizadas': round(100 * n_sub / n_salas, 2) if n_salas else 0.0,
+            'qtd_densidade_apertada': dens_apertada,
+        }
+
+        hist_bins = [-np.inf, -20, -1, 1, 20, np.inf]
+        hist_labels = ['Muito abaixo (≤ -20)', 'Abaixo (-19 a -1)', 'No limite (-1 a 1)', 'Acima (2 a 20)', 'Muito acima (> 20)']
+        hist = pd.cut(m['DIFERENCA'], bins=hist_bins, labels=hist_labels)
+        hd = hist.value_counts().reindex(hist_labels).fillna(0).astype(int).reset_index()
+        hd.columns = ['FAIXA', 'SALAS']
+        tabelas = {
+            'cap_histograma': hd,
+            'cap_salas': m.sort_values('OCUPACAO (%)', ascending=False).head(1000).reset_index(drop=True),
+        }
+        if not superlot.empty:
+            tabelas['cap_salas_superlotadas'] = superlot.sort_values('OCUPACAO (%)', ascending=False).head(500).reset_index(drop=True)
+
+        # ocupação por LOCAL (N52 ou agregado do N50)
+        occ_l = n02.groupby('CO_LOCAL').size().reset_index(name='ENSALADOS')
+        cap_l = None
+        n52 = self.L.get('N52')
+        if n52 is not None and not n52.empty and 'CO_LOCAL' in n52.columns and 'QT_CAPACIDADE_MAXIMA' in n52.columns:
+            cap_l = n52.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA'].sum().reset_index(name='CAPACIDADE')
+        elif 'CO_LOCAL' in n50.columns:
+            cap_l = n50.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA_SALA'].sum().reset_index(name='CAPACIDADE')
+        if cap_l is not None:
+            ml = cap_l.merge(occ_l, on='CO_LOCAL', how='left')
+            ml['ENSALADOS'] = ml['ENSALADOS'].fillna(0).astype(int)
+            ml['CAPACIDADE'] = self._num(ml['CAPACIDADE'])
+            ml['OCUPACAO (%)'] = np.where(ml['CAPACIDADE'] > 0, (ml['ENSALADOS'] / ml['CAPACIDADE'] * 100).round(1), np.nan)
+            tabelas['cap_locais'] = ml.sort_values('OCUPACAO (%)', ascending=False).head(500).reset_index(drop=True)
+
+        achados = []
+        achados.append({
+            'modulo': 'capacidade_ocupacao', 'chave': 'salas_superlotadas',
+            'titulo': 'Salas acima da capacidade (superlotadas) — N02 × N50',
+            'categoria': 'Capacidade & Ocupação', 'severidade': 'CRÍTICO' if n_sup else 'OK', 'valor': n_sup,
+            'metricas': {'ocupacao_media_pct': ocp_media, 'superlotadas': n_sup,
+                         'pct_superlotadas': kpis['pct_superlotadas'], 'subutilizadas': n_sub},
+            'interpretacao': (f"A ocupação média das salas é {ocp_media:.1f}% com {n_sup:,} sala(s) SUPERLOTADA(s) "
+                              f"({kpis['pct_superlotadas']:.1f}% do total) — os relatórios reportavam 1,9% (LOTE RO) e "
+                              f"8,5% (LOTE 3) de salas acima da capacidade; aqui o valor é recalculado da base.")
+                             + (f" Há ainda {n_sub:,} sala(s) subutilizada(s) (<50%)." if n_sub else ""),
+            'recomendacao': 'Redistribuir ensalados das salas superlotadas para as subutilizadas (rebalanceamento).'
+                            if (n_sup or n_sub) else 'Nenhuma sala excede a capacidade.',
+        })
+        achados.append({
+            'modulo': 'capacidade_ocupacao', 'chave': 'salas_subutilizadas',
+            'titulo': 'Salas subutilizadas (<50% da capacidade) — N02 × N50',
+            'categoria': 'Capacidade & Ocupação', 'severidade': 'ATENÇÃO' if n_sub else 'OK', 'valor': n_sub,
+            'metricas': {'subutilizadas': n_sub, 'pct_subutilizadas': kpis['pct_subutilizadas']},
+            'interpretacao': (f"{n_sub:,} sala(s) operando abaixo de 50% da capacidade — oportunidade de consolidar "
+                              f"ensalados e reduzir custo operacional (fiscais, materiais, logística)."),
+            'recomendacao': 'Consolidar ensalados das salas subutilizadas em salas com folga.' if n_sub else 'Nenhuma ação necessária.',
+        })
+        if dens_apertada:
+            achados.append({
+                'modulo': 'capacidade_ocupacao', 'chave': 'densidade_apertada',
+                'titulo': 'Salas com densidade apertada (<1,0 m²/pessoa) — N50',
+                'categoria': 'Capacidade & Ocupação', 'severidade': 'ATENÇÃO', 'valor': dens_apertada,
+                'metricas': {'densidade_apertada': dens_apertada},
+                'interpretacao': (f"{dens_apertada:,} sala(s) com menos de 1,0 m²/pessoa de área útil por ensalado — "
+                                  f"proxy da fórmula(1) de espaçamento usada no relatório LOTE 3."),
+                'recomendacao': 'Revisar o leiaute dessas salas ou redistribuir participantes.',
+            })
+
+        if n_sup:
+            cl, sev_master = 'Crítico', 'CRÍTICO'
+        elif n_sub or dens_apertada:
+            cl, sev_master = 'Atenção', 'ATENÇÃO'
+        else:
+            cl, sev_master = 'Conforme', 'OK'
+        evidencias = []
+        if n_sup:
+            top_s = superlot.sort_values('OCUPACAO (%)', ascending=False).head(5)
+            evidencias.append("Salas mais superlotadas: "
+                              + ", ".join(f"{r['ID_SALA']} ({float(r['OCUPACAO (%)']):.0f}%)" for _, r in top_s.iterrows()))
+        elif n_sub:
+            evidencias.append(f"{n_sub:,} salas subutilizadas (<50%).")
+        self._register({
+            'id': 'capacidade_ocupacao',
+            'titulo': 'Capacidade e ocupação das salas (superlotadas, subutilizadas, densidade)',
+            'categoria': 'Capacidade & Ocupação', 'status': 'disponivel', 'motivo': '',
+            'classificacao': cl,
+            'regra': ('Ocupação = ensalados (N02) ÷ capacidade (N50). >100% = superlotada (CRÍTICO); <50% = subutilizada '
+                      '(ATENÇÃO); densidade real < 1,0 m²/pessoa = apertada (ATENÇÃO).'),
+            'narrativa': (f"{n_salas:,} sala(s) com capacidade instalada de {cap_total:,} assentos e "
+                          f"{ens_total:,} ensalado(s) (ocupação média {ocp_media:.1f}%). "
+                          f"{n_sup:,} superlotada(s) e {n_sub:,} subutilizada(s)."),
+            'kpis': kpis, 'achados': achados, 'tabelas': tabelas, 'evidencias': evidencias,
+        })
+
+    # ---- 3) Geolocalização (qualidade das coordenadas dos locais) ---------------
+    def _mod_geolocalizacao(self):
+        n52 = self.L.get('N52')
+        ok = (isinstance(n52, pd.DataFrame) and not n52.empty
+              and all(c in n52.columns for c in ['CO_LOCAL', 'NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL']))
+        if not ok:
+            self._register({
+                'id': 'geolocalizacao',
+                'titulo': 'Geolocalização: qualidade das coordenadas dos locais e dos ensalados',
+                'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
+                'motivo': 'Requer N52 com CO_LOCAL, NU_LATITUDE_LOCAL e NU_LONGITUDE_LOCAL.',
+                'classificacao': 'Não avaliável',
+                'regra': 'Exige coordenadas dos locais (N52) para medir qualidade e cobertura.',
+                'narrativa': 'Os relatórios avaliam a confiança da geolocalização (níveis 1–4) dos candidatos. '
+                             'Esse dado é da comissão/aplicador e não existe nas layouts; aqui o proxy é a '
+                             'validade das coordenadas cadastradas dos locais.',
+                'kpis': {}, 'achados': [], 'tabelas': {},
+                'evidencias': ['N52 sem coordenadas'],
+            })
+            return
+        lat = self._num(n52['NU_LATITUDE_LOCAL'])
+        lon = self._num(n52['NU_LONGITUDE_LOCAL'])
+        coord_valida = lat.notna() & lon.notna() & (lat.abs() <= 90) & (lon.abs() <= 180) & ((lat != 0) | (lon != 0))
+        n52 = n52.copy()
+        n52['_TEM_LAT'] = lat.notna()
+        n52['_TEM_LON'] = lon.notna()
+        n52['_COORD_VALIDA'] = coord_valida
+        total_locais = len(n52)
+        locais_validos = int(coord_valida.sum())
+        locais_invalidos = total_locais - locais_validos
+        pct_validos = round(100 * locais_validos / total_locais, 1) if total_locais else 0.0
+
+        ens_sem = 0
+        ens_pct = 0.0
+        occ_l = pd.DataFrame({'CO_LOCAL': [], 'ENSALADOS': []})
+        n02 = self.L.get('N02')
+        if isinstance(n02, pd.DataFrame) and not n02.empty and 'CO_LOCAL' in n02.columns:
+            ref = n52[['CO_LOCAL', '_COORD_VALIDA']].drop_duplicates('CO_LOCAL')
+            j = n02[['CO_LOCAL']].merge(ref, on='CO_LOCAL', how='left')
+            sem = j['_COORD_VALIDA'].isna() | (j['_COORD_VALIDA'] == False)  # noqa: E712
+            ens_sem = int(sem.sum())
+            ens_pct = round(100 * ens_sem / len(j), 1) if len(j) else 0.0
+            occ_l = n02.groupby('CO_LOCAL').size().reset_index(name='ENSALADOS')
+
+        kpis = {
+            'total_locais': total_locais, 'locais_com_coord_valida': locais_validos,
+            'pct_locais_com_coord_valida': pct_validos, 'locais_sem_coord_valida': locais_invalidos,
+            'ensalados_sem_coord': ens_sem, 'pct_ensalados_sem_coord': ens_pct,
+        }
+
+        geo = n52[['CO_LOCAL', '_TEM_LAT', '_TEM_LON', '_COORD_VALIDA']].copy()
+        if 'NO_LOCAL' in n52.columns:
+            geo['NO_LOCAL'] = n52['NO_LOCAL']
+        geo = geo.merge(occ_l, on='CO_LOCAL', how='left')
+        geo['ENSALADOS'] = geo['ENSALADOS'].fillna(0).astype(int)
+        geo['COORD_VALIDA'] = np.where(geo['_COORD_VALIDA'], 'Sim', 'Não')
+        geo['TEM_LATITUDE'] = np.where(geo['_TEM_LAT'], 'Sim', 'Não')
+        geo['TEM_LONGITUDE'] = np.where(geo['_TEM_LON'], 'Sim', 'Não')
+        geo = geo.drop(columns=['_TEM_LAT', '_TEM_LON', '_COORD_VALIDA'])
+        tabelas = {'geo_qualidade': geo.sort_values('ENSALADOS', ascending=False).head(1000).reset_index(drop=True)}
+
+        if ens_pct >= 30:
+            cl, sev = 'Crítico', 'CRÍTICO'
+        elif ens_pct >= 5 or pct_validos < 90:
+            cl, sev = 'Atenção', 'ATENÇÃO'
+        else:
+            cl, sev = 'Conforme', 'OK'
+        achados = [{
+            'modulo': 'geolocalizacao', 'chave': 'coord_locais',
+            'titulo': 'Qualidade das coordenadas dos locais de prova (N52)',
+            'categoria': 'Geolocalização', 'severidade': sev,
+            'valor': ens_sem if ens_sem else locais_invalidos,
+            'metricas': {'locais_validos': locais_validos, 'pct_locais_validos': pct_validos,
+                         'locais_invalidos': locais_invalidos,
+                         'ensalados_sem_coord': ens_sem, 'pct_ensalados_sem_coord': ens_pct},
+            'interpretacao': (f"{pct_validos:.1f}% dos {total_locais:,} locais têm coordenadas válidas "
+                              f"({locais_invalidos:,} sem/ inválidas) e {ens_pct:.1f}% dos ensalados estão em locais "
+                              f"sem coordenada válida. A confiança de geolocalização (níveis 1–4) dos relatórios "
+                              f"depende de dados da comissão; aqui o proxy é a coordenada cadastrada."),
+            'recomendacao': 'Completar/corrigir as coordenadas dos locais sem valor válido antes do georreferenciamento.'
+                            if (locais_invalidos or ens_sem) else 'Coordenadas consistentes.',
+        }]
+        evidencias = []
+        sem_list = geo[geo['COORD_VALIDA'] == 'Não'].head(5)
+        if not sem_list.empty:
+            evidencias.append("Locais sem coordenada válida (amostra): "
+                              + ", ".join(str(r.get('CO_LOCAL', '')) for _, r in sem_list.iterrows()))
+        self._register({
+            'id': 'geolocalizacao',
+            'titulo': 'Geolocalização: qualidade das coordenadas dos locais e dos ensalados',
+            'categoria': 'Geolocalização', 'status': 'disponivel', 'motivo': '',
+            'classificacao': cl,
+            'regra': ('Coordenada válida = lat em [-90,90], lon em [-180,180] e não (0,0). '
+                      '>=30% dos ensalados sem coordenada → CRÍTICO; >=5% ou <90% dos locais válidos → ATENÇÃO; senão CONFORME.'),
+            'narrativa': (f"{pct_validos:.1f}% dos locais têm coordenadas válidas; "
+                          f"{ens_pct:.1f}% dos ensalados estão em locais sem coordenada válida."),
+            'kpis': kpis, 'achados': achados, 'tabelas': tabelas, 'evidencias': evidencias,
+        })
+
+    # ---- 4) Divergência de distância (NU_DISTANCIA × coordenadas) ---------------
+    def _mod_divergencia_distancia(self):
+        n02 = self.L.get('N02')
+        if not (isinstance(n02, pd.DataFrame) and not n02.empty and 'NU_DISTANCIA' in n02.columns):
+            self._register({
+                'id': 'divergencia_distancia',
+                'titulo': 'Divergência de distância (NU_DISTANCIA × distância por coordenadas)',
+                'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
+                'motivo': 'Requer N02.NU_DISTANCIA.',
+                'classificacao': 'Não avaliável',
+                'regra': 'Compara a distância declarada com a distância haversine (residência × local).',
+                'narrativa': 'Sem NU_DISTANCIA não há referência para confrontar.',
+                'kpis': {}, 'achados': [], 'tabelas': {}, 'evidencias': ['N02.NU_DISTANCIA ausente'],
+            })
+            return
+        k = self._key_col(n02)
+        if not k:
+            self._register({'id': 'divergencia_distancia',
+                            'titulo': 'Divergência de distância (NU_DISTANCIA × coordenadas)',
+                            'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
+                            'motivo': 'Sem chave de participante (CO_INSCRICAO) no N02.',
+                            'classificacao': 'Não avaliável', 'regra': 'Exige chave de participante.',
+                            'narrativa': 'Não há como associar distância a coordenadas sem a chave.',
+                            'kpis': {}, 'achados': [], 'tabelas': {}, 'evidencias': ['Chave ausente']})
+            return
+        base = n02[[k, 'NU_DISTANCIA']].copy()
+        base['_D_KM'] = _dist_km(base['NU_DISTANCIA'])
+        # coordenadas do LOCAL: direto no N02 ou via N52
+        if 'NU_LATITUDE_LOCAL' in n02.columns and 'NU_LONGITUDE_LOCAL' in n02.columns:
+            base['_LAT_LOC'] = self._num(n02['NU_LATITUDE_LOCAL'])
+            base['_LON_LOC'] = self._num(n02['NU_LONGITUDE_LOCAL'])
+        else:
+            n52 = self.L.get('N52')
+            if (isinstance(n52, pd.DataFrame) and not n52.empty and 'CO_LOCAL' in n52.columns
+                    and 'NU_LATITUDE_LOCAL' in n52.columns and 'NU_LONGITUDE_LOCAL' in n52.columns
+                    and 'CO_LOCAL' in n02.columns):
+                ref = n52[['CO_LOCAL', 'NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL']].drop_duplicates('CO_LOCAL')
+                base = base.merge(n02[['CO_LOCAL', k]], on=k, how='left').merge(ref, on='CO_LOCAL', how='left')
+                base['_LAT_LOC'] = self._num(base['NU_LATITUDE_LOCAL'])
+                base['_LON_LOC'] = self._num(base['NU_LONGITUDE_LOCAL'])
+            else:
+                base['_LAT_LOC'] = np.nan
+                base['_LON_LOC'] = np.nan
+        # coordenadas de RESIDÊNCIA: não existem nos layouts oficiais (só o município)
+        res_df, c_lat, c_lon = None, None, None
+        for df_cand in (n02, self.L.get('N90')):
+            if not isinstance(df_cand, pd.DataFrame) or df_cand.empty or k not in df_cand.columns:
+                continue
+            cols = set(df_cand.columns)
+            for cl_, cn_ in self.RES_COLS:
+                if cl_ in cols and cn_ in cols:
+                    res_df, c_lat, c_lon = df_cand, cl_, cn_
+                    break
+            if res_df is not None:
+                break
+        if res_df is None:
+            self._register({
+                'id': 'divergencia_distancia',
+                'titulo': 'Divergência de distância (NU_DISTANCIA × distância por coordenadas)',
+                'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
+                'motivo': ('As layouts oficiais não trazem as coordenadas de RESIDÊNCIA do participante (só o '
+                           'município). A distância por coordenadas (haversine) exige residência + local. Os '
+                           'relatórios obtiveram essa divergência de fontes externas (aplicador/otimizador).'),
+                'classificacao': 'Não avaliável',
+                'regra': 'Compara NU_DISTANCIA (declarada) com a distância haversine calculada entre as coordenadas '
+                         'de residência e do local de prova.',
+                'narrativa': ('Sem as coordenadas de residência, a divergência de distância não é calculável. '
+                              'A existência da coluna NU_DISTANCIA permite apenas a análise de faixas/extremos '
+                              '(módulo distancia_municipio), não o confronto com coordenadas.'),
+                'kpis': {}, 'achados': [], 'tabelas': {},
+                'evidencias': ['Coordenada de residência ausente nas layouts', 'Distância de referência externa ausente'],
+            })
+            return
+        base = base.merge(res_df[[k, c_lat, c_lon]], on=k, how='left')
+        lat1, lon1 = self._num(base['_LAT_LOC']), self._num(base['_LON_LOC'])
+        lat2, lon2 = self._num(base[c_lat]), self._num(base[c_lon])
+        valid = lat1.notna() & lon1.notna() & lat2.notna() & lon2.notna() & base['_D_KM'].notna()
+        if not valid.any():
+            self._register({'id': 'divergencia_distancia',
+                            'titulo': 'Divergência de distância (NU_DISTANCIA × coordenadas)',
+                            'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
+                            'motivo': 'Coordenadas presentes, porém sem par residência+local válido para nenhum participante.',
+                            'classificacao': 'Não avaliável',
+                            'regra': 'Exige ao menos um participante com coordenadas válidas dos dois lados.',
+                            'narrativa': 'Não há pares de coordenadas válidos para calcular a divergência.',
+                            'kpis': {}, 'achados': [], 'tabelas': {},
+                            'evidencias': ['Coordenadas 100% vazias ou inválidas']})
+            return
+        h = self._haversine_km(lat1[valid], lon1[valid], lat2[valid], lon2[valid])
+        df = pd.DataFrame({
+            k: base.loc[valid, k].astype(str).values,
+            'NU_DISTANCIA_KM': base.loc[valid, '_D_KM'].round(2).values,
+            'DIST_COORDS_KM': np.round(h, 2),
+        })
+        df['DIFERENCA_ABS_KM'] = (df['NU_DISTANCIA_KM'] - df['DIST_COORDS_KM']).abs().round(2)
+
+        def _classif(x):
+            if x <= 1:
+                return 'Concordam (≤1 km)'
+            if x <= 5:
+                return 'Divergência leve (1–5 km)'
+            if x <= 20:
+                return 'Divergência relevante (5–20 km)'
+            return 'Divergência crítica (>20 km)'
+        df['CLASSIFICACAO'] = df['DIFERENCA_ABS_KM'].apply(_classif)
+        n_relev = int((df['DIFERENCA_ABS_KM'] > 5).sum())
+        n_crit = int((df['DIFERENCA_ABS_KM'] > 20).sum())
+        kpis = {'comparados': int(len(df)), 'divergentes_relevantes': n_relev,
+                'divergentes_criticos': n_crit,
+                'media_diferenca_abs_km': round(float(df['DIFERENCA_ABS_KM'].mean()), 2) if len(df) else 0.0}
+        tabelas = {'divergencia_distancia': df.sort_values('DIFERENCA_ABS_KM', ascending=False).head(1000).reset_index(drop=True)}
+        if n_crit:
+            cl, sev = 'Crítico', 'CRÍTICO'
+        elif n_relev:
+            cl, sev = 'Atenção', 'ATENÇÃO'
+        else:
+            cl, sev = 'Conforme', 'OK'
+        achados = [{
+            'modulo': 'divergencia_distancia', 'chave': 'divergencia_km',
+            'titulo': 'Divergência entre NU_DISTANCIA e a distância calculada por coordenadas',
+            'categoria': 'Geolocalização', 'severidade': sev, 'valor': n_crit if n_crit else n_relev,
+            'metricas': {'comparados': int(len(df)), 'relevantes': n_relev, 'criticos': n_crit,
+                         'media_diferenca_abs_km': kpis['media_diferenca_abs_km']},
+            'interpretacao': (f"Entre {len(df):,} participantes com coordenadas válidas dos dois lados, "
+                              f"{n_relev:,} têm divergência >5 km e {n_crit:,} >20 km entre a distância declarada "
+                              f"(NU_DISTANCIA) e a calculada por haversine — casos a investigar (possível erro de "
+                              f"coordenadas ou de NU_DISTANCIA)."),
+            'recomendacao': 'Revisar os casos de divergência crítica (coordenadas vs NU_DISTANCIA).'
+                            if n_crit else 'Divergências dentro do aceitável.',
+        }]
+        self._register({
+            'id': 'divergencia_distancia',
+            'titulo': 'Divergência de distância (NU_DISTANCIA × distância por coordenadas)',
+            'categoria': 'Geolocalização', 'status': 'disponivel', 'motivo': '',
+            'classificacao': cl,
+            'regra': ('Diferença absoluta entre NU_DISTANCIA e a distância haversine (residência × local). '
+                      '≤1 km = conforme; ≤5 km = leve; ≤20 km = relevante (ATENÇÃO); >20 km = crítica (CRÍTICO).'),
+            'narrativa': (f"{len(df):,} participante(s) comparado(s) — {n_crit:,} divergência(s) crítica(s) "
+                          f"(>20 km) e {n_relev:,} relevante(s) (>5 km)."),
+            'kpis': kpis, 'achados': achados, 'tabelas': tabelas,
+            'evidencias': ['Cálculo haversine R=6371 km', f"Chave usada: {k}"],
+        })
+
+    # ---- 5) Ensalamento por município (N90 × N02) ------------------------------
+    def _mod_ensalamento_municipio(self):
+        n90, n02 = self.L.get('N90'), self.L.get('N02')
+        ok = (isinstance(n90, pd.DataFrame) and not n90.empty and isinstance(n02, pd.DataFrame) and not n02.empty)
+        if not ok:
+            self._register({
+                'id': 'ensalamento_municipio',
+                'titulo': 'Ensalamento por município (inscritos × ensalados)',
+                'categoria': 'Ensalamento', 'status': 'nao_avaliavel',
+                'motivo': 'Requer N90 (inscritos) e N02 (ensalados).',
+                'classificacao': 'Não avaliável',
+                'regra': 'Taxa = ensalados (N02) ÷ inscritos (N90) por município.',
+                'narrativa': 'Sem os dois layouts não é possível medir a cobertura de ensalamento.',
+                'kpis': {}, 'achados': [], 'tabelas': {}, 'evidencias': ['N90 ou N02 ausente'],
+            })
+            return
+        k90, k02 = self._key_col(n90), self._key_col(n02)
+        m90 = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n90.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n90.columns else None)
+        m02 = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
+        if not (k90 and k02 and m90):
+            self._register({'id': 'ensalamento_municipio',
+                            'titulo': 'Ensalamento por município (inscritos × ensalados)',
+                            'categoria': 'Ensalamento', 'status': 'nao_avaliavel',
+                            'motivo': 'Faltam a chave de participante ou o município de prova nos layouts.',
+                            'classificacao': 'Não avaliável',
+                            'regra': 'Requer CO_INSCRICAO e município de prova.',
+                            'narrativa': 'Sem chave/município não há agregação possível.',
+                            'kpis': {}, 'achados': [], 'tabelas': {},
+                            'evidencias': ['Chave ou município ausente']})
+            return
+        a = n90[[k90, m90]].copy()
+        a['_K'] = a[k90].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        a['_MUN'] = a[m90].astype(str).str.strip()
+        a = a.drop_duplicates('_K')
+        b = n02[[k02, m02]].copy()
+        b['_K'] = b[k02].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        b['_MUN'] = b[m02].astype(str).str.strip()
+        b = b.drop_duplicates('_K')
+        matched = a[['_K', '_MUN']].merge(b[['_K']], on='_K', how='inner')
+        total_insc = len(a)
+        total_ens = len(matched)
+        taxa_geral = round(100 * total_ens / total_insc, 1) if total_insc else 0.0
+        ins_per = a.groupby('_MUN').size()
+        ens_per = matched.groupby('_MUN').size()
+        idx = list(ins_per.index)
+        per = pd.DataFrame({'MUNICÍPIO': idx,
+                            'INSCRITOS': [int(ins_per.get(i, 0)) for i in idx],
+                            'ENSALADOS': [int(ens_per.get(i, 0)) for i in idx]})
+        per['TAXA (%)'] = (per['ENSALADOS'] / per['INSCRITOS'] * 100).round(1)
+        n_mun_zero = int((per['TAXA (%)'] == 0).sum())
+        n_mun_baixo = int((per['TAXA (%)'] < 90).sum())
+        kpis = {
+            'inscritos_total': total_insc, 'ensalados_total': total_ens, 'taxa_geral_pct': taxa_geral,
+            'municipios_com_inscritos': len(per), 'municipios_taxa_zero': n_mun_zero,
+            'municipios_abaixo_90': n_mun_baixo,
+        }
+        tabelas = {'ens_mun_resumo': per.sort_values('TAXA (%)').reset_index(drop=True)}
+        if n_mun_zero:
+            cl, sev = 'Crítico', 'CRÍTICO'
+        elif taxa_geral < 98 or n_mun_baixo:
+            cl, sev = 'Atenção', 'ATENÇÃO'
+        else:
+            cl, sev = 'Conforme', 'OK'
+        achados = [{
+            'modulo': 'ensalamento_municipio', 'chave': 'taxa_ensalamento_mun',
+            'titulo': 'Taxa de ensalamento por município (N90 × N02)',
+            'categoria': 'Ensalamento', 'severidade': sev,
+            'valor': int(per['ENSALADOS'].sum()) if False else (n_mun_zero if n_mun_zero else n_mun_baixo),
+            'metricas': {'inscritos': total_insc, 'ensalados': total_ens, 'taxa_geral_pct': taxa_geral,
+                         'municipios_taxa_zero': n_mun_zero, 'municipios_abaixo_90': n_mun_baixo},
+            'interpretacao': (f"Taxa geral de ensalamento de {taxa_geral:.1f}% ({total_ens:,} de {total_insc:,} "
+                              f"inscritos). {n_mun_zero:,} município(s) com taxa 0% e {n_mun_baixo:,} abaixo de 90%."),
+            'recomendacao': 'Ensalar com urgência os inscritos dos municípios com taxa zero/baixa.'
+                            if (n_mun_zero or n_mun_baixo or taxa_geral < 98) else 'Cobertura de ensalamento adequada.',
+        }]
+        evidencias = []
+        if not per.empty:
+            pior = per.sort_values('TAXA (%)').head(3)
+            evidencias.append("Municípios com menor taxa: "
+                              + ", ".join(f"{r['MUNICÍPIO']} ({r['TAXA (%)']:.0f}%)" for _, r in pior.iterrows()))
+        self._register({
+            'id': 'ensalamento_municipio',
+            'titulo': 'Ensalamento por município (inscritos × ensalados)',
+            'categoria': 'Ensalamento', 'status': 'disponivel', 'motivo': '', 'classificacao': cl,
+            'regra': ('Taxa = ensalados (N02) ÷ inscritos (N90) por município de prova. '
+                      'Município com taxa 0% → CRÍTICO; taxa geral <98% ou município <90% → ATENÇÃO; senão CONFORME.'),
+            'narrativa': (f"{total_ens:,} de {total_insc:,} inscritos ensalados ({taxa_geral:.1f}%). "
+                          f"{n_mun_zero:,} município(s) com taxa zero."),
+            'kpis': kpis, 'achados': achados, 'tabelas': tabelas, 'evidencias': evidencias,
+        })
+
+    # ---- Matrizes ---------------------------------------------------------------
+    def _build_matrizes(self):
+        rows_rel = [
+            ('LOTE RO', 'Distância média de deslocamento por município', 'distancia_municipio',
+             'Implementada dinamicamente',
+             'Recalculada de N02.NU_DISTANCIA por município de prova (faixas <1 km a >30 km).'),
+            ('LOTE RO', 'Casos de distância > 30 km (relatório: 125 casos em Porto Velho)', 'distancia_municipio',
+             'Implementada dinamicamente',
+             'Extremos >20 km (atenção) e >30 km (crítico) recalculados por município; os valores da base substituem os do relatório.'),
+            ('LOTE RO', 'Salas acima da capacidade (relatório: 7 de 353 = 1,9%)', 'capacidade_ocupacao',
+             'Implementada dinamicamente',
+             'Ocupação = ensalados (N02) ÷ capacidade (N50); superlotadas (>100%) recalculadas da base.'),
+            ('LOTE RO', 'Qualidade do ensalamento (distribuição por faixa de distância)', 'distancia_municipio',
+             'Implementada dinamicamente',
+             'Histograma e faixas gerais de deslocamento (N02.NU_DISTANCIA).'),
+            ('LOTE 3', 'Distância média por município (relatório destaca Lábrea, Itacoatiara, Humaitá)', 'distancia_municipio',
+             'Implementada dinamicamente',
+             'Ranking por média/mediana/máximo e casos extremos por município.'),
+            ('LOTE 3', '1027 casos de distância > 30 km (relatório: CEP único / confiança 4)', 'distancia_municipio',
+             'Implementada parcialmente',
+             'Os casos >30 km são recalculados; a CONFIANÇA de geolocalização (níveis 1–4) vem da comissão e não existe nas layouts.'),
+            ('LOTE 3', 'Salas superlotadas (relatório: 169 de 1979 = 8,5% acima da fórmula(1))', 'capacidade_ocupacao',
+             'Implementada parcialmente',
+             'Ocupação real recalculada; a fórmula(1) original (espaçamento de assentos) é aproximada pela densidade m²/pessoa.'),
+            ('Ambos', 'Confiança da geolocalização dos candidatos (níveis 1–4)', 'geolocalizacao',
+             'Não implementável',
+             'Dado da comissão/aplicador; as layouts não possuem os níveis de confiança. Proxy usado: validade das coordenadas cadastradas (N52).'),
+            ('Ambos', 'Posição dos assentos / maior distância mínima entre candidatos', '(sem módulo)',
+             'Não implementável',
+             'Requer coordenadas de assento (planta/leiaute) que não existem nas layouts.'),
+            ('Ambos', 'Qualidade da localização da escola (aplicador × comissão/censo)', '(sem módulo)',
+             'Não implementável',
+             'Requer coordenadas da comissão/censo; ausentes nas layouts.'),
+            ('Ambos', 'Divergência de distância (aplicador × otimizador)', 'divergencia_distancia',
+             'Condicional',
+             'Calculada apenas quando a base fornece coordenadas de residência + local; senão marcada "Não avaliável".'),
+            ('Ambos', 'Comparação solução aplicada × solução otimizada', '(sem módulo)',
+             'Não implementável',
+             'A solução do otimizador é externa (resultado de processo) e não consta nas layouts.'),
+            ('Ambos', 'Kits de prova e atendimentos (cobertura, funil, laudo)', 'auditoria_cruzamento',
+             'Implementada',
+             'Já coberta integralmente pela Auditoria de Cruzamento (módulo relacional N02×N90×N91).'),
+        ]
+        self.matriz_relatorio_aplicacao = pd.DataFrame(
+            rows_rel, columns=['RELATÓRIO', 'ANÁLISE NO RELATÓRIO', 'MÓDULO NO APP', 'STATUS', 'JUSTIFICATIVA'])
+
+        def _add(an, dados, fonte, disp, status, motivo):
+            rows_an.append({'ANÁLISE': an, 'DADOS NECESSÁRIOS': dados, 'FONTE NAS LAYOUTS': fonte,
+                            'DISPONÍVEL': disp, 'STATUS': status, 'MOTIVO': motivo})
+
+        rows_an = []
+        _add('Distância por município', 'NU_DISTANCIA + município de prova', 'N02.NU_DISTANCIA / N02.CO_MUNICIPIO_PROVA',
+             'Sim', 'Implementada', '')
+        _add('Casos extremos >20 km e >30 km', 'NU_DISTANCIA', 'N02.NU_DISTANCIA', 'Sim', 'Implementada', '')
+        _add('Salas superlotadas (>100%)', 'ensalados por sala + capacidade', 'N02 (CO_LOCAL/CO_BLOCO/ID_SALA) × N50.QT_CAPACIDADE_MAXIMA_SALA',
+             'Sim', 'Implementada', '')
+        _add('Salas subutilizadas (<50%)', 'ensalados por sala + capacidade', 'N02 × N50.QT_CAPACIDADE_MAXIMA_SALA',
+             'Sim', 'Implementada', '')
+        _add('Densidade m²/pessoa (proxy da fórmula(1))', 'área da sala + capacidade/ensalados',
+             'N50.NU_LARGURA / NU_COMPRIMENTO', 'Condicional', 'Implementada parcial',
+             'Só quando o N50 traz NU_LARGURA e NU_COMPRIMENTO.')
+        _add('Geolocalização dos locais', 'latitude/longitude dos locais', 'N52.NU_LATITUDE_LOCAL / NU_LONGITUDE_LOCAL',
+             'Sim', 'Implementada', '')
+        _add('Confiança de geolocalização (níveis 1–4)', 'níveis de confiança da comissão', '(externo)',
+             'Não', 'Não avaliável', 'Não consta nas layouts; só o proxy de coordenadas válidas é calculado.')
+        _add('Divergência de distância (coordenadas)', 'coordenadas de residência + local',
+             'NU_DISTANCIA (N02) + coords locais (N52)', 'Condicional', 'Condicional',
+             'Exige coordenadas de residência (ausentes nas layouts oficiais).')
+        _add('Maior distância mínima entre assentos', 'posição/leiaute dos assentos', '(externo)',
+             'Não', 'Não avaliável', 'Sem planta de assentos nas layouts.')
+        _add('Qualidade da localização da escola', 'coordenadas do censo/comissão', '(externo)',
+             'Não', 'Não avaliável', 'Comparação aplicador × comissão exige fonte externa.')
+        _add('Ensalamento por município', 'inscritos × ensalados', 'N90.CO_INSCRICAO × N02.CO_INSCRICAO',
+             'Sim', 'Implementada', '')
+        self.matriz_analise_dados = pd.DataFrame(
+            rows_an, columns=['ANÁLISE', 'DADOS NECESSÁRIOS', 'FONTE NAS LAYOUTS', 'DISPONÍVEL', 'STATUS', 'MOTIVO'])
+
+    def _build_resumo(self):
+        cont = {}
+        for m in self.modulos:
+            cont[m['classificacao']] = cont.get(m['classificacao'], 0) + 1
+        self.kpis['qtd_modulos'] = len(self.modulos)
+        self.kpis['qtd_conforme'] = cont.get('Conforme', 0)
+        self.kpis['qtd_atencao'] = cont.get('Atenção', 0)
+        self.kpis['qtd_critico'] = cont.get('Crítico', 0)
+        self.kpis['qtd_nao_avaliavel'] = cont.get('Não avaliável', 0)
+        partes = [f"Engenharia reversa dos relatórios de referência (LOTE RO / LOTE 3): "
+                  f"{len(self.modulos)} módulo(s) recalculado(s) da base — "
+                  f"{cont.get('Conforme', 0)} conforme(s), {cont.get('Atenção', 0)} em atenção, "
+                  f"{cont.get('Crítico', 0)} crítico(s) e {cont.get('Não avaliável', 0)} não avaliável(is)."]
+        for m in self.modulos:
+            partes.append(f"[{m['classificacao']}] {m['titulo']}: {m['narrativa']}")
+        self.resumo_txt = " ".join(partes)
+
+
 # ==========================================
 # ORQUESTRADOR CENTRAL DEFINITIVO DO SISTEMA (PIPELINE)
 # ==========================================
@@ -11357,6 +12489,17 @@ class AnalyticsPipeline:
                     self.logger.warning(f"Auditoria de cruzamento não executada ({exc}); pipeline segue normalmente.")
                     audit = None
 
+                # 3b2. ENGENHARIA REVERSA DOS RELATÓRIOS (v34): reconstrução dinâmica das
+                # análises dos relatórios de referência (LOTE RO / LOTE 3) a partir das layouts.
+                reverse = None
+                try:
+                    reverse = ReportAnalyticsReverseEngineer(layouts, self.logger).run()  # noqa
+                    if not (reverse and reverse.ativo):
+                        reverse = None
+                except Exception as exc:
+                    self.logger.warning(f"Engenharia reversa dos relatórios não executada ({exc}); pipeline segue normalmente.")
+                    reverse = None
+
                 # 3c. CAMADA ADAPTATIVA (v34): disponibilidade analítica por layout + referências.
                 # O MESMO bundle é consumido pelo Excel, pelo HTML e pelo Streamlit (uma única lógica).
                 availability = None
@@ -11386,18 +12529,21 @@ class AnalyticsPipeline:
 
                 # 5. Pipeline de Metadados JSON Dimensional Exato Limpo e Sweetviz Automático Ouro Exato Oficial
                 viz.export_auxiliary_files(results, metadata, didactic_pack, audit=audit,
-                                           availability=availability, referencias=referencias)
+                                           availability=availability, referencias=referencias,
+                                           reverse=reverse)
                 viz.generate_html_report(results)
                 pbar.update(1)
 
                 # 6. Pipeline Data Warehouse Corporativo Ouro Oficial Preditiva Matriz Oculta (Excel com 21 Abas Categóricas e Data Bars)
                 viz.build_excel_workbook(results, didactic_pack, audit=audit,
-                                         availability=availability, referencias=referencias)
+                                         availability=availability, referencias=referencias,
+                                         reverse=reverse)
                 pbar.update(1)
 
                 # 7. Pipeline Front-End SPA Web Analytics Dimensional UI Corporativa (Dashboards Premium Inteligentes Ouro Formais Base, Cérebro JS e Cross-Filtering Blindado)
                 viz.generate_didactic_html_dashboard(results, didactic_pack, audit=audit,
-                                                     availability=availability, referencias=referencias)
+                                                     availability=availability, referencias=referencias,
+                                                     reverse=reverse)
                 pbar.update(1)
                 
                 # 8. Pipeline Documentação W3C Formal WIKI Ouro Matriz
@@ -12507,6 +13653,37 @@ def _run_streamlit_app() -> None:
                     st.download_button("⬇️ Baixar indicadores (CSV)",
                                        dfk.to_csv(index=False).encode("utf-8-sig"),
                                        file_name="indicadores_auditoria.csv", mime="text/csv", key="dl_kpis_all")
+
+            # v34: engenharia reversa dos relatórios (LOTE RO / LOTE 3) — mesma fonte do HTML/Excel.
+            rev_meta = meta.get("engenharia_reversa_relatorios", {}) if isinstance(meta, dict) else {}
+            if isinstance(rev_meta, dict) and rev_meta:
+                st.subheader("🔄 Engenharia reversa dos relatórios (LOTE RO / LOTE 3)")
+                if rev_meta.get("resumo_executivo"):
+                    st.info(str(rev_meta.get("resumo_executivo")))
+                modulos_rev = rev_meta.get("modulos") or []
+                if modulos_rev:
+                    st.markdown(f"##### Módulos da engenharia reversa ({len(modulos_rev)})")
+                    emoji_rev = {"Conforme": "🟢", "Atenção": "🟠", "Crítico": "🔴", "Não avaliável": "⚪"}
+                    for m_rev in modulos_rev:
+                        cl_rev = str(m_rev.get("classificacao", ""))
+                        with st.expander(f"{emoji_rev.get(cl_rev, '⚪')} [{cl_rev}] {m_rev.get('titulo', '')}"):
+                            if m_rev.get("narrativa"):
+                                st.markdown(m_rev["narrativa"])
+                            if m_rev.get("regra"):
+                                st.caption(f"Regra: {m_rev['regra']}")
+                            if m_rev.get("motivo"):
+                                st.caption(f"Motivo (não avaliável): {m_rev['motivo']}")
+                            if m_rev.get("evidencias"):
+                                st.caption("Evidências: " + "; ".join(str(e) for e in m_rev["evidencias"]))
+                rev_m1 = rev_meta.get("matriz_relatorio_aplicacao") or []
+                if rev_m1:
+                    st.markdown(f"##### Matriz Relatório × Aplicação ({len(rev_m1)})")
+                    st.dataframe(_pd.DataFrame(rev_m1), use_container_width=True, height=260)
+                rev_m2 = rev_meta.get("matriz_analise_dados") or []
+                if rev_m2:
+                    st.markdown(f"##### Matriz Análise × Dados Necessários ({len(rev_m2)})")
+                    st.dataframe(_pd.DataFrame(rev_m2), use_container_width=True, height=260)
+                st.markdown("---")
 
             with st.expander("Metadados completos (JSON)"):
                 st.json(meta)
