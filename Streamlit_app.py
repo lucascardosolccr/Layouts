@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "24"
+STREAMLIT_APP_VERSION = "25"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -10354,6 +10354,11 @@ def _run_streamlit_app() -> None:
             st.session_state["bi_inep_nome"] = arquivo_inep.name
         offline = st.checkbox("Gerar dashboard em modo offline", value=False,
                               help="HTML com bibliotecas locais (./libs). A pré-visualização embutida precisa de internet.")
+        gerar_pesados = st.checkbox(
+            "Gerar dashboard HTML + gráficos avulsos", value=True,
+            help="O HTML de ~16 MB é o passo que mais consome memória. Se você vir o erro « Oh no » ao rodar "
+                 "(típico de ambientes com pouca RAM, como o Streamlit Cloud), DESMARQUE esta opção: a análise "
+                 "nativa (KPIs, tabelas, gráficos, achados) continua completa; só o dashboard HTML deixa de ser gerado.")
         st.markdown("**Filtro global (opcional)**")
         # v13 — multiselect de UF populado a partir do próprio arquivo (adaptativo).
         _uf_opcoes = []
@@ -10581,7 +10586,26 @@ def _run_streamlit_app() -> None:
                     pipe = AnalyticsPipeline(input_override=str(inpath), output_override=str(outdir), offline=bool(offline))
                 import time as _time
                 _t0 = _time.time()
-                pipe.execute()
+                # v25: para economizar memória (evita « Oh no » por falta de RAM), permite
+                # pular a geração do HTML e dos gráficos avulsos — os passos mais pesados.
+                # A análise nativa (JSON de metadados + Excel de abas) continua completa.
+                if not gerar_pesados:
+                    _orig_dash = VisualizerAndExporter.generate_didactic_html_dashboard
+                    _orig_charts = VisualizerAndExporter.generate_standalone_charts
+                    _orig_sweet = VisualizerAndExporter.generate_html_report
+                    VisualizerAndExporter.generate_didactic_html_dashboard = lambda self, *a, **k: None
+                    VisualizerAndExporter.generate_standalone_charts = lambda self, *a, **k: None
+                    VisualizerAndExporter.generate_html_report = lambda self, *a, **k: None
+                    try:
+                        pipe.execute()
+                    finally:
+                        VisualizerAndExporter.generate_didactic_html_dashboard = _orig_dash
+                        VisualizerAndExporter.generate_standalone_charts = _orig_charts
+                        VisualizerAndExporter.generate_html_report = _orig_sweet
+                    st.session_state["bi_html_pulado"] = True
+                else:
+                    pipe.execute()
+                    st.session_state["bi_html_pulado"] = False
                 st.session_state["bi_tempo"] = round(_time.time() - _t0, 1)
                 st.session_state["bi_outdir"] = str(outdir)
                 st.session_state["bi_ok"] = True
