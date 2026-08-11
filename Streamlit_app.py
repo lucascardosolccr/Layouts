@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "25"
+STREAMLIT_APP_VERSION = "39"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -249,6 +249,31 @@ def _excelfile_fast(_src):
     except Exception:
         pass
     return _pd.ExcelFile(_src)
+
+
+def _limpa_nome(x):
+    """Decodifica sequências de escape do Excel (_xHHHH_) de volta ao caractere real —
+    ex.: 'BARRA_x0020_DO_x0020_BUGRES' -> 'BARRA DO BUGRES'. Seguro para qualquer texto."""
+    import re as _re
+    _s = str(x)
+    if "_x" in _s:
+        try:
+            _s = _re.sub(r"_x([0-9A-Fa-f]{4})_", lambda _m: chr(int(_m.group(1), 16)), _s)
+        except Exception:
+            pass
+    return _s
+
+
+def _limpa_colunas_nome(_df):
+    """Aplica _limpa_nome nas colunas de nome (NO_*) de um DataFrame, sem tocar no resto.
+    Só altera valores string que contêm escape (_x....), preservando nulos e demais tipos."""
+    for _c in _df.columns:
+        if str(_c).upper().startswith("NO_"):
+            try:
+                _df[_c] = _df[_c].map(lambda _v: _limpa_nome(_v) if isinstance(_v, str) and "_x" in _v else _v)
+            except Exception:
+                pass
+    return _df
 
 
 def _dist_km(serie):
@@ -10319,6 +10344,51 @@ def _run_streamlit_app() -> None:
                        page_icon="📊", layout="wide",
                        initial_sidebar_state="expanded")
 
+    # v28/v39 — Design system + tema claro/escuro. Só estilo, sem alterar lógica/dados.
+    _tema = st.session_state.get("tema_app", "Claro")
+    if _tema == "Escuro":
+        _css_vars = ("--pnd-primary:#7fb2e5; --pnd-accent:#4aa3df; --pnd-crit:#ff6b6b; "
+                     "--pnd-aten:#ffa94d; --pnd-ok:#51cf66; --pnd-bg-card:#1b2430; "
+                     "--pnd-border:#2c3846; --pnd-bg:#0f1620; --pnd-text:#e6ecf3; --pnd-text2:#9fb0c3;")
+        _dark_rules = """
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] { background: var(--pnd-bg) !important; }
+        section[data-testid="stSidebar"] { background: #131c27 !important; }
+        .stApp, .stMarkdown, p, span, li, label, [data-testid="stMetricValue"] { color: var(--pnd-text) !important; }
+        h1,h2,h3 { color: var(--pnd-primary) !important; }
+        div[data-testid="stDataFrame"], div[data-testid="stExpander"], div[data-testid="stMetric"] {
+            background: var(--pnd-bg-card) !important; }
+        div[data-testid="stMetric"] label { color: var(--pnd-text2) !important; }
+        """
+    else:
+        _css_vars = ("--pnd-primary:#1f4e79; --pnd-accent:#2e86c1; --pnd-crit:#c0392b; "
+                     "--pnd-aten:#e67e22; --pnd-ok:#27ae60; --pnd-bg-card:#ffffff; "
+                     "--pnd-border:#e3e8ef; --pnd-bg:#ffffff; --pnd-text:#1a2733; --pnd-text2:#5b6b7f;")
+        _dark_rules = ""
+    st.markdown(f"""
+        <style>
+        :root {{ {_css_vars} }}
+        .block-container {{ padding-top: 2.2rem; max-width: 1400px; }}
+        h1 {{ color: var(--pnd-primary); font-weight: 800; letter-spacing: -0.5px; }}
+        h2, h3 {{ color: var(--pnd-primary); font-weight: 700; }}
+        div[data-testid="stMetric"] {{
+            background: var(--pnd-bg-card); border: 1px solid var(--pnd-border);
+            border-left: 4px solid var(--pnd-accent); border-radius: 10px; padding: 14px 16px;
+            box-shadow: 0 1px 3px rgba(16,42,67,0.06);
+        }}
+        div[data-testid="stMetric"] label {{ color: var(--pnd-text2) !important; font-weight: 600; }}
+        div[data-testid="stMetricValue"] {{ color: var(--pnd-primary); font-weight: 800; }}
+        button[data-baseweb="tab"] {{ font-weight: 600; }}
+        button[data-baseweb="tab"][aria-selected="true"] {{ color: var(--pnd-accent); }}
+        .stTabs [data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 2px solid var(--pnd-border); }}
+        div.stButton > button[kind="primary"] {{
+            background: var(--pnd-primary); border: none; border-radius: 8px; font-weight: 700;
+        }}
+        div[data-testid="stExpander"] {{ border: 1px solid var(--pnd-border); border-radius: 10px; }}
+        section[data-testid="stSidebar"] {{ border-right: 1px solid var(--pnd-border); }}
+        {_dark_rules}
+        </style>
+    """, unsafe_allow_html=True)
+
     st.title("📊 Plataforma BI INEP/PND — Auditoria de Layouts")
     st.caption(
         f"Motor v{APP_VERSION} · camada Streamlit v{STREAMLIT_APP_VERSION}. "
@@ -10335,6 +10405,9 @@ def _run_streamlit_app() -> None:
         st.info("Sem esses pacotes, algumas análises não rodam. Após instalar, o erro desaparece.")
 
     with st.sidebar:
+        st.radio("🎨 Tema", ["Claro", "Escuro"], key="tema_app", horizontal=True,
+                 help="Alterna entre tema claro e escuro. A troca aplica-se ao recarregar a página automaticamente.")
+        st.divider()
         st.header("1. Entrada de dados")
         modo = st.radio("Fonte dos dados",
                         ["Base de demonstração", "Enviar planilha (.xlsx)"], index=0)
@@ -10609,6 +10682,7 @@ def _run_streamlit_app() -> None:
                 st.session_state["bi_tempo"] = round(_time.time() - _t0, 1)
                 st.session_state["bi_outdir"] = str(outdir)
                 st.session_state["bi_ok"] = True
+                st.session_state["bi_eh_demo"] = (modo != "Enviar planilha (.xlsx)")
             except SystemExit as e:
                 st.session_state["bi_ok"] = False
                 st.error(f"O processamento foi interrompido pelo motor: {e}")
@@ -10620,7 +10694,32 @@ def _run_streamlit_app() -> None:
 
     outdir_str = st.session_state.get("bi_outdir")
     if not outdir_str or not st.session_state.get("bi_ok"):
-        st.info("Configure a entrada na barra lateral e clique em **Rodar análise** para começar.")
+        st.markdown("#### Bem-vindo(a) à plataforma de auditoria de layouts do PND")
+        st.markdown(
+            "Esta aplicação transforma os microdados de locais/salas de prova (layouts **N02, N50, N52, N60, "
+            "N90, N91**) em uma camada completa de **análise, auditoria e investigação** — de forma interativa e "
+            "adaptativa aos layouts que você enviar.")
+        _co1, _co2, _co3 = st.columns(3)
+        with _co1:
+            st.markdown("##### 1️⃣ Como começar")
+            st.markdown("- Na barra lateral, escolha **base de demonstração** ou **enviar planilha (.xlsx)**\n"
+                        "- Nomeie as abas como N02, N50, N90… (o motor também reconhece pelas colunas)\n"
+                        "- Se faltar RAM, **desmarque** « Gerar dashboard HTML »\n"
+                        "- Clique em **▶️ Rodar análise**")
+        with _co2:
+            st.markdown("##### 2️⃣ O que você poderá explorar")
+            st.markdown("- **Visão Geral** com KPIs, alertas e narrativa\n"
+                        "- **Análises** em 11 capítulos temáticos (117 tabelas + gráficos + mapa)\n"
+                        "- **Central de Casos** com drill-down até o participante\n"
+                        "- **FGV × INEP** com faixas de distância e casos críticos")
+        with _co3:
+            st.markdown("##### 3️⃣ Adaptativo aos seus dados")
+            st.markdown("- Só aparecem análises **possíveis** com os layouts enviados\n"
+                        "- Cada número é **rastreável** até os registros de origem\n"
+                        "- Tudo **exportável** (CSV, Excel, HTML)\n"
+                        "- A demonstração usa o **mesmo motor** dos dados reais")
+        st.info("👈 Configure a entrada na barra lateral e clique em **▶️ Rodar análise** para começar. "
+                "Sem arquivo? Use a **base de demonstração** para ver tudo funcionando.")
         return
 
     outdir = _Path(outdir_str)
@@ -10647,6 +10746,20 @@ def _run_streamlit_app() -> None:
                                file_name="Metadados_Insights.json", mime="application/json", use_container_width=True)
 
     st.success("Análise concluída. Explore nas abas abaixo — tudo de forma nativa e interativa — ou baixe os arquivos.")
+    # v38 (#28): distingue visualmente demonstração × dados do usuário (mesmo motor).
+    _eh_demo = st.session_state.get("bi_eh_demo", modo != "Enviar planilha (.xlsx)")
+    if _eh_demo:
+        st.markdown(
+            "<div style='display:inline-block;background:#fff3cd;border:1px solid #ffe08a;color:#7a5b00;"
+            "border-radius:20px;padding:4px 14px;font-weight:700;font-size:13px'>🧪 Modo demonstração — "
+            "dados de exemplo. Tudo isto é o que a aplicação faz com os seus dados reais.</div>",
+            unsafe_allow_html=True)
+    else:
+        st.markdown(
+            "<div style='display:inline-block;background:#e6f4ea;border:1px solid #a3d9b1;color:#1e6b34;"
+            "border-radius:20px;padding:4px 14px;font-weight:700;font-size:13px'>📊 Sua análise — "
+            "dados reais carregados por você.</div>",
+            unsafe_allow_html=True)
     if st.session_state.get("bi_uf_info"):
         st.info("🔎 " + st.session_state["bi_uf_info"] + " Todos os números abaixo refletem esse recorte.")
 
@@ -10680,6 +10793,12 @@ def _run_streamlit_app() -> None:
                 _conv = _pd.to_numeric(_dat[_c], errors="coerce")
                 if len(_dat) and _conv.notna().sum() >= max(1, int(0.8 * len(_dat))):
                     _dat[_c] = _conv
+                else:
+                    # v38: limpa escapes _x0020_ em células de texto (nomes de município/local etc.)
+                    try:
+                        _dat[_c] = _dat[_c].map(lambda _v: _limpa_nome(_v) if isinstance(_v, str) and "_x" in _v else _v)
+                    except Exception:
+                        pass
             limpo[_nome] = _dat
         return limpo
 
@@ -10690,9 +10809,490 @@ def _run_streamlit_app() -> None:
         except Exception as e:  # noqa
             st.warning(f"Não foi possível ler a planilha para a visão nativa: {e}")
 
-    tab_vg, tab_nat, tab_fgv, tab_dash, tab_meta = st.tabs(
-        ["🏠 Visão Geral", "📊 Análises (nativo, interativo)", "🛰️ FGV × INEP",
+    tab_vg, tab_nat, tab_casos, tab_fgv, tab_dash, tab_meta = st.tabs(
+        ["🏠 Visão Geral", "📊 Análises (nativo, interativo)", "🚨 Central de Casos", "🛰️ FGV × INEP",
          "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
+
+    # ======================= (🚨) CENTRAL DE CASOS ==========================
+    with tab_casos:
+        st.subheader("🚨 Central de Casos — auditoria rastreável")
+        st.caption("Visão consolidada dos problemas detectáveis diretamente na base carregada. Cada linha responde às "
+                   "3 perguntas: O QUE (quantidade), POR QUE (regra) e QUEM (registros individuais, com export).")
+        if arquivo is None:
+            st.info("Envie uma planilha (com o N02) para ver a central de casos sobre os seus dados.")
+        else:
+            try:
+                import io as _ioc
+                import pandas as _pdc
+                _xc = _excelfile_fast(_ioc.BytesIO(arquivo.getvalue()))
+                _base = None
+                for _sh in _xc.sheet_names:
+                    _dc = _read_excel_fast(_ioc.BytesIO(arquivo.getvalue()), sheet_name=_sh)
+                    if any(str(c).upper() == "CO_INSCRICAO" for c in _dc.columns):
+                        _base = _dc
+                        break
+                if _base is None:
+                    st.warning("Não encontrei uma aba com CO_INSCRICAO (N02) para montar a central de casos.")
+                else:
+                    _base = _limpa_colunas_nome(_base)   # v34: nomes sem escapes _x0020_
+                    _N = len(_base)
+                    _distc = next((c for c in _base.columns if str(c).upper() in ("NU_DISTANCIA", "DISTANCIA")), None)
+                    _dist = _dist_km(_base[_distc]) if _distc else None
+                    _kitc = next((c for c in _base.columns if str(c).upper() == "ID_KIT_PROVA"), None)
+                    _salac = next((c for c in _base.columns if str(c).upper() == "ID_SALA"), None)
+                    _locc = next((c for c in _base.columns if str(c).upper() == "CO_LOCAL"), None)
+
+                    # Define os conjuntos de casos (só os calculáveis com o que existe)
+                    _casos = []  # (severidade, análise, regra, entidade, dataframe)
+                    if _dist is not None:
+                        _crit = _base[_dist > 20]
+                        _aten = _base[(_dist >= 15) & (_dist <= 20)]
+                        _casos.append(("🔴 Crítico", "Deslocamentos críticos (> 20 km)",
+                                       "Distância (NU_DISTANCIA) acima do limite contratual de 20 km.",
+                                       "Participante", _crit.assign(DISTANCIA_KM=_dist[_dist > 20].round(2))))
+                        _casos.append(("🟠 Atenção", "Deslocamentos de atenção (15–20 km)",
+                                       "Distância entre 15 e 20 km — próximo do limite.",
+                                       "Participante", _aten.assign(DISTANCIA_KM=_dist[(_dist >= 15) & (_dist <= 20)].round(2))))
+                    if _kitc is not None:
+                        _semkit = _base[_base[_kitc].isna() |
+                                        (_base[_kitc].astype(str).str.strip().isin(["", "nan", "None"]))]
+                        _casos.append(("🔴 Crítico", "Participantes sem kit (ID_KIT_PROVA vazio)",
+                                       "Todo ensalado deve ter ID_KIT_PROVA (deve espelhar o N91).",
+                                       "Participante", _semkit))
+                    if _salac is not None:
+                        _gc = [c for c in [_locc, _salac] if c is not None]
+                        _oc = _base.groupby(_gc).size().reset_index(name="Participantes")
+                        _oc40 = _oc[_oc["Participantes"] > 40]
+                        _casos.append(("🟠 Atenção", "Salas com ocupação elevada (> 40)",
+                                       "Referência contratual de ~40 participantes por sala.",
+                                       "Sala", _oc40))
+
+                    # Painel consolidado
+                    _resumo = _pdc.DataFrame([{
+                        "Severidade": _s, "Análise": _a, "Entidade": _e,
+                        "Quantidade": len(_df), "Universo": _N if _e == "Participante" else "—",
+                        "%": f"{len(_df) / _N * 100:.2f}%" if _e == "Participante" and _N else "—",
+                    } for _s, _a, _r, _e, _df in _casos])
+                    st.markdown("#### Resumo consolidado")
+                    st.dataframe(_resumo, use_container_width=True, hide_index=True)
+                    _tot_crit = sum(len(_df) for _s, _a, _r, _e, _df in _casos if "Crítico" in _s)
+                    _tot_at = sum(len(_df) for _s, _a, _r, _e, _df in _casos if "Atenção" in _s)
+                    _m1, _m2, _m3 = st.columns(3)
+                    _m1.metric("🔴 Ocorrências críticas", f"{_tot_crit:,}".replace(",", "."))
+                    _m2.metric("🟠 Ocorrências de atenção", f"{_tot_at:,}".replace(",", "."))
+                    _m3.metric("Tipos de caso", len(_casos))
+
+                    # v32: RANKINGS dinâmicos (#20) — calculados da base, só o que os dados suportam
+                    _muncol_r = next((c for c in _base.columns if str(c).upper() in
+                                      ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                    _rk_disp = []
+                    if _muncol_r is not None and _dist is not None:
+                        _bd = _base.assign(_d=_dist)
+                        _bd = _bd[_bd["_d"].notna()]
+                        # ranking: municípios com mais casos críticos (>20 km)
+                        _rc = _bd[_bd["_d"] > 20].groupby(_muncol_r).size().sort_values(ascending=False).head(10)
+                        if not _rc.empty:
+                            _rk_disp.append(("Municípios com mais casos críticos (> 20 km)",
+                                             _rc.reset_index().rename(columns={_muncol_r: "Município", 0: "Casos críticos"})))
+                        # ranking: municípios com maior distância média (mín. 20 participantes)
+                        _rm = _bd.groupby(_muncol_r)["_d"].agg(["mean", "count"])
+                        _rm = _rm[_rm["count"] >= 20].sort_values("mean", ascending=False).head(10)
+                        if not _rm.empty:
+                            _rmv = _rm.reset_index()
+                            _rmv.columns = ["Município", "Distância média (km)", "Participantes"]
+                            _rmv["Distância média (km)"] = _rmv["Distância média (km)"].round(2)
+                            _rk_disp.append(("Municípios com maior distância média", _rmv))
+                    if _salac is not None:
+                        _gc3 = [c for c in [_locc, _salac] if c is not None]
+                        _ro = _base.groupby(_gc3).size().reset_index(name="Participantes").sort_values(
+                            "Participantes", ascending=False).head(10)
+                        _rk_disp.append(("Salas com maior ocupação", _ro))
+                    if _locc is not None:
+                        _rl = _base.groupby(_locc).size().reset_index(name="Participantes").sort_values(
+                            "Participantes", ascending=False).head(10)
+                        _rl.columns = ["Local", "Participantes"]
+                        _rk_disp.append(("Locais com mais participantes", _rl))
+
+                    if _rk_disp:
+                        st.markdown("#### 📊 Rankings")
+                        st.caption("Calculados dinamicamente a partir da base carregada — só aparecem os rankings que os "
+                                   "seus dados suportam.")
+                        _rk_tabs = st.tabs([r[0] for r in _rk_disp])
+                        for _t, (_titulo, _dfr) in zip(_rk_tabs, _rk_disp):
+                            with _t:
+                                if _px is not None and len(_dfr.columns) >= 2:
+                                    try:
+                                        _xr, _yr = _dfr.columns[0], _dfr.columns[-1]
+                                        _figr = _px.bar(_dfr, x=_xr, y=_yr, text_auto=True)
+                                        _figr.update_layout(xaxis_title="", margin=dict(t=10), height=300)
+                                        st.plotly_chart(_figr, use_container_width=True)
+                                    except Exception:
+                                        pass
+                                st.dataframe(_dfr, use_container_width=True, hide_index=True)
+
+                    # v33 (#16): EXPLORADOR HIERÁRQUICO — drill-down UF → município → local → sala → participante
+                    st.markdown("#### 🧭 Explorador hierárquico")
+                    st.caption("Desça do macro ao detalhe: escolha UF, depois município, local e sala. Os KPIs e a lista "
+                               "de participantes respondem a cada nível. Deixe « (todos) » para não filtrar aquele nível.")
+                    _niveis = [("SG_UF_PROVA", "UF", "🗺️"), ("NO_MUNICIPIO_PROVA", "Município", "📍"),
+                               ("CO_LOCAL", "Local", "🏫"), ("ID_SALA", "Sala", "🚪")]
+                    _niveis = [(c, r, i) for c, r, i in _niveis if c in _base.columns]
+                    if _niveis:
+                        _flt = _base.copy()
+                        if _distc:
+                            _flt = _flt.assign(_dkm=_dist_km(_flt[_distc]))
+                        _cols_n = st.columns(len(_niveis))
+                        _escolhas = {}
+                        for _ix, (_c, _r, _ic) in enumerate(_niveis):
+                            _ops = ["(todos)"] + sorted(_flt[_c].dropna().astype(str).unique().tolist())[:2000]
+                            _pick = _cols_n[_ix].selectbox(f"{_ic} {_r}", _ops, key=f"hier_{_c}")
+                            _escolhas[_c] = _pick
+                            if _pick != "(todos)":
+                                _flt = _flt[_flt[_c].astype(str) == _pick]
+                        # KPIs do recorte
+                        _kc1, _kc2, _kc3 = st.columns(3)
+                        _kc1.metric("👥 Participantes", f"{len(_flt):,}".replace(",", "."))
+                        if "_dkm" in _flt.columns:
+                            _dd3 = _flt["_dkm"].dropna()
+                            _kc2.metric("📏 Distância média", f"{_dd3.mean():.2f} km" if not _dd3.empty else "—")
+                            _kc3.metric("🔴 Críticos (>20 km)", f"{int((_dd3 > 20).sum()):,}".replace(",", "."))
+                        # participantes do recorte
+                        _colf = [c for c in ["CO_INSCRICAO", "NO_MUNICIPIO_PROVA", "CO_LOCAL", "CO_BLOCO", "ID_SALA",
+                                             "TP_ENSALAMENTO", "ID_KIT_PROVA", "_dkm"] if c in _flt.columns]
+                        _vf = _flt[_colf].rename(columns={"_dkm": "DISTANCIA_KM"}) if _colf else _flt
+                        if "DISTANCIA_KM" in _vf.columns:
+                            _vf = _vf.sort_values("DISTANCIA_KM", ascending=False)
+                        st.dataframe(_vf.head(1000), use_container_width=True, height=300)
+                        st.download_button("⬇️ Exportar recorte (CSV)", _vf.to_csv(index=False).encode("utf-8-sig"),
+                                           file_name="recorte_hierarquico.csv", mime="text/csv", key="hier_dl")
+
+                    # v29: exporta a Central de Casos como HTML autocontido (mesmos dados,
+                    # mesmas regras) — garante os ganhos também num relatório exportável.
+                    def _gera_html_casos():
+                        import html as _html
+                        _esc_h = lambda x: _html.escape(str(x))
+                        _blocos = []
+                        for _s, _a, _r, _e, _df in _casos:
+                            _cor = "#c0392b" if "Crítico" in _s else ("#e67e22" if "Atenção" in _s else "#27ae60")
+                            _qtd = len(_df)
+                            _pct = f" · {_qtd / _N * 100:.2f}% de {_N:,}".replace(",", ".") if _e == "Participante" and _N else ""
+                            _colsh = [c for c in ["CO_INSCRICAO", "SG_UF_PROVA", "NO_MUNICIPIO_PROVA", "CO_LOCAL",
+                                                  "CO_BLOCO", "ID_SALA", "TP_ENSALAMENTO", "ID_KIT_PROVA",
+                                                  "DISTANCIA_KM", "Participantes"] if c in _df.columns]
+                            _dfh = (_df[_colsh] if _colsh else _df).head(500)
+                            _thead = "".join(f"<th>{_esc_h(c)}</th>" for c in _dfh.columns)
+                            _rows = ""
+                            for _, _row in _dfh.iterrows():
+                                _rows += "<tr>" + "".join(f"<td>{_esc_h(v)}</td>" for v in _row.values) + "</tr>"
+                            _nota = "" if _qtd <= 500 else f"<p class='nota'>Mostrando os primeiros 500 de {_qtd:,} registros.</p>".replace(",", ".")
+                            _blocos.append(f"""
+                            <section>
+                              <h2 style="border-left:5px solid {_cor}">{_esc_h(_s)} · {_esc_h(_a)}</h2>
+                              <p class="meta"><b>Entidade:</b> {_esc_h(_e)} &nbsp;|&nbsp; <b>Quantidade:</b> {_qtd:,}{_pct}</p>
+                              <p class="regra"><b>Regra (POR QUE):</b> {_esc_h(_r)}</p>
+                              {_nota}
+                              <table><thead><tr>{_thead}</tr></thead><tbody>{_rows}</tbody></table>
+                            </section>""".replace("{_qtd:,}", f"{_qtd:,}".replace(",", ".")))
+                        _resumo_rows = "".join(
+                            f"<tr><td>{_esc_h(r['Severidade'])}</td><td>{_esc_h(r['Análise'])}</td>"
+                            f"<td>{_esc_h(r['Entidade'])}</td><td style='text-align:right'>{r['Quantidade']}</td>"
+                            f"<td style='text-align:right'>{_esc_h(r['%'])}</td></tr>"
+                            for _, r in _resumo.iterrows())
+                        from datetime import datetime as _dt
+
+                        # v30: seções extras no HTML — faixas de distância e ocupação por sala
+                        _extra = ""
+
+                        # v35: cards de KPI no HTML (mesmos da Visão Geral, calculados da base)
+                        def _card_h(_t, _v, _ctx, _fnt, _cor):
+                            return f"""<div style="flex:1 1 180px;background:#fff;border:1px solid #e3e8ef;
+                            border-left:5px solid {_cor};border-radius:12px;padding:14px 16px;min-width:180px;">
+                            <div style="font-size:11px;font-weight:700;color:#5b6b7f;text-transform:uppercase">{_t}</div>
+                            <div style="font-size:26px;font-weight:800;color:#1f4e79;margin:4px 0">{_v}</div>
+                            <div style="font-size:12px;color:#42546b">{_ctx}</div>
+                            <div style="font-size:10px;color:#8a94a3;margin-top:6px">Fonte: {_fnt}</div></div>"""
+                        _fh = lambda v: f"{int(v):,}".replace(",", ".")
+                        _cds = [_card_h("Participantes", _fh(_N), "Total identificado na base.", "N02", "#2e86c1")]
+                        if _salac is not None:
+                            _ens_h = int(_base[_salac].notna().sum())
+                            _cds.append(_card_h("Ensalados", _fh(_ens_h),
+                                                f"{_ens_h / _N * 100:.1f}% com sala atribuída." if _N else "", "N02",
+                                                "#27ae60" if _ens_h == _N else "#e67e22"))
+                            _nsl = int(_base[_salac].nunique(dropna=True))
+                            _cds.append(_card_h("Salas", _fh(_nsl), f"Ocupação média {_N / _nsl:.1f}/sala." if _nsl else "", "N02", "#2e86c1"))
+                        if _kitc is not None:
+                            _sk_h = int(_base[_kitc].isna().sum())
+                            _cds.append(_card_h("Sem kit", _fh(_sk_h), f"{_sk_h / _N * 100:.0f}% sem ID_KIT_PROVA." if _N else "",
+                                                "N02", "#c0392b" if _sk_h / max(_N, 1) > .5 else "#e67e22"))
+                        if _dist is not None:
+                            _ddh = _dist.dropna()
+                            _cds.append(_card_h("Distância média", f"{_ddh.mean():.2f} km", "FGV, residência→prova.", "N02", "#2e86c1"))
+                            _ncr = int((_ddh > 20).sum())
+                            _cds.append(_card_h("Críticos > 20 km", _fh(_ncr), f"{_ncr / _N * 100:.2f}% dos participantes." if _N else "",
+                                                "N02", "#c0392b" if _ncr else "#27ae60"))
+                        _cards_html = ('<div style="display:flex;flex-wrap:wrap;gap:12px;margin:16px 0">'
+                                       + "".join(_cds) + "</div>")
+
+                        if _dist is not None:
+                            _dd2 = _dist.dropna()
+                            _bins = [-0.001, 1, 3, 5, 10, 20, 30, float("inf")]
+                            _labs = ["< 1 km", "1 – 3 km", "3 – 5 km", "5 – 10 km", "10 – 20 km", "20 – 30 km", "> 30 km"]
+                            _fx = _pdc.cut(_dd2, bins=_bins, labels=_labs).value_counts().reindex(_labs).fillna(0).astype(int)
+                            _tt = int(_fx.sum())
+                            _fx_rows = "".join(
+                                f"<tr><td>{_esc_h(_k)}</td><td style='text-align:right'>{_v}</td>"
+                                f"<td style='text-align:right'>{_v / _tt * 100:.1f}%</td></tr>"
+                                for _k, _v in _fx.items())
+                            _extra += f"""<section><h2 style="border-left:5px solid #2e86c1">📏 Faixas de distância (FGV)</h2>
+                            <p class="meta"><b>Distância média:</b> {_dd2.mean():.2f} km &nbsp;|&nbsp;
+                            <b>&gt; 20 km:</b> {int((_dd2 > 20).sum())} &nbsp;|&nbsp; <b>&gt; 30 km:</b> {int((_dd2 > 30).sum())}</p>
+                            <table><thead><tr><th>Faixa</th><th>Participantes</th><th>%</th></tr></thead>
+                            <tbody>{_fx_rows}</tbody></table></section>"""
+                        if _salac is not None:
+                            _gc2 = [c for c in [_locc, _salac] if c is not None]
+                            _oc2 = _base.groupby(_gc2).size().reset_index(name="Participantes")
+                            _top = _oc2.sort_values("Participantes", ascending=False).head(50)
+                            _oc_head = "".join(f"<th>{_esc_h(c)}</th>" for c in _top.columns)
+                            _oc_rows = "".join("<tr>" + "".join(f"<td>{_esc_h(v)}</td>" for v in r.values) + "</tr>"
+                                               for _, r in _top.iterrows())
+                            _extra += f"""<section><h2 style="border-left:5px solid #e67e22">🪑 Ocupação por sala</h2>
+                            <p class="meta"><b>Salas:</b> {len(_oc2):,} &nbsp;|&nbsp; <b>Média/sala:</b> {_oc2['Participantes'].mean():.1f}
+                            &nbsp;|&nbsp; <b>Salas &gt; 40:</b> {int((_oc2['Participantes'] > 40).sum())} (referência ~40/sala)</p>
+                            <p class="nota">Top 50 salas mais ocupadas.</p>
+                            <table><thead><tr>{_oc_head}</tr></thead><tbody>{_oc_rows}</tbody></table></section>""".replace("{len(_oc2):,}", f"{len(_oc2):,}".replace(",", "."))
+
+                        # v36: explorador hierárquico no HTML — árvore navegável (details)
+                        try:
+                            _ufc_h = next((c for c in _base.columns if str(c).upper() in
+                                           ("SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA")), None)
+                            _munc_h = next((c for c in _base.columns if str(c).upper() in
+                                            ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                            if _munc_h is not None:
+                                _bh = _base.copy()
+                                _bh["_d"] = _dist if _dist is not None else float("nan")
+                                _uf_lbl = (str(_bh[_ufc_h].dropna().astype(str).iloc[0]) if _ufc_h is not None and _bh[_ufc_h].notna().any() else "UF")
+                                _arvore = ""
+                                # agrupa por município (ordenado por nº de participantes)
+                                _mun_g = _bh.groupby(_munc_h)
+                                _mun_ord = _mun_g.size().sort_values(ascending=False)
+                                for _mun, _qm in _mun_ord.head(60).items():
+                                    _sub = _mun_g.get_group(_mun)
+                                    _dm = _sub["_d"].dropna()
+                                    _cm = int((_dm > 20).sum()) if not _dm.empty else 0
+                                    _dmed = f"{_dm.mean():.2f} km" if not _dm.empty else "—"
+                                    _tag_c = f" · <span style='color:#c0392b'>🔴 {_cm} críticos</span>" if _cm else ""
+                                    # nível local (se houver)
+                                    _loc_html = ""
+                                    if _locc is not None:
+                                        _lg = _sub.groupby(_locc).size().sort_values(ascending=False).head(30)
+                                        _linhas_l = "".join(
+                                            f"<tr><td>{_esc_h(_lc)}</td><td style='text-align:right'>{_ql}</td></tr>"
+                                            for _lc, _ql in _lg.items())
+                                        _loc_html = (f"<table style='margin:6px 0 10px 18px;width:auto'>"
+                                                     f"<thead><tr><th>Local</th><th>Participantes</th></tr></thead>"
+                                                     f"<tbody>{_linhas_l}</tbody></table>")
+                                    _arvore += (f"<details style='margin:4px 0 4px 14px'><summary style='cursor:pointer'>"
+                                                f"<b>{_esc_h(_mun)}</b> — {int(_qm):,} participantes · média {_dmed}{_tag_c}".replace(",", ".")
+                                                + f"</summary>{_loc_html}</details>")
+                                _extra += (f"<section><h2 style='border-left:5px solid #16a085'>🧭 Explorador hierárquico "
+                                           f"({_esc_h(_uf_lbl)})</h2><p class='meta'>Clique em um município para expandir os "
+                                           f"locais. Top 60 municípios por número de participantes.</p>"
+                                           f"<details open style='margin-left:0'><summary style='cursor:pointer'>"
+                                           f"<b>🗺️ {_esc_h(_uf_lbl)}</b> — {_N:,} participantes</summary>{_arvore}</details>"
+                                           f"</section>").replace("{_N:,}", f"{_N:,}".replace(",", "."))
+                        except Exception:
+                            pass
+
+                        # v34: rankings no HTML (mesmos das abas)
+                        try:
+                            for _rt, _rdf in _rk_disp:
+                                _rhead = "".join(f"<th>{_esc_h(c)}</th>" for c in _rdf.columns)
+                                _rrows = "".join("<tr>" + "".join(f"<td>{_esc_h(v)}</td>" for v in r.values) + "</tr>"
+                                                 for _, r in _rdf.head(10).iterrows())
+                                _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🏅 {_esc_h(_rt)}</h2>
+                                <table><thead><tr>{_rhead}</tr></thead><tbody>{_rrows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+
+                        # v37: comparativo FGV × INEP no HTML (quando a 2ª fonte está anexada)
+                        try:
+                            _inep_b = st.session_state.get("bi_inep_bytes")
+                            _kins = next((c for c in _base.columns if str(c).upper() in
+                                          ("CO_INSCRICAO", "NU_INSCRICAO")), None)
+                            if _inep_b and _distc and _kins:
+                                import io as _ioh
+                                _nm = str(st.session_state.get("bi_inep_nome", "inep")).lower()
+                                _di = (_pdc.read_csv(_ioh.BytesIO(_inep_b)) if _nm.endswith(".csv")
+                                       else _read_excel_fast(_ioh.BytesIO(_inep_b)))
+                                _ki2 = next((c for c in _di.columns if "INSCRICAO" in str(c).upper()), None)
+                                _kd2 = next((c for c in _di.columns if "DIST" in str(c).upper() or "KM" in str(c).upper()), None)
+                                if _ki2 and _kd2:
+                                    _fg = _base[[_kins, _distc]].copy()
+                                    _fg.columns = ["CO_INSCRICAO", "DIST_FGV"]
+                                    _in = _di[[_ki2, _kd2]].copy()
+                                    _in.columns = ["CO_INSCRICAO", "DIST_INEP"]
+                                    for _dfx in (_fg, _in):
+                                        _dfx["CO_INSCRICAO"] = _dfx["CO_INSCRICAO"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+                                    _fg["DIST_FGV"] = _dist_km(_fg["DIST_FGV"]).round(2)
+                                    _in["DIST_INEP"] = _dist_km(_in["DIST_INEP"]).round(2)
+                                    _mg = _fg.merge(_in, on="CO_INSCRICAO", how="inner").dropna()
+                                    if not _mg.empty:
+                                        _mg["DIF"] = (_mg["DIST_INEP"] - _mg["DIST_FGV"]).abs()
+                                        _ncf = int((_mg["DIST_FGV"] > 20).sum())
+                                        _nci = int((_mg["DIST_INEP"] > 20).sum())
+                                        _ndv = int((_mg["DIF"] > 5).sum())
+                                        _inv = int(((_mg["DIST_INEP"] > 20) & (_mg["DIST_FGV"] <= 20)).sum())
+                                        def _cl(_x):
+                                            return ("Concordam (≤1 km)" if _x <= 1 else "Leve (1–5 km)" if _x <= 5
+                                                    else "Relevante (5–20 km)" if _x <= 20 else "Crítica (>20 km)")
+                                        _cls = _mg["DIF"].apply(_cl).value_counts()
+                                        _clrows = "".join(f"<tr><td>{_esc_h(_k)}</td><td style='text-align:right'>{_v}</td></tr>"
+                                                          for _k, _v in _cls.items())
+                                        _extra += f"""<section><h2 style="border-left:5px solid #d35400">🛰️ Comparativo FGV × INEP</h2>
+                                        <p class="meta"><b>Participantes cruzados:</b> {len(_mg):,} &nbsp;|&nbsp;
+                                        <b>Média FGV:</b> {_mg['DIST_FGV'].mean():.2f} km &nbsp;|&nbsp;
+                                        <b>Média INEP:</b> {_mg['DIST_INEP'].mean():.2f} km &nbsp;|&nbsp;
+                                        <b>Diferença média:</b> {(_mg['DIST_INEP'] - _mg['DIST_FGV']).mean():.2f} km</p>
+                                        <p class="meta"><b>Críticos por FGV:</b> {_ncf} &nbsp;|&nbsp; <b>Críticos por INEP:</b> {_nci}
+                                        &nbsp;|&nbsp; <b>Divergências &gt;5 km:</b> {_ndv} &nbsp;|&nbsp;
+                                        <b style="color:#c0392b">Investigar (INEP-crítico, FGV-ok):</b> {_inv}</p>
+                                        <table style="width:auto"><thead><tr><th>Classificação da divergência</th><th>Participantes</th></tr></thead>
+                                        <tbody>{_clrows}</tbody></table></section>""".replace("{len(_mg):,}", f"{len(_mg):,}".replace(",", "."))
+                        except Exception:
+                            pass
+
+                        return f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1">
+                        <title>Central de Casos — Auditoria PND</title><style>
+                        body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#1a2733;
+                               max-width:1200px; margin:24px auto; padding:0 16px; line-height:1.5; }}
+                        h1 {{ color:#1f4e79; }} h2 {{ color:#1f4e79; padding-left:10px; margin-top:34px; }}
+                        table {{ border-collapse:collapse; width:100%; font-size:13px; margin:10px 0 20px; }}
+                        th,td {{ border:1px solid #e3e8ef; padding:6px 8px; text-align:left; }}
+                        th {{ background:#1f4e79; color:#fff; position:sticky; top:0; }}
+                        tr:nth-child(even) td {{ background:#f7f9fc; }}
+                        .meta,.regra,.nota {{ font-size:14px; }} .nota {{ color:#8a94a3; font-style:italic; }}
+                        .cab {{ background:#eef4fb; border:1px solid #d5e3f2; border-radius:10px; padding:14px 18px; }}
+                        </style></head><body>
+                        <h1>🚨 Central de Casos — Auditoria de Layouts PND</h1>
+                        <div class="cab"><b>Universo analisado:</b> {_N:,} participantes &nbsp;|&nbsp;
+                        <b>Gerado em:</b> {_dt.now().strftime('%d/%m/%Y %H:%M')} &nbsp;|&nbsp;
+                        <b>Motor v{APP_VERSION} · camada v{STREAMLIT_APP_VERSION}</b><br>
+                        Cada seção responde: O QUE (quantidade), POR QUE (regra) e QUEM (registros).</div>
+                        {_cards_html}
+                        <h2 style="border-left:5px solid #2e86c1">Resumo consolidado</h2>
+                        <table><thead><tr><th>Severidade</th><th>Análise</th><th>Entidade</th>
+                        <th>Quantidade</th><th>%</th></tr></thead><tbody>{_resumo_rows}</tbody></table>
+                        {_extra}
+                        {''.join(_blocos)}
+                        </body></html>""".replace("{_N:,}", f"{_N:,}".replace(",", "."))
+
+                    st.download_button(
+                        "⬇️ Baixar Central de Casos em HTML (relatório exportável)",
+                        _gera_html_casos().encode("utf-8"),
+                        file_name="central_de_casos_PND.html", mime="text/html",
+                        help="Relatório HTML autocontido com o resumo e os registros de cada caso (até 500 por caso), "
+                             "abrindo em qualquer navegador — os mesmos ganhos da visão nativa, exportáveis.")
+
+                    # v31: HTML UNIFICADO (Dashboard_BI.html do motor + Central de Casos).
+                    # Sob demanda (lê o HTML de ~13 MB só quando pedido), para não pesar/OOM.
+                    if html_path.exists():
+                        if st.checkbox("➕ Gerar HTML unificado (Dashboard do motor + Central de Casos)",
+                                       value=False, key="casos_unif",
+                                       help="Combina o dashboard completo do motor e este relatório de casos num único "
+                                            "arquivo .html. Lê o dashboard de ~13 MB — pode consumir memória; use sob demanda."):
+                            try:
+                                _dash_html = html_path.read_text(encoding="utf-8", errors="ignore")
+                                _casos_html = _gera_html_casos()
+                                # extrai só o corpo do relatório de casos para injetar
+                                _ini = _casos_html.find("<body>")
+                                _fim = _casos_html.rfind("</body>")
+                                _corpo_casos = _casos_html[_ini + 6:_fim] if (_ini != -1 and _fim != -1) else _casos_html
+                                _sep = ('<hr style="margin:40px 0;border:none;border-top:3px solid #1f4e79">'
+                                        '<div style="max-width:1200px;margin:0 auto;padding:0 16px">'
+                                        + _corpo_casos + '</div>')
+                                if "</body>" in _dash_html:
+                                    _unif = _dash_html.replace("</body>", _sep + "</body>", 1)
+                                else:
+                                    _unif = _dash_html + _sep
+                                st.download_button(
+                                    "⬇️ Baixar HTML unificado (dashboard + casos)",
+                                    _unif.encode("utf-8"),
+                                    file_name="dashboard_e_central_de_casos_PND.html", mime="text/html",
+                                    key="dl_unif")
+                                st.caption(f"Arquivo unificado pronto (~{len(_unif.encode('utf-8')) // (1024 * 1024)} MB).")
+                            except Exception as _eu:  # noqa
+                                st.warning(f"Não foi possível gerar o HTML unificado: {_eu}")
+                    else:
+                        st.caption("Para gerar um HTML unificado com o dashboard do motor, rode com a opção "
+                                   "« Gerar dashboard HTML » marcada (exige mais memória).")
+
+                    # Drill-down: escolher um caso e ver os registros
+                    st.markdown("#### 🔎 Investigar um caso")
+                    _nomes = [f"{_s}  ·  {_a}  ({len(_df)})" for _s, _a, _r, _e, _df in _casos]
+                    _esc = st.selectbox("Selecione o problema:", _nomes, key="casos_sel")
+                    _i = _nomes.index(_esc)
+                    _sev, _ana, _regra, _ent, _dfc = _casos[_i]
+                    st.markdown(f"**{_sev} · {_ana}**")
+                    st.markdown(f"**Regra (POR QUE):** {_regra}")
+                    st.markdown(f"**O QUE:** {len(_dfc):,} {_ent.lower()}(s)".replace(",", ".") +
+                                (f" de {_N:,} ({len(_dfc) / _N * 100:.2f}%)".replace(",", ".") if _ent == "Participante" and _N else ""))
+                    if not _dfc.empty:
+                        # colunas de auditoria relevantes
+                        _cols = [c for c in ["CO_INSCRICAO", "NU_CPF", "SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA",
+                                             "NO_MUNICIPIO_PROVA", "CO_MUNICIPIO_PROVA", "CO_LOCAL", "NO_LOCAL_PROVA",
+                                             "CO_BLOCO", "ID_SALA", "TP_ENSALAMENTO", "ID_KIT_PROVA", "DISTANCIA_KM",
+                                             "Participantes"] if c in _dfc.columns]
+                        _view = _dfc[_cols] if _cols else _dfc
+                        # Filtragem cruzada (#15/#16): por UF e por município, quando existirem
+                        _fc1, _fc2 = st.columns(2)
+                        _ufcol_v = next((c for c in _view.columns if str(c).upper() in
+                                         ("SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA")), None)
+                        if _ufcol_v is not None:
+                            _ufs_v = ["(todas)"] + sorted(_view[_ufcol_v].dropna().astype(str).unique().tolist())
+                            _uf_pick = _fc1.selectbox("Filtrar por UF:", _ufs_v, key="casos_uf")
+                            if _uf_pick != "(todas)":
+                                _view = _view[_view[_ufcol_v].astype(str) == _uf_pick]
+                        _muncol_v = next((c for c in _view.columns if str(c).upper() in
+                                          ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                        if _muncol_v is not None and not _view.empty:
+                            _muns_v = ["(todos)"] + sorted(_view[_muncol_v].dropna().astype(str).unique().tolist())
+                            _mun_pick = _fc2.selectbox("Filtrar por município:", _muns_v, key="casos_mun")
+                            if _mun_pick != "(todos)":
+                                _view = _view[_view[_muncol_v].astype(str) == _mun_pick]
+                        _bq = st.text_input("Buscar (QUEM):", "", key="casos_busca")
+                        if _bq:
+                            _view = _view[_view.apply(lambda r: _bq.lower() in " ".join(map(str, r.values)).lower(), axis=1)]
+                        if "DISTANCIA_KM" in _view.columns:
+                            _view = _view.sort_values("DISTANCIA_KM", ascending=False)
+                        elif "Participantes" in _view.columns:
+                            _view = _view.sort_values("Participantes", ascending=False)
+                        st.caption(f"Mostrando **{len(_view):,}** registro(s) após filtros.".replace(",", "."))
+                        st.dataframe(_view, use_container_width=True, height=340)
+                        st.download_button("⬇️ Exportar estes casos (CSV) — respeita UF, município e busca",
+                                           _view.to_csv(index=False).encode("utf-8-sig"),
+                                           file_name=f"central_casos_{_i}.csv", mime="text/csv", key="casos_dl")
+
+                        # Ficha individual do caso (#17): seleção de 1 registro -> auditoria
+                        if _ent == "Participante" and "CO_INSCRICAO" in _view.columns and not _view.empty:
+                            with st.expander("🔎 Ficha de auditoria de um caso (selecione a inscrição)"):
+                                _ins = st.selectbox("Inscrição:", _view["CO_INSCRICAO"].astype(str).tolist()[:500],
+                                                    key="casos_ficha")
+                                _reg = _view[_view["CO_INSCRICAO"].astype(str) == _ins].iloc[0]
+                                st.markdown(f"**Problema:** {_sev} · {_ana}")
+                                st.markdown(f"**Regra:** {_regra}")
+                                _linhas_f = []
+                                for _c in _view.columns:
+                                    _linhas_f.append(f"- **{_c}:** {_reg[_c]}")
+                                st.markdown("\n".join(_linhas_f))
+                                if "DISTANCIA_KM" in _reg and _sev.startswith("🔴") and "km" in _ana.lower():
+                                    st.markdown(f"**Diagnóstico:** distância de {_reg['DISTANCIA_KM']} km — "
+                                                f"{float(_reg['DISTANCIA_KM']) - 20:.2f} km acima do limite de 20 km.")
+                    st.caption("Observação: a central mostra os casos calculáveis a partir dos layouts efetivamente "
+                               "carregados. Casos que dependem de N50/N52/N90/N91 aparecem quando essas abas são enviadas.")
+            except Exception as _ec:  # noqa
+                st.error(f"Não foi possível montar a central de casos: {_ec}")
+
 
     # Carrega metadados da auditoria (KPIs, achados, resumo) uma vez
     _meta_ac = {}
@@ -10730,6 +11330,97 @@ def _run_streamlit_app() -> None:
 
         # --- Principais indicadores (só os que existem) ---
         st.subheader("Principais indicadores")
+
+        # v33: KPI cards CUSTOMIZADOS calculados da base bruta (funcionam mesmo com só
+        # o N02, onde os KPIs de cruzamento do motor vêm vazios). Título/valor/contexto/fonte.
+        # mapa de "como foi calculado" por título de card (tooltip explicativo)
+        _COMO_CALC = {
+            "Participantes": "Contagem de linhas do N02 (uma por participante/CO_INSCRICAO).",
+            "Ensalados": "Participantes com ID_SALA preenchido ÷ total de participantes.",
+            "Salas": "Nº de valores distintos de ID_SALA. Ocupação média = participantes ÷ salas.",
+            "Salas acima de 40": "Salas (CO_LOCAL + ID_SALA) cujo nº de participantes é maior que 40.",
+            "Sem kit": "Participantes com ID_KIT_PROVA vazio ÷ total. O kit deve espelhar o N91.",
+            "Distância média": "Média de NU_DISTANCIA (em km, auto-detectada) sobre registros com distância válida.",
+            "Deslocamentos críticos": "Participantes com NU_DISTANCIA acima de 20 km (limite contratual).",
+        }
+
+        def _kpi_card(_titulo, _valor, _contexto, _fonte, _cor="#2e86c1", _icone="📊"):
+            _como = _COMO_CALC.get(_titulo, _contexto)
+            _tip = f"Como foi calculado: {_como}  |  Fonte: {_fonte}".replace('"', "'")
+            return f"""
+            <div title="{_tip}" style="background:#fff;border:1px solid #e3e8ef;border-left:5px solid {_cor};
+                        border-radius:12px;padding:16px 18px;box-shadow:0 1px 3px rgba(16,42,67,.06);
+                        height:100%;min-height:150px;display:flex;flex-direction:column;cursor:help;">
+              <div style="font-size:12px;font-weight:700;color:#5b6b7f;text-transform:uppercase;
+                          letter-spacing:.4px;">{_icone} {_titulo} <span style="color:#b0bac7"
+                          title="{_tip}">ⓘ</span></div>
+              <div style="font-size:30px;font-weight:800;color:#1f4e79;margin:6px 0 2px;line-height:1.1;">{_valor}</div>
+              <div style="font-size:13px;color:#42546b;flex-grow:1;">{_contexto}</div>
+              <div style="font-size:11px;color:#8a94a3;margin-top:8px;border-top:1px solid #eef2f7;
+                          padding-top:6px;">Fonte: {_fonte}</div>
+            </div>"""
+
+        _cards = []
+        if arquivo is not None:
+            try:
+                import io as _iok
+                _xb = _excelfile_fast(_iok.BytesIO(arquivo.getvalue()))
+                _bk = None
+                for _sh in _xb.sheet_names:
+                    _dk = _read_excel_fast(_iok.BytesIO(arquivo.getvalue()), sheet_name=_sh)
+                    if any(str(c).upper() == "CO_INSCRICAO" for c in _dk.columns):
+                        _bk = _dk
+                        break
+                if _bk is not None:
+                    _Nk = len(_bk)
+                    _fmt = lambda v: f"{int(v):,}".replace(",", ".")
+                    _cards.append(_kpi_card("Participantes", _fmt(_Nk),
+                                            "Total de participantes identificados na base.", "N02", "#2e86c1", "👥"))
+                    _sc = next((c for c in _bk.columns if str(c).upper() == "ID_SALA"), None)
+                    if _sc is not None:
+                        _ens = int(_bk[_sc].notna().sum())
+                        _cor = "#27ae60" if _ens == _Nk else "#e67e22"
+                        _cards.append(_kpi_card("Ensalados", f"{_fmt(_ens)}",
+                                                f"{_ens / _Nk * 100:.1f}% dos participantes têm sala atribuída." if _Nk else "",
+                                                "N02", _cor, "🪑"))
+                        _nsalas = int(_bk[_sc].nunique(dropna=True))
+                        _ocup = _Nk / _nsalas if _nsalas else 0
+                        _cards.append(_kpi_card("Salas", _fmt(_nsalas),
+                                                f"Ocupação média de {_ocup:.1f} participantes por sala.", "N02", "#2e86c1", "🚪"))
+                        _oc = _bk.groupby([c for c in [next((x for x in _bk.columns if str(x).upper() == 'CO_LOCAL'), None), _sc] if c is not None]).size()
+                        _s40 = int((_oc > 40).sum())
+                        _cards.append(_kpi_card("Salas acima de 40", _fmt(_s40),
+                                                "Salas com ocupação acima da referência contratual (~40).",
+                                                "N02", "#e67e22" if _s40 else "#27ae60", "⚠️"))
+                    _kc = next((c for c in _bk.columns if str(c).upper() == "ID_KIT_PROVA"), None)
+                    if _kc is not None:
+                        _semk = int(_bk[_kc].isna().sum() +
+                                    (_bk[_kc].astype(str).str.strip().isin(["", "nan", "None"]) & _bk[_kc].notna()).sum())
+                        _pk = _semk / _Nk * 100 if _Nk else 0
+                        _cards.append(_kpi_card("Sem kit", f"{_fmt(_semk)}",
+                                                f"{_pk:.0f}% sem ID_KIT_PROVA (deve espelhar o N91).",
+                                                "N02", "#c0392b" if _pk > 50 else "#e67e22", "🎒"))
+                    _dc = next((c for c in _bk.columns if str(c).upper() in ("NU_DISTANCIA", "DISTANCIA")), None)
+                    if _dc is not None:
+                        _dk2 = _dist_km(_bk[_dc]).dropna()
+                        _cards.append(_kpi_card("Distância média", f"{_dk2.mean():.2f} km",
+                                                "Distância média (FGV) entre residência e local de prova.",
+                                                "N02 · NU_DISTANCIA", "#2e86c1", "📏"))
+                        _ncrit = int((_dk2 > 20).sum())
+                        _cards.append(_kpi_card("Deslocamentos críticos", _fmt(_ncrit),
+                                                f"Participantes acima de 20 km ({_ncrit / _Nk * 100:.2f}%).",
+                                                "N02 · NU_DISTANCIA", "#c0392b" if _ncrit else "#27ae60", "🔴"))
+            except Exception:
+                _cards = []
+
+        if _cards:
+            st.caption("Indicadores calculados diretamente da sua base — passe o mouse nos cards; "
+                       "o detalhamento de cada um está nas abas « 🚨 Central de Casos » e « 🛰️ FGV × INEP ».")
+            for _i0 in range(0, len(_cards), 4):
+                for _col, _card in zip(st.columns(4), _cards[_i0:_i0 + 4]):
+                    _col.markdown(_card, unsafe_allow_html=True)
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
         _rotulos = [
             ("total_inscritos", "Inscritos"), ("total_ensalados", "Ensalados"),
             ("total_nao_ensalados", "Não ensalados"), ("pct_ensalamento", "Taxa ensalamento (%)"),
@@ -10740,13 +11431,15 @@ def _run_streamlit_app() -> None:
         ]
         presentes = [(k, r) for k, r in _rotulos if k in kp]
         if presentes:
+            if _cards:
+                st.markdown("**Indicadores consolidados do motor (cruzamentos entre layouts)**")
             for i in range(0, len(presentes), 4):
                 for c, (k, r) in zip(st.columns(4), presentes[i:i + 4]):
                     c.metric(r, str(kp[k]))
-        else:
+        elif not _cards:
             st.caption("Indicadores aparecerão conforme os layouts disponíveis.")
-        with st.expander(f"Ver todos os indicadores calculados ({len(kp)})"):
-            if kp:
+        if kp:
+            with st.expander(f"Ver todos os indicadores calculados pelo motor ({len(kp)})"):
                 st.dataframe(_pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()]),
                              use_container_width=True, height=300)
 
