@@ -225,44 +225,30 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "23"
+STREAMLIT_APP_VERSION = "24"
 
 def _read_excel_fast(_src, **kwargs):
-    """Lê Excel priorizando o engine 'calamine' (5–10x mais rápido que o openpyxl);
-    se o pacote não estiver instalado ou falhar, cai automaticamente para o engine
-    padrão. Reposiciona o buffer entre tentativas (evita leitura corrompida quando a
-    fonte é um BytesIO). O resultado é o mesmo — só muda a velocidade. Sem regressão."""
+    """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
+    para todas as leituras do wrapper; reposiciona o buffer quando a fonte é BytesIO.
+    (O engine calamine foi removido por incompatibilidade em alguns ambientes.)"""
     import pandas as _pd
-    def _rewind():
-        try:
-            if hasattr(_src, "seek"):
-                _src.seek(0)
-        except Exception:
-            pass
-    _rewind()
     try:
-        return _pd.read_excel(_src, engine="calamine", **kwargs)
+        if hasattr(_src, "seek"):
+            _src.seek(0)
     except Exception:
-        _rewind()
-        return _pd.read_excel(_src, **kwargs)
+        pass
+    return _pd.read_excel(_src, **kwargs)
 
 
 def _excelfile_fast(_src):
-    """Abre um ExcelFile priorizando o engine 'calamine', com fallback ao padrão e
-    reposicionamento do buffer entre tentativas."""
+    """Abre um ExcelFile de forma estável (engine padrão), com reposicionamento do buffer."""
     import pandas as _pd
-    def _rewind():
-        try:
-            if hasattr(_src, "seek"):
-                _src.seek(0)
-        except Exception:
-            pass
-    _rewind()
     try:
-        return _pd.ExcelFile(_src, engine="calamine")
+        if hasattr(_src, "seek"):
+            _src.seek(0)
     except Exception:
-        _rewind()
-        return _pd.ExcelFile(_src)
+        pass
+    return _pd.ExcelFile(_src)
 
 
 def _dist_km(serie):
@@ -10470,7 +10456,7 @@ def _run_streamlit_app() -> None:
             st.caption("Para cada aba: tipo, % preenchido e nº de valores distintos por coluna — transparência total "
                        "sobre o que existe nos dados antes de processar.")
 
-            @st.cache_data(show_spinner=False)
+            @st.cache_data(show_spinner="Analisando a estrutura das abas...")
             def _scan_estrutura(_bytes):
                 import pandas as _p
                 _res = {}
@@ -10491,21 +10477,24 @@ def _run_streamlit_app() -> None:
                     _res[_s] = (_n, _df.shape[1], _p.DataFrame(_rows))
                 return _res
 
-            try:
-                _scan = _scan_estrutura(arquivo.getvalue())
-                for _s, (_nr, _nc, _dfq) in _scan.items():
-                    _vazias_n = int((_dfq["% preenchido"] == 0).sum())
-                    _rotulo = f"{_s} — {_nr:,} linhas × {_nc} colunas".replace(",", ".")
-                    if _vazias_n:
-                        _rotulo += f"  ·  ⚠️ {_vazias_n} coluna(s) totalmente vazia(s)"
-                    with st.expander(_rotulo):
-                        st.dataframe(_dfq, use_container_width=True, hide_index=True, height=260)
-                        st.download_button("⬇️ Baixar estrutura desta aba (CSV)",
-                                           _dfq.to_csv(index=False).encode("utf-8-sig"),
-                                           file_name=f"estrutura_{_s}.csv", mime="text/csv",
-                                           key=f"dl_estrut_{_s}")
-            except Exception as _es:  # noqa
-                st.caption(f"Varredura de estrutura indisponível: {_es}")
+            # Sob demanda: só varre (lê todas as abas inteiras) se o usuário pedir,
+            # evitando custo/memória alto no momento do upload.
+            if st.checkbox("Analisar estrutura e qualidade das colunas (lê o arquivo inteiro)", value=False):
+                try:
+                    _scan = _scan_estrutura(arquivo.getvalue())
+                    for _s, (_nr, _nc, _dfq) in _scan.items():
+                        _vazias_n = int((_dfq["% preenchido"] == 0).sum())
+                        _rotulo = f"{_s} — {_nr:,} linhas × {_nc} colunas".replace(",", ".")
+                        if _vazias_n:
+                            _rotulo += f"  ·  ⚠️ {_vazias_n} coluna(s) totalmente vazia(s)"
+                        with st.expander(_rotulo):
+                            st.dataframe(_dfq, use_container_width=True, hide_index=True, height=260)
+                            st.download_button("⬇️ Baixar estrutura desta aba (CSV)",
+                                               _dfq.to_csv(index=False).encode("utf-8-sig"),
+                                               file_name=f"estrutura_{_s}.csv", mime="text/csv",
+                                               key=f"dl_estrut_{_s}")
+                except Exception as _es:  # noqa
+                    st.caption(f"Varredura de estrutura indisponível: {_es}")
         except Exception as _e0:  # noqa
             st.warning(f"Não foi possível pré-visualizar o arquivo: {_e0}")
 
