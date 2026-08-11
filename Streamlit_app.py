@@ -143,19 +143,6 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-# -------------------------------------------------------------------------------------
-# CORREÇÃO DE ROBUSTEZ (bug real): o console do Windows usa cp1252 por padrão e NÃO
-# suporta os emojis/acentos dos logs do pipeline (UnicodeEncodeError no primeiro print).
-# Forçamos UTF-8 na saída/erro padrão assim que possível, sem depender de variáveis de
-# ambiente (PYTHONUTF8/PYTHONIOENCODING) nem de flags de linha de comando.
-# -------------------------------------------------------------------------------------
-for _stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
-    try:
-        if _stream is not None and hasattr(_stream, "reconfigure"):
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass  # console não reconfigurável (ex.: ambientes sem fila de caracteres) — seguir.
-
 import pandas as pd
 import numpy as np
 import unicodedata
@@ -238,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "19"
+STREAMLIT_APP_VERSION = "23"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine 'calamine' (5–10x mais rápido que o openpyxl);
@@ -1160,13 +1147,12 @@ class EnvironmentManager:
         demo_path = self.base_output_dir / "_demo_base_sintetica.xlsx"
         try:
             layouts = SyntheticDataGenerator.generate_multi_layout(demo_df)
-            _demo_writer, _ = _criar_excel_writer(demo_path, self.logger)
-            with _demo_writer:
-                demo_df.to_excel(_demo_writer, sheet_name='BASE_PLANA', index=False)
+            with pd.ExcelWriter(demo_path, engine='xlsxwriter') as _w:
+                demo_df.to_excel(_w, sheet_name='BASE_PLANA', index=False)
                 for name in ['N52', 'N50', 'N90', 'N02', 'N91', 'N60']:
                     tbl = layouts.get(name)
                     if isinstance(tbl, pd.DataFrame) and not tbl.empty:
-                        tbl.to_excel(_demo_writer, sheet_name=name, index=False)
+                        tbl.to_excel(_w, sheet_name=name, index=False)
             self.logger.info(
                 f"Base de demonstração criada com {len(demo_df):,} salas (aba BASE_PLANA) "
                 f"+ abas normalizadas N52/N50/N90/N02/N91 para auditoria de cruzamento, em {demo_path}"
@@ -2951,899 +2937,6 @@ class CognitiveInsightGenerator:
         }
 
 
-# ============================================================================
-# CAMADA ADAPTATIVA DE DISPONIBILIDADE ANALÍTICA (v34)
-# ----------------------------------------------------------------------------
-# Torna a plataforma TOTALMENTE adaptativa aos layouts realmente presentes na
-# base de entrada (N02/N50/N52/N60/N90/N91). A lógica de "o que pode ser
-# analisado" fica centralizada em UM único motor (AnalyticalAvailability), cujo
-# resultado — um bundle JSON — é consumido IDENTICAMENTE pelo Excel, pelo HTML
-# e pelo Streamlit. Assim:
-#   • nenhuma seção vazia é exibida para um layout ausente;
-#   • distingue-se "layout ausente" × "campo ausente" × "campo vazio" × "dados disponíveis";
-#   • toda análise possível para os layouts presentes é de fato oferecida.
-# O catálogo (ANALYSIS_CATALOG) é declarativo: cada análise declara seus layouts
-# exigidos e os grupos de campos necessários (condição OR dentro de cada grupo).
-# ============================================================================
-
-from itertools import combinations as _combinacoes
-
-#: Layouts oficiais reconhecidos pela plataforma (metadados para o painel).
-LAYOUTS_CONHECIDOS: Dict[str, Dict[str, str]] = {
-    'N02': {'nome': 'N02 — Ensalamento', 'descricao': 'Alocação participante→sala, grupos de curso, atendimento e tipo de ensalamento.'},
-    'N50': {'nome': 'N50 — Salas dos Espaços Físicos', 'descricao': 'Dimensões da sala, capacidade e mobiliário.'},
-    'N52': {'nome': 'N52 — Locação de Espaço Físico', 'descricao': 'Bloco/prédio, endereço, capacidade agregada e georreferenciamento.'},
-    'N60': {'nome': 'N60 — Visita ao Local de Prova', 'descricao': 'Acessibilidade, segurança, conforto, tecnologia e conservação predial.'},
-    'N90': {'nome': 'N90 — Inscritos', 'descricao': 'Dados cadastrais do participante, sexo, nascimento e situação da inscrição.'},
-    'N91': {'nome': 'N91 — Atendimentos Especiais', 'descricao': 'Itens de atendimento/recurso solicitados e situação do laudo médico.'},
-}
-
-#: Colunas candidatas a servirem de chave compartilhada em cruzamentos entre layouts.
-_KEYS_CANDIDATAS: Sequence[str] = (
-    'CO_INSCRICAO_INEP', 'CO_INSCRICAO', 'ID_INSCRICAO', 'ID_PARTICIPANTE', 'ID_PESSOA',
-    'ID_SALA', 'CO_SALA', 'ID_LOCAL', 'CO_LOCAL', 'ID_BLOCO', 'CO_BLOCO',
-    'ID_KIT_PROVA', 'ID_CATEGORIA_ATENDIMENTO', 'ID_TIPO_ATENDIMENTO',
-)
-
-
-@dataclass
-class AnalysisSpec:
-    """Especificação declarativa de UMA análise da plataforma.
-
-    - ``tipo``: 'base' (tabela única) ou 'cruzamento' (relação entre layouts).
-    - ``base``: qual tabela a análise lê ('BASE' = base plana consolidada, ou um layout 'N02'...).
-    - ``layouts``: layouts exigidos (obrigatório para 'cruzamento').
-    - ``campos``: para 'base', dict {grupo: [colunas alternativas]} — basta UMA alternativa
-      presente e não vazia por grupo; para 'cruzamento', dict {LAYOUT: {grupo: [alternativas]}}.
-    - ``implementada``: True se o motor atual já calcula/exibe esta análise.
-    """
-    id: str
-    titulo: str
-    categoria: str
-    campos: Dict[str, Any]
-    interpretacao: str
-    recomendacao: str
-    tipo: str = 'base'
-    base: str = 'BASE'
-    layouts: tuple = ()
-    implementada: bool = True
-
-
-#: Catálogo declarativo de TODAS as análises que a plataforma conhece.
-ANALYSIS_CATALOG: List[AnalysisSpec] = [
-    # ---- Base plana consolidada (result.df) ----------------------------------
-    AnalysisSpec('analise_perfil_sexo', 'Perfil dos participantes por sexo', 'Base Plana',
-                 {'TP_SEXO': ['TP_SEXO']},
-                 'Distribuição de inscritos por sexo (M/F), base da análise demográfica.',
-                 'Usar com faixa etária para perfilar o público do certame.'),
-    AnalysisSpec('analise_faixa_etaria', 'Distribuição etária (faixas)', 'Base Plana',
-                 {'DT_NASCIMENTO': ['DT_NASCIMENTO']},
-                 'Idade derivada da data de nascimento, agrupada em faixas.',
-                 'Comparar com a demanda de atendimento especial por faixa.'),
-    AnalysisSpec('analise_situacao_inscricao', 'Situação da inscrição', 'Base Plana',
-                 {'TP_SITUACAO': ['TP_SITUACAO']},
-                 'Participantes por situação cadastral (Regular/Irregular/Judicial).',
-                 'Investigar irregularidades e judicializadas antes do ensalamento.'),
-    AnalysisSpec('analise_migracao_uf', 'Migração interestadual', 'Base Plana',
-                 {'UF_RESIDENCIA': ['SG_UF_MUNICIPIO_RESIDENCIA', 'SG_UF_RESIDENCIA'],
-                  'UF_PROVA': ['SG_UF_MUNICIPIO_PROVA', 'SG_UF_PROVA', 'SG_UF']},
-                 'Participantes cuja UF de prova difere da UF de residência.',
-                 'Alocar polos extras nos estados de maior atração interestadual.'),
-    AnalysisSpec('analise_geografia_uf', 'Resumo por UF', 'Base Plana',
-                 {'SG_UF': ['SG_UF_PROVA', 'SG_UF_MUNICIPIO_PROVA', 'SG_UF']},
-                 'Contagem e indicadores consolidados por unidade federativa.',
-                 'Usar como corte transversal em todas as demais análises.'),
-    AnalysisSpec('analise_grupos_curso', 'Ranking de grupos de curso', 'Base Plana',
-                 {'CO_GRUPO_CURSO': ['CO_GRUPO_CURSO', 'NO_GRUPO_CURSO']},
-                 'Maiores grupos de curso (áreas de avaliação) do certame.',
-                 'Dimensionar salas por proximidade dos grupos mais volumosos.'),
-    AnalysisSpec('analise_capacidade_uf', 'Capacidade alocada por UF', 'Base Plana',
-                 {'CAP': ['CAP_TOTAL', 'QT_CAPACIDADE_MAXIMA'], 'SG_UF': ['SG_UF_PROVA', 'SG_UF']},
-                 'Capacidade total de locais/salas agrupada por UF.',
-                 'Cotejar com a demanda de inscritos por UF (folga/estreitamento).'),
-    AnalysisSpec('analise_gini', 'Concentração de capacidade (Gini por UF)', 'Base Plana',
-                 {'CAP': ['CAP_TOTAL', 'QT_CAPACIDADE_MAXIMA'], 'SG_UF': ['SG_UF_PROVA', 'SG_UF']},
-                 'Desigualdade da distribuição de vagas entre os locais de cada UF.',
-                 'UFs com Gini alto concentram risco de logística em poucos polos.'),
-    AnalysisSpec('analise_qualidade_predial', 'Qualidade e conservação predial', 'Base Plana',
-                 {'QUALIDADE': ['QUALIDADE_PREDIAL_GLOBAL', 'INDICE_CONSERVACAO', 'DESC_NOTA_OFICIAL_INEP']},
-                 'Índice composto de conservação/qualidade dos espaços de prova.',
-                 'Priorizar manutenção nos locais com pior índice.'),
-    AnalysisSpec('analise_densidade', 'Densidade espacial (m²/candidato)', 'Base Plana',
-                 {'AREA_POR_CANDIDATO_M2': ['AREA_POR_CANDIDATO_M2']},
-                 'Área física disponível por candidato, proxy de conforto e lotação.',
-                 'Evitar salas com densidade abaixo do recomendado.'),
-    AnalysisSpec('analise_atendimento_especial', 'Demanda por atendimento especial', 'Base Plana',
-                 {'ATEND': ['IN_ATENDIMENTO_ESPECIAL', 'IN_RECURSO', 'TP_ITEM_ATENDIMENTO']},
-                 'Volume de inscritos que solicitam atendimento especializado.',
-                 'Casar com os itens do layout N91 para dimensionar recursos.'),
-    AnalysisSpec('analise_correlacao', 'Correlações entre índices derivados', 'Base Plana',
-                 {'INDICES': ['INDICE_ACESSIBILIDADE', 'INDICE_SEGURANCA', 'INDICE_CONFORTO',
-                              'INDICE_TECNOLOGIA', 'INDICE_VULNERABILIDADE', 'INDICE_CONSERVACAO']},
-                 'Matriz de correlação de Pearson entre os índices compostos.',
-                 'Identificar perfis de locais (fortes em acessibilidade vs tecnologia).'),
-
-    # ---- Layouts individuais (tabelas normalizadas) ---------------------------
-    AnalysisSpec('n90_contagem_inscritos', 'Inscritos por UF de residência', 'N90',
-                 {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP'],
-                  'UF': ['SG_UF_MUNICIPIO_RESIDENCIA', 'SG_UF_RESIDENCIA', 'SG_UF']},
-                 'Distribuição dos participantes pela UF onde residem.',
-                 'Detectar provas descentralizadas e folga de capacidade local.',
-                 base='N90'),
-    AnalysisSpec('n02_tipos_ensalamento', 'Distribuição por tipo de ensalamento', 'N02',
-                 {'TP_ENSALAMENTO': ['TP_ENSALAMENTO']},
-                 'Como os inscritos são ensalados (por área, por grupo, etc.).',
-                 'Validar o critério de alocação adotado na prova.',
-                 base='N02'),
-    AnalysisSpec('n02_salas_por_local', 'Quantidade de salas por local', 'N02',
-                 {'ID_SALA': ['ID_SALA', 'CO_SALA'], 'CO_LOCAL': ['CO_LOCAL', 'ID_LOCAL']},
-                 'Número de salas ensaladas em cada local de prova.',
-                 'Cruzado com N52, confronta a capacidade declarada com a real.',
-                 base='N02'),
-    AnalysisSpec('n02_blocos_por_local', 'Blocos por local', 'N02',
-                 {'ID_BLOCO': ['ID_BLOCO', 'CO_BLOCO'], 'CO_LOCAL': ['CO_LOCAL', 'ID_LOCAL']},
-                 'Quantidade de blocos/prédios utilizados por local.',
-                 'Orientar a sinalização interna e a logística de abertura.',
-                 base='N02'),
-    AnalysisSpec('n50_capacidade_salas', 'Capacidade máxima por sala', 'N50',
-                 {'QT_CAPACIDADE_MAXIMA_SALA': ['QT_CAPACIDADE_MAXIMA_SALA']},
-                 'Capacidade física declarada de cada sala dos espaços físicos.',
-                 'Usar como teto seguro de alocação por sala.',
-                 base='N50'),
-    AnalysisSpec('n50_capacidade_por_uf', 'Capacidade agregada por UF (N50)', 'N50',
-                 {'CAP': ['QT_CAPACIDADE_MAXIMA_SALA'], 'SG_UF': ['SG_UF']},
-                 'Somatório de capacidade declarada das salas por UF.',
-                 'Comparar com a demanda de inscritos da UF.',
-                 base='N50'),
-    AnalysisSpec('n52_resumo_local', 'Salas e capacidade por local (N52)', 'N52',
-                 {'QT_SALAS': ['QT_SALAS'], 'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']},
-                 'Resumo agregado de salas e capacidade por espaço físico.',
-                 'Fonte oficial para o planejamento de alocação.',
-                 base='N52'),
-    AnalysisSpec('n52_inscritos_por_local', 'Inscritos por local (N52)', 'N52',
-                 {'QT_INSCRITOS': ['QT_INSCRITOS', 'QT_CANDIDATOS_ALOCADOS']},
-                 'Inscritos alocados em cada espaço físico.',
-                 'Calcular a taxa de ocupação real por local.',
-                 base='N52'),
-    AnalysisSpec('n52_ocupacao', 'Taxa de ocupação (N52)', 'N52',
-                 {'QT_INSCRITOS': ['QT_INSCRITOS', 'QT_CANDIDATOS_ALOCADOS'],
-                  'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']},
-                 'Relação inscritos/capacidade por espaço físico.',
-                 'Locais acima de 100% exigem reensalamento preventivo.',
-                 base='N52'),
-    AnalysisSpec('n60_acessibilidade', 'Acessibilidade dos locais (N60)', 'N60',
-                 {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_RAMPA_ACESSO']},
-                 'Locais com condições de acessibilidade declaradas.',
-                 'Casar com a demanda por atendimento especial (N91).',
-                 base='N60'),
-    AnalysisSpec('n60_salas_adaptadas', 'Salas adaptadas (N60)', 'N60',
-                 {'IN_SALA_ADAPTADA': ['IN_SALA_ADAPTADA']},
-                 'Existência de salas adaptadas no local.',
-                 'Alocar participantes com mobilidade reduzida nesses locais.',
-                 base='N60'),
-    AnalysisSpec('n60_policiamento', 'Policiamento do local (N60)', 'N60',
-                 {'IN_POLICIAMENTO': ['IN_POLICIAMENTO']},
-                 'Locais com policiamento presente no dia da prova.',
-                 'Reforçar segurança nos locais sem policiamento declarado.',
-                 base='N60'),
-    AnalysisSpec('n60_infra_tecnologia', 'Energia e internet (N60)', 'N60',
-                 {'IN_ENERGIA': ['IN_ENERGIA'], 'IN_INTERNET': ['IN_INTERNET']},
-                 'Disponibilidade de energia elétrica e internet no local.',
-                 'Pré-requisito para provas digitais ou leitura de QR.',
-                 base='N60'),
-    AnalysisSpec('n91_itens_atendimento', 'Ranking de itens de atendimento (N91)', 'N91',
-                 {'NO_ITEM_ATENDIMENTO': ['NO_ITEM_ATENDIMENTO', 'ID_ITEM_ATENDIMENTO']},
-                 'Itens de atendimento/recurso mais solicitados.',
-                 'Dimensionar kits e provas adaptadas por item.',
-                 base='N91'),
-    AnalysisSpec('n91_tipos_atendimento', 'Tipos de atendimento (N91)', 'N91',
-                 {'TP_ITEM_ATENDIMENTO': ['TP_ITEM_ATENDIMENTO']},
-                 'Distribuição entre atendimento específico/especializado/recurso.',
-                 'Prever mão de obra especializada (ledor, tradutor, etc.).',
-                 base='N91'),
-    AnalysisSpec('n91_laudo_situacao', 'Situação do laudo médico (N91)', 'N91',
-                 {'CO_SITUACAO_LAUDO_MEDICO': ['CO_SITUACAO_LAUDO_MEDICO']},
-                 'Distribuição da análise do laudo (aprovado/indeferido/em análise).',
-                 'Planejar contingenciamento para indeferimentos no dia.',
-                 base='N91'),
-    AnalysisSpec('n91_laudo_por_uf', 'Taxa de deferimento de laudo por UF (N91)', 'N91',
-                 {'LAUDO': ['CO_SITUACAO_LAUDO_MEDICO'], 'UF': ['SG_UF']},
-                 'Deferimento do laudo médico comparado entre UFs.',
-                 'Investigar UFs com taxa de deferimento atípica.',
-                 base='N91'),
-
-    # ---- Cruzamentos em pares -------------------------------------------------
-    AnalysisSpec('cruza_n02_n50', 'Capacidade real × declarada (N02 × N50)', 'Cruzamento N02×N50',
-                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
-                  'N50': {'QT_CAPACIDADE_MAXIMA_SALA': ['QT_CAPACIDADE_MAXIMA_SALA']}},
-                 'Confronta as salas ensaladas (N02) com a capacidade declarada (N50).',
-                 'Salas ensaladas sem registro em N50 ou com capacidade divergente exigem revisão.',
-                 tipo='cruzamento', layouts=('N02', 'N50')),
-    AnalysisSpec('cruza_n02_n52', 'Ensalamento × resumo do local (N02 × N52)', 'Cruzamento N02×N52',
-                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
-                  'N52': {'QT_SALAS': ['QT_SALAS'], 'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']}},
-                 'Compara as salas efetivamente ensaladas com o resumo oficial do local.',
-                 'Divergência indica local parcialmente utilizado ou resumo desatualizado.',
-                 tipo='cruzamento', layouts=('N02', 'N52')),
-    AnalysisSpec('cruza_n02_n90', 'Participantes × ensalamento (N02 × N90)', 'Cruzamento N02×N90',
-                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
-                  'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']}},
-                 'Relaciona inscritos (N90) com a sala onde foram ensalados (N02).',
-                 'Identifica participantes ensalados sem inscrição e vice-versa.',
-                 tipo='cruzamento', layouts=('N02', 'N90')),
-    AnalysisSpec('cruza_n02_n91', 'Ensalamento × atendimentos (N02 × N91)', 'Cruzamento N02×N91',
-                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
-                  'N91': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']}},
-                 'Casa a sala de prova com os atendimentos especiais solicitados.',
-                 'Garante que o local ofereça os recursos compatíveis com a demanda.',
-                 tipo='cruzamento', layouts=('N02', 'N91')),
-    AnalysisSpec('cruza_n02_n60', 'Ensalamento × acessibilidade (N02 × N60)', 'Cruzamento N02×N60',
-                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA'], 'CO_LOCAL': ['CO_LOCAL', 'ID_LOCAL']},
-                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
-                 'Verifica se os locais ensalados são acessíveis (N60).',
-                 'Participantes com atendimento alocados em local não acessível = alerta.',
-                 tipo='cruzamento', layouts=('N02', 'N60')),
-    AnalysisSpec('cruza_n90_n52', 'Participantes × capacidade do local (N90 × N52)', 'Cruzamento N90×N52',
-                 {'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
-                  'N52': {'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']}},
-                 'Demanda de inscritos versus capacidade oficial dos locais.',
-                 'Locais com demanda superior à capacidade exigem reensalamento.',
-                 tipo='cruzamento', layouts=('N90', 'N52')),
-    AnalysisSpec('cruza_n90_n60', 'Participantes × acessibilidade (N90 × N60)', 'Cruzamento N90×N60',
-                 {'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
-                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
-                 'Coteja a demanda por acessibilidade com a oferta declarada.',
-                 'Locais acessíveis insuficientes para a demanda = plano de mitigação.',
-                 tipo='cruzamento', layouts=('N90', 'N60')),
-    AnalysisSpec('cruza_n90_n91', 'Participantes × atendimentos (N90 × N91)', 'Cruzamento N90×N91',
-                 {'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
-                  'N91': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP'],
-                          'NO_ITEM_ATENDIMENTO': ['NO_ITEM_ATENDIMENTO', 'ID_ITEM_ATENDIMENTO']}},
-                 'Detalha os atendimentos especiais por perfil do participante.',
-                 'Orienta a produção de kits adaptados e a contratação de profissionais.',
-                 tipo='cruzamento', layouts=('N90', 'N91')),
-    AnalysisSpec('cruza_n52_n60', 'Resumo do local × acessibilidade (N52 × N60)', 'Cruzamento N52×N60',
-                 {'N52': {'CO_LOCAL': ['CO_LOCAL', 'ID_LOCAL'], 'QT_SALAS': ['QT_SALAS']},
-                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
-                 'Compara o cadastro do local com as condições de acessibilidade.',
-                 'Locais sem visita N60 não têm acessibilidade garantida.',
-                 tipo='cruzamento', layouts=('N52', 'N60')),
-    AnalysisSpec('cruza_n50_n52', 'Capacidade de sala × resumo do local (N50 × N52)', 'Cruzamento N50×N52',
-                 {'N50': {'ID_SALA': ['ID_SALA', 'CO_SALA'], 'QT_CAPACIDADE_MAXIMA_SALA': ['QT_CAPACIDADE_MAXIMA_SALA']},
-                  'N52': {'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']}},
-                 'Confere se a capacidade agregada (N52) bate com a soma das salas (N50).',
-                 'Divergência indica sala não cadastrada no resumo do local.',
-                 tipo='cruzamento', layouts=('N50', 'N52')),
-
-    # ---- Cruzamentos em trios --------------------------------------------------
-    AnalysisSpec('cruza_n02_n90_n91', 'Ensalamento × participantes × atendimentos', 'Cruzamento N02×N90×N91',
-                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
-                  'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
-                  'N91': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP'],
-                          'NO_ITEM_ATENDIMENTO': ['NO_ITEM_ATENDIMENTO', 'ID_ITEM_ATENDIMENTO']}},
-                 'Rastreio completo: quem, em qual sala, com qual atendimento especial.',
-                 'Visão fim-a-fim para a logística do dia da prova.',
-                 tipo='cruzamento', layouts=('N02', 'N90', 'N91')),
-    AnalysisSpec('cruza_n02_n90_n60', 'Ensalamento × participantes × acessibilidade', 'Cruzamento N02×N90×N60',
-                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
-                  'N90': {'CO_INSCRICAO': ['CO_INSCRICAO', 'CO_INSCRICAO_INEP']},
-                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
-                 'Cruza a alocação dos participantes com a acessibilidade do local.',
-                 'Detecta participantes em locais sem condição de acessibilidade.',
-                 tipo='cruzamento', layouts=('N02', 'N90', 'N60')),
-    AnalysisSpec('cruza_n02_n52_n60', 'Ensalamento × resumo × acessibilidade', 'Cruzamento N02×N52×N60',
-                 {'N02': {'ID_SALA': ['ID_SALA', 'CO_SALA']},
-                  'N52': {'QT_SALAS': ['QT_SALAS'], 'QT_CAPACIDADE_MAXIMA': ['QT_CAPACIDADE_MAXIMA']},
-                  'N60': {'IN_ACESSIBILIDADE': ['IN_ACESSIBILIDADE', 'IN_SALA_ADAPTADA']}},
-                 'Integra a alocação, o cadastro oficial e as condições do local.',
-                 'Triagem completa de risco estrutural por espaço físico.',
-                 tipo='cruzamento', layouts=('N02', 'N52', 'N60')),
-]
-
-
-class AnalyticalAvailability:
-    """Motor único de disponibilidade analítica.
-
-    Resolve, para CADA análise do catálogo, o status real na base carregada
-    (disponível / layout ausente / campo ausente / campo vazio / sem chave) e
-    produz um bundle JSON-serializable consumido em conjunto por Excel, HTML e
-    Streamlit. O mesmo motor decide também quais cruzamentos entre layouts são
-    possíveis e gera a narrativa, os achados e o resumo por UF.
-    """
-
-    def __init__(self, layouts: Optional[Dict[str, pd.DataFrame]] = None,
-                 flat_df: Optional[pd.DataFrame] = None,
-                 selected_layouts: Optional[Sequence[str]] = None,
-                 logger: Optional[logging.Logger] = None) -> None:
-        self.layouts = layouts or {}
-        self.flat_df = flat_df
-        self.selected_layouts = list(selected_layouts) if selected_layouts else None
-        self.logger = logger
-
-    # ---- helpers ---------------------------------------------------------------
-    def _log(self, msg: str, nivel: int = logging.INFO) -> None:
-        if self.logger is not None:
-            try:
-                self.logger.log(nivel, msg)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _colunas_presentes(df: pd.DataFrame) -> set:
-        return set(map(str, df.columns))
-
-    @staticmethod
-    def _alternativas_preenchidas(df: pd.DataFrame, alts: Sequence[str]) -> List[str]:
-        cols = AnalyticalAvailability._colunas_presentes(df)
-        return [a for a in alts if a in cols and not df[a].dropna().empty]
-
-    @staticmethod
-    def _table_ok(df) -> bool:
-        return isinstance(df, pd.DataFrame) and not df.empty
-
-    def _shared_key(self, layouts: tuple) -> Optional[str]:
-        """Encontra uma chave compartilhada entre os dataframes dos layouts."""
-        dfs = [self.layouts.get(k) for k in layouts]
-        if not dfs or not all(self._table_ok(d) for d in dfs):
-            return None
-        comum = set.intersection(*[self._colunas_presentes(d) for d in dfs])
-        for k in _KEYS_CANDIDATAS:
-            if k in comum:
-                return k
-        for k in _KEYS_CANDIDATAS:
-            if all(any(k in c or k in str(c) for c in cols) for cols in (self._colunas_presentes(d) for d in dfs)):
-                return k
-        return None
-
-    def _status_single(self, spec: AnalysisSpec) -> Tuple[str, str]:
-        alvo = self.flat_df if spec.base == 'BASE' else self.layouts.get(spec.base)
-        if not self._table_ok(alvo):
-            if spec.base == 'BASE':
-                return 'layout_ausente', 'Base plana consolidada indisponível'
-            return 'layout_ausente', f"Layout '{spec.base}' não encontrado na base carregada"
-        for grupo, alts in spec.campos.items():
-            preenchidas = self._alternativas_preenchidas(alvo, list(alts))
-            if not preenchidas:
-                if any(a in self._colunas_presentes(alvo) for a in alts):
-                    return 'campo_vazio', f"Campo(s) {', '.join(alts)} presente(s), porém 100% vazio(s)"
-                return 'campo_ausente', f"Campo(s) requerido(s) não encontrado(s): {', '.join(alts)}"
-        return 'disponivel', ''
-
-    def _status_cross(self, spec: AnalysisSpec) -> Tuple[str, str]:
-        for lay in spec.layouts:
-            if not self._table_ok(self.layouts.get(lay)):
-                return 'layout_ausente', f"Layout '{lay}' não encontrado na base carregada"
-        chave = self._shared_key(spec.layouts)
-        if chave is None:
-            return 'sem_chave', 'Nenhuma chave compartilhada encontrada entre os layouts'
-        for lay in spec.layouts:
-            df = self.layouts.get(lay)
-            campos_lay = spec.campos.get(lay, {})
-            for grupo, alts in campos_lay.items():
-                preenchidas = self._alternativas_preenchidas(df, list(alts))
-                if not preenchidas:
-                    if any(a in self._colunas_presentes(df) for a in alts):
-                        return 'campo_vazio', f"[{lay}] Campo(s) {', '.join(alts)} presente(s), porém 100% vazio(s)"
-                    return 'campo_ausente', f"[{lay}] Campo(s) requerido(s) não encontrado(s): {', '.join(alts)}"
-        return 'disponivel', f'Chave compartilhada: {chave}'
-
-    # ---- resolução -------------------------------------------------------------
-    def _layouts_presentes(self) -> List[str]:
-        presentes = [k for k, v in self.layouts.items()
-                     if isinstance(v, pd.DataFrame) and not v.empty and not str(k).startswith('_')]
-        presentes = sorted(set(presentes))
-        if not presentes and self._table_ok(self.flat_df):
-            presentes = ['BASE_PLANA']
-        if self.selected_layouts:
-            sel = [k for k in presentes if k in set(self.selected_layouts)]
-            if sel or any(k not in {'BASE_PLANA'} for k in presentes):
-                presentes = sel
-        return presentes
-
-    def resolve(self) -> Dict[str, Any]:
-        presentes = self._layouts_presentes()
-        resumo_por_layout = {}
-        for k in LAYOUTS_CONHECIDOS:
-            df = self.layouts.get(k)
-            resumo_por_layout[k] = {
-                'presente': k in presentes or (self._table_ok(df)),
-                'linhas': int(len(df)) if self._table_ok(df) else 0,
-                'colunas': int(len(df.columns)) if self._table_ok(df) else 0,
-            }
-        ausentes = [k for k in LAYOUTS_CONHECIDOS if k not in presentes]
-
-        analises = []
-        for spec in ANALYSIS_CATALOG:
-            if spec.tipo == 'cruzamento':
-                status, motivo = self._status_cross(spec)
-            else:
-                status, motivo = self._status_single(spec)
-            analises.append({
-                'id': spec.id, 'titulo': spec.titulo, 'categoria': spec.categoria,
-                'layouts': list(spec.layouts), 'status': status, 'motivo': motivo,
-                'implementada': bool(spec.implementada),
-                'executavel': status == 'disponivel' and bool(spec.implementada),
-            })
-
-        cruzamentos = self._cruzamentos_possiveis(presentes)
-        narrativa = self._narrativa(analises, presentes)
-        achados = self._achados(analises, resumo_por_layout)
-        resumo_uf = self._resumo_uf()
-
-        bundle = {
-            'gerado_em': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'layouts_presentes': presentes,
-            'layouts_ausentes': ausentes,
-            'resumo_por_layout': resumo_por_layout,
-            'analises': analises,
-            'matriz_cobertura': self._matriz_cobertura(analises),
-            'cruzamentos_possiveis': cruzamentos,
-            'narrativa': narrativa,
-            'achados': achados,
-            'resumo_uf': resumo_uf,
-        }
-        self._log(f"Disponibilidade analítica: {len(analises)} análises avaliadas, "
-                  f"{sum(1 for a in analises if a['status'] == 'disponivel')} disponíveis "
-                  f"para {len(presentes)} layout(s) presente(s).")
-        return bundle
-
-    def _matriz_cobertura(self, analises: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [{
-            'analise': a['titulo'], 'id': a['id'], 'categoria': a['categoria'],
-            'layouts': ', '.join(a['layouts']) if a['layouts'] else (a.get('base', '') if 'base' in a else 'BASE'),
-            'status': a['status'], 'motivo': a['motivo'], 'implementada': a['implementada'],
-        } for a in analises]
-
-    def _cruzamentos_possiveis(self, presentes: List[str]) -> List[Dict[str, Any]]:
-        combos = []
-        layout_ids = [k for k in presentes if k != 'BASE_PLANA']
-        for a, b in _combinacoes(sorted(layout_ids), 2):
-            da, db = self.layouts.get(a), self.layouts.get(b)
-            if not self._table_ok(da) or not self._table_ok(db):
-                continue
-            comum = self._colunas_presentes(da) & self._colunas_presentes(db)
-            chave = next((k for k in _KEYS_CANDIDATAS if k in comum), None)
-            combos.append({
-                'layout_esquerdo': a, 'layout_direito': b,
-                'chave': chave or '',
-                'status': 'disponivel' if chave else 'sem_chave',
-                'motivo': f"Chave compartilhada: {chave}" if chave else 'Nenhuma chave compartilhada detectada',
-            })
-        return combos
-
-    def _narrativa(self, analises: List[Dict[str, Any]], presentes: List[str]) -> List[str]:
-        narr = []
-        disp = [a for a in analises if a['status'] == 'disponivel']
-        if not presentes:
-            narr.append('Nenhum layout normalizado (N02/N50/N52/N60/N90/N91) foi reconhecido na base de entrada.')
-            narr.append('Apenas as análises da base plana consolidada podem ser avaliadas.')
-            return narr
-        narr.append(f"Base reconhecida com {len(presentes)} layout(s): {', '.join(sorted(presentes))}.")
-        por_status: Dict[str, int] = {}
-        for a in analises:
-            por_status[a['status']] = por_status.get(a['status'], 0) + 1
-        narr.append(f"Das {len(analises)} análises conhecidas, {len(disp)} estão disponíveis "
-                    f"({por_status.get('layout_ausente', 0)} dependem de layout ausente, "
-                    f"{por_status.get('campo_ausente', 0)} de campo ausente, "
-                    f"{por_status.get('campo_vazio', 0)} de campo vazio e "
-                    f"{por_status.get('sem_chave', 0)} de cruzamento sem chave).")
-        por_cat: Dict[str, int] = {}
-        for a in disp:
-            por_cat[a['categoria']] = por_cat.get(a['categoria'], 0) + 1
-        if por_cat:
-            top = max(por_cat.items(), key=lambda kv: kv[1])
-            narr.append(f"A categoria com mais análises executáveis é '{top[0]}' ({top[1]} análise(s)).")
-        return narr
-
-    def _achados(self, analises: List[Dict[str, Any]], resumo_por_layout: Dict[str, Dict[str, Any]]) -> List[Dict[str, str]]:
-        achados = []
-        indisponiveis = [a for a in analises if a['status'] != 'disponivel']
-        if not indisponiveis:
-            achados.append({'severidade': 'INFO',
-                            'texto': 'Todas as análises aplicáveis aos layouts presentes estão disponíveis.'})
-        else:
-            achados.append({'severidade': 'ATENÇÃO',
-                            'texto': f"{len(indisponiveis)} análise(s) do catálogo não pode(m) ser executada(s) "
-                                     f"com os dados carregados (ver matriz de cobertura para o motivo exato)."})
-            por_motivo: Dict[str, int] = {}
-            for a in indisponiveis:
-                por_motivo[a['status']] = por_motivo.get(a['status'], 0) + 1
-            for status, qtd in sorted(por_motivo.items(), key=lambda kv: -kv[1]):
-                labels = {'layout_ausente': 'dependem de um layout ausente na base',
-                          'campo_ausente': 'estão sem um campo obrigatório na base',
-                          'campo_vazio': 'têm os campos, porém 100% vazios',
-                          'sem_chave': 'exigem cruzamento sem chave compartilhada'}
-                achados.append({'severidade': 'INFO' if status == 'sem_chave' else 'ATENÇÃO',
-                                'texto': f"{qtd} análise(s) {labels.get(status, status)}."})
-        for k, meta in resumo_por_layout.items():
-            if meta.get('presente') and meta.get('colunas', 0) == 0:
-                achados.append({'severidade': 'ATENÇÃO',
-                                'texto': f"Layout {k} detectado, porém sem colunas aproveitáveis."})
-        return achados
-
-    def _resumo_uf(self) -> List[Dict[str, Any]]:
-        df = self.flat_df
-        if not self._table_ok(df):
-            return []
-        uf_col = next((c for c in ('SG_UF', 'SG_UF_PROVA', 'SG_UF_MUNICIPIO_PROVA')
-                       if c in self._colunas_presentes(df) and not df[c].dropna().empty), None)
-        if uf_col is None:
-            return []
-        out = df[uf_col].dropna().value_counts().head(27).reset_index()
-        out.columns = ['UF', 'registros']
-        return out.to_dict('records')
-
-
-class ReportReferenceIngestor:
-    """Framework (scaffold) para INGERIR relatórios/notas técnicas do INEP como
-    referência às interpretações do painel.
-
-    Ainda não há relatórios anexados neste projeto: a classe apenas lê arquivos
-    .txt/.md/.docx/.pdf de um diretório passado com ``--relatorios`` e extrai
-    padrões quantitativos (percentuais, médias, limites) por regex, marcando-os
-    como REFERÊNCIA. Sem o diretório (ou sem arquivos), devolve lista vazia sem
-    falhar — o pipeline segue idêntico ao anterior (sem regressão).
-    """
-
-    def __init__(self, dirpath: Optional[str] = None, logger: Optional[logging.Logger] = None) -> None:
-        self.dirpath = dirpath
-        self.logger = logger
-
-    def ingest(self) -> List[Dict[str, Any]]:
-        if not self.dirpath:
-            return []
-        p = Path(str(self.dirpath))
-        if not p.exists():
-            return []
-        arquivos = sorted(p.rglob('*')) if p.is_dir() else [p]
-        refs = []
-        for f in arquivos:
-            if not f.is_file():
-                continue
-            if f.suffix.lower() not in ('.txt', '.md', '.docx', '.pdf'):
-                continue
-            try:
-                texto = self._read_text(f)
-            except Exception:
-                texto = ''
-            if not texto or len(texto) < 10:
-                continue
-            refs.append({
-                'arquivo': f.name,
-                'caminho': str(f),
-                'titulo': self._titulo(texto) or f.stem,
-                'padroes': self._padroes(texto),
-                'caracteres': len(texto),
-            })
-        if refs and self.logger is not None:
-            self.logger.info(f"[REFERÊNCIAS] {len(refs)} relatório(s) de referência ingerido(s) de '{self.dirpath}'.")
-        return refs
-
-    @staticmethod
-    def _read_text(f: Path) -> str:
-        if f.suffix.lower() in ('.txt', '.md'):
-            return f.read_text(encoding='utf-8', errors='ignore').lstrip('\ufeff')
-        if f.suffix.lower() == '.docx':
-            try:
-                import docx  # type: ignore
-                d = docx.Document(str(f))
-                return '\n'.join(p.text for p in d.paragraphs)
-            except Exception:
-                return ''
-        if f.suffix.lower() == '.pdf':
-            try:
-                from PyPDF2 import PdfReader  # type: ignore
-                return '\n'.join((pg.extract_text() or '') for pg in PdfReader(str(f)).pages)
-            except Exception:
-                try:
-                    import fitz  # type: ignore
-                    doc = fitz.open(str(f))
-                    return '\n'.join(pg.get_text() for pg in doc)
-                except Exception:
-                    return ''
-        return ''
-
-    @staticmethod
-    def _titulo(texto: str) -> str:
-        for linha in texto.splitlines():
-            ls = linha.strip()
-            if ls and 3 < len(ls) < 220:
-                return ls
-        return ''
-
-    @staticmethod
-    def _padroes(texto: str) -> List[Dict[str, Any]]:
-        padroes = []
-        for m in re.finditer(r'(\d+(?:[.,]\d+)?)\s*%\s*(?:de|dos|das)?\s*([A-Za-zÀ-ú][A-Za-zÀ-ú ]{2,40})', texto):
-            padroes.append({'tipo': 'percentual', 'valor': m.group(1), 'contexto': m.group(2).strip()})
-        for m in re.finditer(r'm[ée]dia\s*(?:de)?\s*(\d+(?:[.,]\d+)?)', texto, re.IGNORECASE):
-            padroes.append({'tipo': 'media', 'valor': m.group(1)})
-        return padroes[:30]
-
-
-# ============================================================================
-# CAMADA DE COMPATIBILIDADE DE ESCRITA EXCEL (Resiliência Real — v33)
-# ----------------------------------------------------------------------------
-# O construtor de workbook de dezenas de abas é escrito com a API do XlsxWriter
-# (formatos, merge_range, autofilter, cor condicional, gráficos nativos). O
-# XlsxWriter é declarado como dependência OPCIONAL no cabeçalho deste arquivo,
-# porém o pipeline quebrava se ele não estivesse instalado (engine hardcoded).
-# Esta camada traduz — em tempo real e de forma transparente — a MESMA API para
-# o openpyxl, que já acompanha o pandas. Com ela, sem xlsxwriter o Excel ainda é
-# gerado integralmente (dados + cabeçalhos + larguras + mesclagem + cor
-# condicional + filtros + autofiltro), apenas sem os gráficos nativos e com um
-# único aviso no log. Use a variável de ambiente INEP_EXCEL_ENGINE=openpyxl para
-# forçar o fallback mesmo com xlsxwriter instalado (útil em testes/CI).
-# ============================================================================
-
-_CORES_NADAS = {
-    "white": "FFFFFF", "black": "000000", "red": "FF0000", "green": "00FF00",
-    "blue": "0000FF", "yellow": "FFFF00", "cyan": "00FFFF", "magenta": "FF00FF",
-    "gray": "808080", "grey": "808080", "darkgray": "A9A9A9", "darkgrey": "A9A9A9",
-    "lightgray": "D3D3D3", "lightgrey": "D3D3D3", "orange": "FFA500",
-    "purple": "800080", "brown": "A52A2A", "pink": "FFC0CB", "silver": "C0C0C0",
-    "maroon": "800000", "navy": "000080", "olive": "808000", "teal": "008080",
-    "lime": "00FF00", "aqua": "00FFFF", "fuchsia": "FF00FF", "transparent": "00000000",
-}
-
-
-def _px(color):
-    """Normaliza cor hex para o formato aceito pelo openpyxl (sem '#').
-    XlsxWriter aceita nomes de cor ('white'), openpyxl exige aRGB hex — por isso
-    os nomes comuns são convertidos aqui para o valor hexadecimal equivalente."""
-    if not color:
-        return "000000"
-    s = str(color).strip()
-    if s.startswith("#"):
-        return s[1:].upper()
-    if s.lower() in _CORES_NADAS:
-        return _CORES_NADAS[s.lower()]
-    if len(s) in (6, 8) and all(c in "0123456789abcdefABCDEF" for c in s):
-        return s.upper()
-    return s.upper()
-
-
-class _CompatFormat:
-    """Formato compatível com a API do XlsxWriter, aplicado sobre células openpyxl."""
-
-    __slots__ = ("_props",)
-
-    def __init__(self, props=None):
-        object.__setattr__(self, "_props", dict(props or {}))
-
-    def apply(self, cell):
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        p = self._props
-        if p.get("bold") or p.get("font_size") or p.get("font_color"):
-            cell.font = Font(bold=bool(p.get("bold")), size=p.get("font_size", 11),
-                             color=_px(p.get("font_color", "000000")))
-        bg = p.get("bg_color")
-        if bg:
-            cell.fill = PatternFill(fill_type="solid", start_color=_px(bg), end_color=_px(bg))
-        al = {}
-        if p.get("text_wrap"):
-            al["wrap_text"] = True
-        if p.get("valign"):
-            v = str(p.get("valign")).lower()
-            al["vertical"] = {"vcenter": "center", "center": "center"}.get(v, v)
-        if al:
-            cell.alignment = Alignment(**al)
-        if p.get("border"):
-            side = Side(style="thin", color="9CA3AF")
-            cell.border = Border(left=side, right=side, top=side, bottom=side)
-        return cell
-
-
-class _CompatChart:
-    """Gráfico 'nativo' no openpyxl não é implementado de forma idêntica ao
-    XlsxWriter; para manter a resiliência, o objeto é um stub inofensivo que
-    aceita a mesma chamada de API e simplesmente não plota. As abas de DADOS
-    continuam íntegras."""
-
-    def add_series(self, *a, **k):
-        return None
-
-    def set_title(self, *a, **k):
-        return None
-
-    def set_legend(self, *a, **k):
-        return None
-
-    def set_x_axis(self, *a, **k):
-        return None
-
-    def set_y_axis(self, *a, **k):
-        return None
-
-    def set_size(self, *a, **k):
-        return None
-
-
-class _CompatWorksheet:
-    """Aba compatível com a API do XlsxWriter em cima de uma aba openpyxl."""
-
-    __slots__ = ("_ws",)
-
-    def __init__(self, ws):
-        object.__setattr__(self, "_ws", ws)
-
-    def __getattr__(self, name):
-        # Atributos não cobertos aqui são repassados à aba openpyxl subjacente.
-        return getattr(self._ws, name)
-
-    def _cell(self, cell_or_row, col=None):
-        if isinstance(cell_or_row, str):
-            return self._ws[cell_or_row]
-        return self._ws.cell(row=int(cell_or_row) + 1, column=int(col) + 1)
-
-    def write(self, cell_or_row, col=None, value=None, fmt=None):
-        if isinstance(cell_or_row, str):
-            cell = self._ws[cell_or_row]
-            val, f = col, (value if isinstance(value, _CompatFormat) else None)
-        else:
-            cell = self._ws.cell(row=int(cell_or_row) + 1, column=(0 if col is None else int(col)) + 1)
-            val, f = value, fmt
-        if val is not None:
-            cell.value = val
-        if f is not None:
-            f.apply(cell)
-        return cell
-
-    def merge_range(self, range_str, text, fmt=None):
-        from openpyxl.utils.cell import range_boundaries
-        self._ws.merge_cells(range_str)
-        min_col, min_row, max_col, max_row = range_boundaries(range_str)
-        cell = self._ws.cell(row=min_row, column=min_col)
-        cell.value = text
-        if fmt is not None:
-            for r in range(min_row, max_row + 1):
-                for c in range(min_col, max_col + 1):
-                    fmt.apply(self._ws.cell(row=r, column=c))
-        return cell
-
-    def set_column(self, first, last=None, width=None, fmt=None):
-        from openpyxl.utils import get_column_letter, column_index_from_string
-        if isinstance(first, str):
-            if ":" in first:
-                a, b = [x.strip() for x in first.split(":", 1)]
-                c1, c2 = column_index_from_string(a), column_index_from_string(b)
-            else:
-                c1 = c2 = column_index_from_string(first.strip())
-            w = last if isinstance(last, (int, float)) else None
-            f = width if isinstance(width, _CompatFormat) else None
-        else:
-            c1, c2 = int(first) + 1, int(last) + 1
-            w, f = width, fmt
-        for ci in range(c1, c2 + 1):
-            letter = get_column_letter(ci)
-            self._ws.column_dimensions[letter].width = w if w is not None else 18
-            if f is not None:
-                for row in self._ws.iter_rows(min_col=ci, max_col=ci):
-                    for cell in row:
-                        f.apply(cell)
-        return None
-
-    def autofilter(self, r1, c1, r2, c2):
-        from openpyxl.utils import get_column_letter
-        self._ws.auto_filter.ref = (f"{get_column_letter(int(c1) + 1)}{int(r1) + 1}:"
-                                    f"{get_column_letter(int(c2) + 1)}{int(r2) + 1}")
-
-    def conditional_format(self, r1, c1, r2, c2, spec):
-        from openpyxl.utils import get_column_letter
-        from openpyxl.formatting.rule import ColorScaleRule
-        rng = (f"{get_column_letter(int(c1) + 1)}{int(r1) + 1}:"
-               f"{get_column_letter(int(c2) + 1)}{int(r2) + 1}")
-        if spec.get("type") == "3_color_scale":
-            rule = ColorScaleRule(
-                start_type="min", start_color=_px(spec.get("min_color", "#FFFFFF")),
-                mid_type="percentile", mid_value=50, mid_color=_px(spec.get("mid_color", "#FEF08A")),
-                end_type="max", end_color=_px(spec.get("max_color", "#10B981")))
-            self._ws.conditional_formatting.add(rng, rule)
-
-    def hide_gridlines(self, *a, **k):
-        try:
-            self._ws.sheet_view.showGridLines = False
-        except Exception:
-            pass
-
-    def set_row(self, row, height):
-        self._ws.row_dimensions[int(row) + 1].height = height
-
-    def insert_chart(self, *a, **k):
-        # Sem gráficos nativos no fallback openpyxl (comportamento documentado).
-        return None
-
-
-class _CompatWorkbook:
-    """Workbook compatível com a API do XlsxWriter em cima de openpyxl.
-    Quando o engine nativo é o xlsxwriter (compat=False), atua como passagem
-    transparente — comportamento idêntico ao código original."""
-
-    __slots__ = ("_book", "_writer", "_compat", "_registry")
-
-    def __init__(self, book, writer, compat):
-        object.__setattr__(self, "_book", book)
-        object.__setattr__(self, "_writer", writer)
-        object.__setattr__(self, "_compat", compat)
-        object.__setattr__(self, "_registry", {})
-
-    def __getattr__(self, name):
-        return getattr(self._book, name)
-
-    def _wrap(self, ws):
-        return _CompatWorksheet(ws) if (self._compat and not isinstance(ws, _CompatWorksheet)) else ws
-
-    def _current(self):
-        try:
-            return dict(self._writer.sheets)
-        except Exception:
-            return {}
-
-    def _find(self, name):
-        if name in self._registry:
-            return self._registry[name]
-        cur = self._current()
-        if name in cur:
-            return self._wrap(cur[name])
-        return None
-
-    def add_format(self, props=None):
-        if self._compat:
-            return _CompatFormat(props or {})
-        return self._book.add_format(props or {})
-
-    def add_chart(self, spec=None):
-        if self._compat:
-            return _CompatChart()
-        return self._book.add_chart(spec or {})
-
-    def add_worksheet(self, name):
-        ws = self._find(name)
-        if ws is not None:
-            return ws
-        cur = self._current()
-        raw = cur.get(name)
-        if raw is None:
-            try:
-                raw = self._book.add_worksheet(name)
-            except Exception:
-                try:
-                    raw = self._book.create_sheet(title=name)
-                except Exception:
-                    raw = cur.get(name)
-        wrapped = self._wrap(raw)
-        self._registry[name] = wrapped
-        return wrapped
-
-    def get_or_add(self, name):
-        ws = self._find(name)
-        if ws is not None:
-            return ws
-        return self.add_worksheet(name)
-
-
-def _engine_excel_forca_escolha() -> Optional[str]:
-    _v = os.environ.get("INEP_EXCEL_ENGINE", "").strip().lower()
-    return _v if _v in ("openpyxl", "xlsxwriter") else None
-
-
-def _criar_excel_writer(filepath, logger=None):
-    """Cria o ExcelWriter escolhendo o motor com segurança:
-    1) INEP_EXCEL_ENGINE força a escolha; 2) xlsxwriter se instalado;
-    3) openpyxl como fallback SEMPRE disponível (resiliência real)."""
-    forca = _engine_excel_forca_escolha()
-    engine = forca or ("xlsxwriter" if xlsxwriter is not None else "openpyxl")
-    if engine == "xlsxwriter" and xlsxwriter is None:
-        engine = "openpyxl"
-        if logger is not None:
-            logger.warning("INEP_EXCEL_ENGINE=xlsxwriter foi forçado, mas o xlsxwriter não está instalado — "
-                           "usando openpyxl. Instale com: pip install xlsxwriter")
-    if logger is not None:
-        logger.info(f"Motor Excel: {engine} (xlsxwriter nativo em gráficos quando disponível)")
-    writer = pd.ExcelWriter(filepath, engine=engine)
-    return writer, _CompatWorkbook(writer.book, writer, engine != "xlsxwriter")
-
-
 # ==========================================
 # VISUALIZER AND EXPORTER (Renderização Segura, Excel 21 Abas e HTML V27 Ouro UI/UX)
 # ==========================================
@@ -3864,8 +2957,7 @@ class VisualizerAndExporter:
         except Exception as e:
             self.logger.debug(f"Aviso Inofensivo (Kaleido Imagens Ausente no SO, prosseguindo com renderização Web Segura): {e}")
 
-    def export_auxiliary_files(self, results: MLProcessingResults, metadata: dict, didactic_pack: dict,
-                               audit=None, availability=None, referencias=None, reverse=None):
+    def export_auxiliary_files(self, results: MLProcessingResults, metadata: dict, didactic_pack: dict, audit=None):
         self.logger.info("Módulo Auxiliar: Extraindo Backups em Metadados Formais (JSON) e Matrizes Ouro Mestre (CSV)...")
         # CORREÇÃO DE AUDITORIA (v29): `results.quality_report` existe no DTO porém é
         # preenchido com {} (o motor estatístico não recebe o relatório do ETL). O antigo
@@ -3887,30 +2979,6 @@ class VisualizerAndExporter:
                     "kpis": audit.kpis,
                     "achados": audit.findings,
                     "resumo_executivo": audit.resumo_txt,
-                }
-            # v34: disponibilidade analítica adaptativa (mesmo bundle do HTML/Excel/Streamlit).
-            if availability is not None:
-                payload["disponibilidade_analitica"] = availability
-            # v34: relatórios de referência ingeridos (--relatorios).
-            if referencias:
-                payload["referencias_relatorios"] = referencias
-            # v34: engenharia reversa dos relatórios (LOTE RO / LOTE 3).
-            if reverse is not None and getattr(reverse, 'ativo', False):
-                payload["engenharia_reversa_relatorios"] = {
-                    "kpis": reverse.kpis,
-                    "achados": reverse.achados,
-                    "resumo_executivo": reverse.resumo_txt,
-                    "modulos": reverse.modulos,
-                    "matriz_relatorio_aplicacao": (
-                        reverse.matriz_relatorio_aplicacao.to_dict(orient='records')
-                        if isinstance(reverse.matriz_relatorio_aplicacao, pd.DataFrame)
-                        else []
-                    ),
-                    "matriz_analise_dados": (
-                        reverse.matriz_analise_dados.to_dict(orient='records')
-                        if isinstance(reverse.matriz_analise_dados, pd.DataFrame)
-                        else []
-                    ),
                 }
             json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
             
@@ -3934,20 +3002,6 @@ class VisualizerAndExporter:
                 texto += f"    Interpretação: {f_['interpretacao']}\n"
                 if f_.get('recomendacao'):
                     texto += f"    Recomendação : {f_['recomendacao']}\n"
-                texto += "\n"
-
-        # v34: seção de engenharia reversa dos relatórios no laudo (reconstrução dinâmica).
-        if reverse is not None and getattr(reverse, 'ativo', False):
-            texto += "\n=========================================================================================\n"
-            texto += "ENGENHARIA REVERSA DOS RELATÓRIOS DE REFERÊNCIA (LOTE RO / LOTE 3)\n"
-            texto += "=========================================================================================\n\n"
-            texto += reverse.resumo_txt + "\n\n"
-            for m_ in reverse.modulos:
-                texto += f"[{m_.get('classificacao', '')}] {m_.get('titulo', '')}\n"
-                if m_.get('regra'):
-                    texto += f"    Regra: {m_['regra']}\n"
-                if m_.get('motivo'):
-                    texto += f"    Motivo (não avaliável): {m_['motivo']}\n"
                 texto += "\n"
 
         with open(self.dirs["arquivos_auxiliares"] / "3_Laudo_Insights_Consolidados.txt", "w", encoding="utf-8") as f:
@@ -4091,13 +3145,13 @@ class VisualizerAndExporter:
             except Exception as e:
                 self.logger.debug(f"Mapa geográfico standalone ignorado: {e}")
 
-    def build_excel_workbook(self, results: MLProcessingResults, didactic_pack: dict, audit=None,
-                             availability=None, referencias=None, reverse=None):
+    def build_excel_workbook(self, results: MLProcessingResults, didactic_pack: dict, audit=None):
         """Constrói o Data Warehouse Excel Multi-Nível EXTREMO Corporativo com 21 Abas Físicas Mestre Array Ouro Limpo."""
         self.logger.info("Excel C-Level Builder: Gerando 21 Abas Oficiais Nativas de Extração Dimensional Data-Driven...")
         filepath = self.dirs["dados_processados"] / "Analise_Completa_Master_Ultimate_Edition.xlsx"
         
-        writer, workbook = _criar_excel_writer(filepath, self.logger)
+        writer = pd.ExcelWriter(filepath, engine='xlsxwriter')
+        workbook = writer.book
 
         title_fmt = workbook.add_format({'bold': True, 'font_size': 13, 'bg_color': '#1E293B', 'font_color': 'white', 'valign': 'vcenter', 'border': 1})
         subtitle_fmt = workbook.add_format({'bold': True, 'font_size': 12, 'bg_color': '#334155', 'font_color': '#10B981', 'valign': 'vcenter', 'border': 1})
@@ -4117,8 +3171,11 @@ class VisualizerAndExporter:
                 except Exception as _e:
                     self.logger.warning(f"Aba '{safe_name}': falha ao gravar dados ({_e}); criando aba vazia.")
                     has_data = False
-            # Garante que a worksheet exista mesmo sem dados (via camada de compatibilidade).
-            ws = workbook.get_or_add(safe_name)
+            # Garante que a worksheet exista mesmo sem dados (evita KeyError em writer.sheets).
+            ws = writer.sheets.get(safe_name)
+            if ws is None:
+                ws = writer.book.add_worksheet(safe_name)
+                writer.sheets[safe_name] = ws
             ws.set_column('A:A', 35 if has_index else 25)
             ws.merge_range('A1:J1', f" FUNDAMENTAÇÃO CONCEITUAL E STORYTELLING OBRIGATÓRIO DA ABA: {sheet_name.upper()}", title_fmt)
             ws.merge_range('A2:J7', explanation, desc_fmt)
@@ -4653,7 +3710,8 @@ class VisualizerAndExporter:
 
             # ---- Painel Visual: GRÁFICOS NATIVOS do Excel (interativos na planilha) ----
             try:
-                wsv = workbook.add_worksheet("01_Painel_Visual_Graficos")
+                wsv = writer.book.add_worksheet("01_Painel_Visual_Graficos")
+                writer.sheets["01_Painel_Visual_Graficos"] = wsv
                 wsv.set_column('A:A', 3)
                 wsv.merge_range('A1:J1', " PAINEL VISUAL — GRÁFICOS NATIVOS DA PLANILHA (resumo dos principais cruzamentos)", title_fmt)
                 wsv.merge_range('A2:J4', "Estes gráficos são NATIVOS do Excel — clique neles para interagir, redimensionar ou copiar. "
@@ -4681,7 +3739,7 @@ class VisualizerAndExporter:
                         except (ValueError, TypeError):
                             v = 0
                         wsv.write(drow + 1 + i, dcol + 1, v)
-                    ch = workbook.add_chart({'type': ctype})
+                    ch = writer.book.add_chart({'type': ctype})
                     ch.add_series({
                         'name': titulo,
                         'categories': ['01_Painel_Visual_Graficos', drow + 1, dcol, drow + n, dcol],
@@ -4710,147 +3768,11 @@ class VisualizerAndExporter:
             except Exception as _e:
                 self.logger.warning(f"Painel visual de gráficos nativos não pôde ser criado: {_e}")
 
-        # v34: CAMADA ADAPTATIVA — abas de disponibilidade analítica, matriz de cobertura e cruzamentos.
-        try:
-            if availability:
-                _linhas_disp = []
-                for _a in availability.get('analises', []):
-                    _linhas_disp.append({
-                        'Análise': _a.get('titulo', ''), 'ID': _a.get('id', ''),
-                        'Categoria': _a.get('categoria', ''),
-                        'Layouts': ', '.join(_a.get('layouts', [])) or _a.get('base', 'BASE'),
-                        'Status': _a.get('status', ''), 'Motivo': _a.get('motivo', ''),
-                        'Implementada': 'Sim' if _a.get('implementada') else 'Não',
-                        'Executável': 'Sim' if _a.get('executavel') else 'Não',
-                    })
-                _df_disp = pd.DataFrame(_linhas_disp) if _linhas_disp else pd.DataFrame()
-                _lays_txt = ', '.join(availability.get('layouts_presentes', [])) or 'nenhum'
-                _n_disp = sum(1 for a in availability.get('analises', []) if a.get('status') == 'disponivel')
-                _n_tot = len(availability.get('analises', []))
-                _resumo_txt = (f"DISPONIBILIDADE ANALÍTICA ADAPTATIVA (v34) — Layouts presentes: {_lays_txt}. "
-                               f"{_n_disp}/{_n_tot} análises disponíveis para os dados carregados.\n"
-                               + "\n".join(f"• {t}" for t in availability.get('narrativa', [])))
-                create_sheet("0_Disponibilidade_Analitica", _resumo_txt, _df_disp, False)
-
-                _linhas_mat = []
-                for _m in availability.get('matriz_cobertura', []):
-                    _linhas_mat.append({
-                        'Análise': _m.get('analise', ''), 'ID': _m.get('id', ''),
-                        'Categoria': _m.get('categoria', ''), 'Layouts': _m.get('layouts', ''),
-                        'Status': _m.get('status', ''), 'Motivo': _m.get('motivo', ''),
-                        'Implementada': 'Sim' if _m.get('implementada') else 'Não',
-                    })
-                _df_mat = pd.DataFrame(_linhas_mat) if _linhas_mat else pd.DataFrame()
-                create_sheet("00_Matriz_Cobertura",
-                             "MATRIZ DE COBERTURA ANALÍTICA — cada análise do catálogo, os layouts exigidos, "
-                             "o status real na base carregada (disponivel/layout_ausente/campo_ausente/campo_vazio/sem_chave) "
-                             "e o motivo quando não executável.", _df_mat, False)
-
-                _linhas_cruz = []
-                for _c in availability.get('cruzamentos_possiveis', []):
-                    _linhas_cruz.append({
-                        'Layout Esquerdo': _c.get('layout_esquerdo', ''), 'Layout Direito': _c.get('layout_direito', ''),
-                        'Chave Compartilhada': _c.get('chave', ''), 'Status': _c.get('status', ''),
-                        'Motivo': _c.get('motivo', ''),
-                    })
-                _df_cruz = pd.DataFrame(_linhas_cruz) if _linhas_cruz else pd.DataFrame()
-                create_sheet("0a_Cruzamentos_Layouts",
-                             "CRUZAMENTOS POSSÍVEIS — pares de layouts presentes com a chave compartilhada detectada.",
-                             _df_cruz, False)
-        except Exception as _e:
-            self.logger.warning(f"Abas adaptativas de disponibilidade não criadas: {_e}")
-
-        # v34: relatórios de referência ingeridos (--relatorios).
-        try:
-            if referencias:
-                _linhas_ref = []
-                for _r in referencias:
-                    _linhas_ref.append({
-                        'Arquivo': _r.get('arquivo', ''), 'Título': _r.get('titulo', ''),
-                        'Padrões Extraídos': json.dumps(_r.get('padroes', []), ensure_ascii=False, default=str),
-                        'Tamanho (caracteres)': _r.get('caracteres', 0),
-                    })
-                _df_ref = pd.DataFrame(_linhas_ref) if _linhas_ref else pd.DataFrame()
-                create_sheet("43_Referencias_Relatorios",
-                             "RELATÓRIOS DE REFERÊNCIA — notas técnicas ingeridas com --relatorios, com os padrões "
-                             "quantitativos extraídos (percentuais, médias, limites) para contexto das interpretações.",
-                             _df_ref, False)
-        except Exception as _e:
-            self.logger.warning(f"Aba de referências não criada: {_e}")
-
-        # v34: abas da engenharia reversa dos relatórios (LOTE RO / LOTE 3).
-        if reverse is not None and getattr(reverse, 'ativo', False):
-            try:
-                _linhas_mod = []
-                for _m in reverse.modulos:
-                    _linhas_mod.append({
-                        'ID': _m.get('id', ''),
-                        'Módulo': _m.get('titulo', ''),
-                        'Categoria': _m.get('categoria', ''),
-                        'Classificação': _m.get('classificacao', ''),
-                        'Status': _m.get('status', ''),
-                        'Regra': _m.get('regra', ''),
-                        'Motivo (não avaliável)': _m.get('motivo', '') or '',
-                    })
-                _df_mod = pd.DataFrame(_linhas_mod) if _linhas_mod else pd.DataFrame()
-                if not _df_mod.empty:
-                    create_sheet("100_Modulos_Engenharia_Reversa",
-                                 "OBJETIVO: módulos da engenharia reversa dos relatórios LOTE RO/LOTE 3 — classificação "
-                                 "(Conforme/Atenção/Crítico/Não avaliável), regra explícita e motivo. APLICAÇÃO: rastrear "
-                                 "quais análises dos relatórios foram reconstruídas dinamicamente da base.", _df_mod, False)
-                if isinstance(reverse.matriz_relatorio_aplicacao, pd.DataFrame) and not reverse.matriz_relatorio_aplicacao.empty:
-                    create_sheet("101_Matriz_Relatorio_Aplicacao",
-                                 "OBJETIVO: confronto entre as análises dos relatórios de referência (LOTE RO/LOTE 3) e "
-                                 "os módulos do app — o que é implementado dinamicamente e o que não é implementável "
-                                 "(com justificativa). APLICAÇÃO: auditoria de cobertura da engenharia reversa.",
-                                 reverse.matriz_relatorio_aplicacao, False)
-                if isinstance(reverse.matriz_analise_dados, pd.DataFrame) and not reverse.matriz_analise_dados.empty:
-                    create_sheet("102_Matriz_Analise_Dados",
-                                 "OBJETIVO: análise × dados necessários × fonte nas layouts — mostra a dependência de "
-                                 "dados de cada análise e os casos marcados como 'Não avaliável'. APLICAÇÃO: entender "
-                                 "por que uma análise não é calculada (nunca inventamos números).",
-                                 reverse.matriz_analise_dados, False)
-                _rev_tabs = [
-                    ("103_Distancia_Municipio", 'dist_mun_resumo',
-                     "OBJETIVO: distância média/mediana/p90/máx por município e casos extremos (>20 km e >30 km) — "
-                     "reconstrução do LOTE RO/LOTE 3. APLICAÇÃO: priorizar municípios com deslocamentos críticos."),
-                    ("104_Distancia_Faixas", 'dist_mun_faixas',
-                     "OBJETIVO: distribuição das faixas de distância por município (top 15). APLICAÇÃO: comparar "
-                     "com os histogramas dos relatórios."),
-                    ("105_Distancia_Extremos_30", 'dist_extremos_30',
-                     "OBJETIVO: casos de deslocamento > 30 km. APLICAÇÃO: investigação caso a caso."),
-                    ("106_Distancia_Extremos_20", 'dist_extremos_20',
-                     "OBJETIVO: casos de deslocamento entre 20 e 30 km. APLICAÇÃO: antecipar risco de ausência."),
-                    ("107_Distancia_Faixas_Gerais", 'dist_faixas_gerais',
-                     "OBJETIVO: histograma geral das faixas de distância. APLICAÇÃO: visão macro do deslocamento."),
-                    ("108_Capacidade_Salas", 'cap_salas',
-                     "OBJETIVO: ocupação de cada sala (capacidade × ensalados, % e diferença). APLICAÇÃO: localizar "
-                     "superlotadas e subutilizadas."),
-                    ("109_Capacidade_Locais", 'cap_locais',
-                     "OBJETIVO: ocupação agregada por LOCAL de prova. APLICAÇÃO: visão por prédio."),
-                    ("110_Capacidade_Superlotadas", 'cap_salas_superlotadas',
-                     "OBJETIVO: apenas as salas acima de 100% da capacidade. APLICAÇÃO: rebalanceamento imediato."),
-                    ("111_Capacidade_Histograma", 'cap_histograma',
-                     "OBJETIVO: histograma da diferença capacidade − ensalados. APLICAÇÃO: entender folga/aperto global."),
-                    ("112_Geolocalizacao_Qualidade", 'geo_qualidade',
-                     "OBJETIVO: qualidade das coordenadas dos locais (N52) e ensalados em locais sem coordenada "
-                     "válida. APLICAÇÃO: completar/corrigir georreferenciamento."),
-                    ("113_Ensalamento_Municipio", 'ens_mun_resumo',
-                     "OBJETIVO: taxa de ensalamento por município (N90 × N02). APLICAÇÃO: cobrir municípios com taxa baixa."),
-                ]
-                for _tab_name, _tab_key, _tab_expl in _rev_tabs:
-                    _df_t = reverse.tabelas.get(_tab_key, pd.DataFrame())
-                    if isinstance(_df_t, pd.DataFrame) and not _df_t.empty:
-                        create_sheet(_tab_name, _tab_expl, _df_t, False)
-            except Exception as _e:
-                self.logger.warning(f"Abas de engenharia reversa não criadas: {_e}")
-
         writer.close()
         self.logger.info("Excel Data Warehouse Enterprise Exportado com Sucesso Extremo Ouro. (O Arquivo Físico Matriz XLSX Ouro Limitadora Array com 21 Abas Formatas na Integralidade e Fórmulas de Color Scale foi descarregado intocado e fechado com segurança).")
 
 
-    def generate_didactic_html_dashboard(self, results: MLProcessingResults, didactic_pack: dict, audit=None,
-                                         availability=None, referencias=None, reverse=None):
+    def generate_didactic_html_dashboard(self, results: MLProcessingResults, didactic_pack: dict, audit=None):
         """
         ========================================================================
         MOTOR EXECUTIVO DO DASHBOARD SINGLE PAGE APPLICATION (SPA HTML) - V27.0 CORPORATIVA
@@ -4968,30 +3890,6 @@ class VisualizerAndExporter:
         conceitos_json_str = json.dumps(didactic_pack.get('conceitos_criados', []), ensure_ascii=True)
         cutoffs_json_str = json.dumps(results.cutoffs or {}, ensure_ascii=True)
         totals_meta_json_str = json.dumps(getattr(results, 'totals_meta', []) or [], ensure_ascii=True, default=str)
-        # v34: disponibilidade analítica adaptativa + relatórios de referência.
-        availability_json_str = json.dumps(availability or {}, ensure_ascii=True, default=str)
-        referencias_json_str = json.dumps(referencias or [], ensure_ascii=True, default=str)
-
-        # v34: engenharia reversa dos relatórios (LOTE RO / LOTE 3).
-        rev_ativo = bool(reverse is not None and getattr(reverse, 'ativo', False))
-        if rev_ativo:
-            rev_modulos_json_str = json.dumps(reverse.modulos, ensure_ascii=True, default=str)
-            rev_kpis_json_str = json.dumps(reverse.kpis or {}, ensure_ascii=True, default=str)
-            rev_achados_json_str = json.dumps(reverse.achados or [], ensure_ascii=True, default=str)
-            rev_matriz_rel_json_str = _df_json(reverse.matriz_relatorio_aplicacao)
-            rev_matriz_ana_json_str = _df_json(reverse.matriz_analise_dados)
-            rev_dist_mun_faixas_json_str = _df_json(reverse.tabelas.get('dist_mun_faixas', pd.DataFrame()))
-            rev_cap_hist_json_str = _df_json(reverse.tabelas.get('cap_histograma', pd.DataFrame()))
-            rev_resumo_str = json.dumps(reverse.resumo_txt or "", ensure_ascii=True)
-        else:
-            rev_modulos_json_str = "[]"
-            rev_kpis_json_str = "{}"
-            rev_achados_json_str = "[]"
-            rev_matriz_rel_json_str = "[]"
-            rev_matriz_ana_json_str = "[]"
-            rev_dist_mun_faixas_json_str = "[]"
-            rev_cap_hist_json_str = "[]"
-            rev_resumo_str = '""'
 
         heat_x, heat_y, heat_z = [], [], []
         if not results.crosstab_faixa_ia.empty:
@@ -5277,7 +4175,6 @@ class VisualizerAndExporter:
                 <a href="#sec-inscritos"><i class="fas fa-users"></i> Inscritos &amp; Ensalamento (N02/N90)</a>
                 <a href="#sec-atendimentos"><i class="fas fa-universal-access"></i> Atendimentos &amp; Recursos (N91)</a>
                 <a href="#sec-auditoria-cruz"><i class="fas fa-clipboard-check"></i> Auditoria de Cruzamento (Relacional)</a>
-                <a href="#sec-eng-reversa"><i class="fas fa-rotate"></i> Engenharia Reversa dos Relatórios (LOTE RO/LOTE 3)</a>
                 <a href="#sec-mestre"><i class="fas fa-table-list"></i> Tabela Mestre dos Candidatos (Interativa)</a>
                 <a href="#sec-kits-tipos"><i class="fas fa-boxes-stacked"></i> Tipos de Kit (Contagem)</a>
                 <a href="#sec-n60-acess"><i class="fas fa-wheelchair"></i> Acessibilidade da Rede (N60 × Equidade)</a>
@@ -5285,7 +4182,6 @@ class VisualizerAndExporter:
                 <a href="#sec-atend-demo"><i class="fas fa-chart-column"></i> Atendimento por Faixa Etária (N91 × N90)</a>
                 <a href="#sec-dados"><i class="fas fa-database"></i> Data Explorer Mestre (8 Abas)</a>
                 <a href="#sec-metodologia"><i class="fas fa-book"></i> Metodologia & Dicionário (Novo)</a>
-                <a href="#sec-cobertura"><i class="fas fa-check-double"></i> Cobertura Analítica & Referências (Adaptativo)</a>
             </div>
 
             <div class="main-wrapper">
@@ -5989,53 +4885,6 @@ class VisualizerAndExporter:
                     </div>
                 </section>
 
-                <!-- ============================================================
-                     SEC VIII — ENGENHARIA REVERSA DOS RELATÓRIOS (v34)
-                     ============================================================ -->
-                <section id="sec-eng-reversa">
-                    <div class="section-header">
-                        <h1>VIII. Engenharia Reversa dos Relatórios (LOTE RO · LOTE 3)</h1>
-                        <p>Esta seção reconstrói <strong>dinamicamente</strong>, a partir das layouts N02/N50/N52/N90/N91, as análises que os relatórios de referência <strong>LOTE RO</strong> e <strong>LOTE 3</strong> apresentam em formato estático: distância de deslocamento por município e casos extremos, capacidade/ocupação das salas (superlotadas, subutilizadas, densidade), qualidade da geolocalização, divergência de distância e ensalamento por município. Tudo é <strong>recalculado da base carregada</strong> — nenhum número de relatório é embutido. Análises que dependem de dados externos às layouts (posição de assentos, confiança de geolocalização da comissão, solução do otimizador) são marcadas <strong>Não avaliável</strong> com o motivo, nunca inventadas.</p>
-                    </div>
-
-                    <div id="revVazio" class="card" style="display:none;">
-                        <div class="aula-box"><strong><i class="fas fa-circle-info"></i> Engenharia reversa inativa:</strong> o arquivo processado não contém os layouts necessários (N02/N50/N52/N90/N91).</div>
-                    </div>
-
-                    <div id="revConteudo">
-                        <div class="card" style="border-left: 5px solid var(--s);">
-                            <div class="card-title"><i class="fas fa-file-signature"></i> Resumo executivo</div>
-                            <div id="revResumoTxt" class="aula-box">Carregando...</div>
-                        </div>
-
-                        <div class="card" style="border-left: 5px solid var(--s);">
-                            <div class="card-title"><i class="fas fa-gauge-high"></i> Classificação dos módulos (Conforme · Atenção · Crítico · Não avaliável)</div>
-                            <div id="revModulosCards" class="kpi-grid"></div>
-                            <div id="revModulosDetalhe"></div>
-                        </div>
-
-                        <div class="card" style="border-left: 5px solid var(--s);">
-                            <div class="card-title"><i class="fas fa-chart-column"></i> Distância por município — faixas empilhadas (top 15 municípios)</div>
-                            <div id="revDistMunChart"></div>
-                        </div>
-
-                        <div class="card" style="border-left: 5px solid var(--s);">
-                            <div class="card-title"><i class="fas fa-chart-bar"></i> Histograma da diferença capacidade − ensalados</div>
-                            <div id="revCapHistChart"></div>
-                        </div>
-
-                        <div class="card" style="border-left: 5px solid var(--s);">
-                            <div class="card-title"><i class="fas fa-table"></i> Matriz Relatório × Aplicação</div>
-                            <div id="revMatrizRel"></div>
-                        </div>
-
-                        <div class="card" style="border-left: 5px solid var(--s);">
-                            <div class="card-title"><i class="fas fa-table"></i> Matriz Análise × Dados Necessários</div>
-                            <div id="revMatrizAna"></div>
-                        </div>
-                    </div>
-                </section>
-
                 <!-- ================= NOVA SEÇÃO VI (v28): METODOLOGIA, DICIONÁRIO DE DADOS & NOVAS ANÁLISES ================= -->
                 <section id="sec-metodologia">
                     <div class="section-header">
@@ -6168,67 +5017,6 @@ class VisualizerAndExporter:
                         </table>
                     </div>
                 </section>
-
-                <!-- ================= SEÇÃO ADAPTATIVA (v34): COBERTURA ANALÍTICA & REFERÊNCIAS ================= -->
-                <section id="sec-cobertura">
-                    <div class="section-header">
-                        <h1>VII. Cobertura Analítica &amp; Referências (Plataforma Adaptativa)</h1>
-                        <p>Esta seção mostra o que a plataforma conseguiu avaliar com os layouts realmente presentes na sua base. Cada análise do catálogo recebe um status objetivo: <strong>disponível</strong> (pode ser executada), <strong>layout ausente</strong>, <strong>campo ausente</strong>, <strong>campo vazio</strong> ou <strong>sem chave</strong> (cruzamento sem chave compartilhada). Só é exibido o que os seus dados permitem — nenhuma seção vazia.</p>
-                    </div>
-
-                    <!-- Narrativa de disponibilidade -->
-                    <div class="insight-box" style="border-left:6px solid var(--gold);">
-                        <h3><i class="fas fa-magnifying-glass-chart"></i> Narrativa de disponibilidade</h3>
-                        <div id="avail-narrativa"><p>Carregando narrativa…</p></div>
-                    </div>
-
-                    <!-- Layouts reconhecidos -->
-                    <div class="insight-box" style="border-left:6px solid #3B82F6;">
-                        <h3><i class="fas fa-layer-group"></i> Layouts reconhecidos na base</h3>
-                        <div id="avail-layouts" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px;"></div>
-                    </div>
-
-                    <!-- Achados -->
-                    <div class="insight-box" style="border-left:6px solid #F59E0B;">
-                        <h3><i class="fas fa-triangle-exclamation"></i> Achados de disponibilidade</h3>
-                        <div id="avail-achados"></div>
-                    </div>
-
-                    <!-- Matriz de cobertura -->
-                    <div class="table-container">
-                        <h3><i class="fas fa-table-list"></i> Matriz de cobertura analítica</h3>
-                        <p style="color:var(--txt); font-size:0.9em;">Todas as análises que a plataforma conhece e o status real na sua base (disponível / layout ausente / campo ausente / campo vazio / sem chave).</p>
-                        <table class="display" style="width:100%;">
-                            <thead><tr><th>Análise</th><th>Categoria</th><th>Layouts</th><th>Status</th><th>Motivo</th></tr></thead>
-                            <tbody id="avail-matriz"></tbody>
-                        </table>
-                    </div>
-
-                    <!-- Cruzamentos possíveis -->
-                    <div class="table-container">
-                        <h3><i class="fas fa-link"></i> Cruzamentos entre layouts possíveis</h3>
-                        <p style="color:var(--txt); font-size:0.9em;">Pares de layouts presentes na base e a chave compartilhada detectada para a relação.</p>
-                        <table class="display" style="width:100%;">
-                            <thead><tr><th>Layout (esquerdo)</th><th>Layout (direito)</th><th>Chave compartilhada</th><th>Status</th></tr></thead>
-                            <tbody id="avail-cruzamentos"></tbody>
-                        </table>
-                    </div>
-
-                    <!-- Resumo por UF -->
-                    <div class="table-container">
-                        <h3><i class="fas fa-map-location-dot"></i> Resumo por UF (base plana)</h3>
-                        <table class="display" style="width:100%;">
-                            <thead><tr><th>UF</th><th>Registros</th></tr></thead>
-                            <tbody id="avail-uf"></tbody>
-                        </table>
-                    </div>
-
-                    <!-- Referências -->
-                    <div class="table-container">
-                        <h3><i class="fas fa-book-medical"></i> Relatórios de referência (--relatorios)</h3>
-                        <div id="avail-referencias"><p>Nenhum relatório de referência anexado. Use <code>--relatorios DIR</code> para servir de contexto às interpretações.</p></div>
-                    </div>
-                </section>
             </div>
 
             <!-- MOTOR JAVASCRIPT DE CONECTIVIDADE, CROSS-FILTERING BLINDADO, EXPLAINABLE AI E RENDERIZAÇÃO ESTATÍSTICA (ANTI-CRASH INCORPORADO E INJEÇÃO REPLACE MATRIZ FORMAL JSON PURA ARRAY LIMITADORA MESTRE C-LEVEL) -->
@@ -6243,10 +5031,6 @@ class VisualizerAndExporter:
                 const ufData = JSON_UF_DATA;
                 const munData = JSON_MUN_DATA;
                 const blocoData = JSON_BLOCO_DATA;
-                
-                // v34: disponibilidade analítica adaptativa + relatórios de referência.
-                const availData = JSON_AVAILABILITY;
-                const refData = JSON_REFERENCIAS;
                 
                 // Matrizes de Calor Multi-Nível Ouro Limitadora Formativa
                 const heatX = JSON_HEAT_X; 
@@ -6311,16 +5095,6 @@ class VisualizerAndExporter:
                 const auditMasterRows = JSON_AUDIT_MASTER_ROWS;
                 const auditMasterTotal = JSON_AUDIT_MASTER_TOTAL;
                 const auditResumo = JSON_AUDIT_RESUMO;
-
-                // v34 — Engenharia reversa dos relatórios (LOTE RO / LOTE 3).
-                const revModulos = JSON_REV_MODULOS;
-                const revKpis = JSON_REV_KPIS;
-                const revAchados = JSON_REV_ACHADOS;
-                const revMatrizRel = JSON_REV_MATRIZ_REL;
-                const revMatrizAna = JSON_REV_MATRIZ_ANA;
-                const revDistMunFaixas = JSON_REV_DIST_MUN_FAIXAS;
-                const revCapHist = JSON_REV_CAP_HIST;
-                const revResumo = JSON_REV_RESUMO;
 
                 // ============================================================
                 // RESPONSIVIDADE DOS GRÁFICOS (wrapper único do Plotly)
@@ -7800,122 +6574,6 @@ class VisualizerAndExporter:
                         } catch(err){ console.warn('Auditoria de Cruzamento não pôde ser renderizada:', err); }
                     })();
 
-                    // ================================================================
-                    // ENGENHARIA REVERSA DOS RELATÓRIOS (v34) — renderização única.
-                    // Reconstrução dinâmica das análises dos relatórios LOTE RO / LOTE 3.
-                    // ================================================================
-                    (function initEngReversa(){
-                        try {
-                            var mods = (typeof revModulos !== 'undefined' && revModulos) ? revModulos : [];
-                            var esc = function(s){ if(s===null||s===undefined) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
-                            var num = function(x){ return (typeof x === 'number' && isFinite(x)) ? x : 0; };
-                            var ativo = !!(mods && mods.length);
-                            var vazio = document.getElementById('revVazio');
-                            var conteudo = document.getElementById('revConteudo');
-                            if(!ativo){
-                                if(vazio) vazio.style.display = 'block';
-                                if(conteudo) conteudo.style.display = 'none';
-                                return;
-                            }
-                            if(vazio) vazio.style.display = 'none';
-                            if(conteudo) conteudo.style.display = 'block';
-
-                            // Resumo executivo.
-                            var rtxt = document.getElementById('revResumoTxt');
-                            if(rtxt && typeof revResumo === 'string' && revResumo) rtxt.textContent = revResumo;
-
-                            // Cards de classificação dos módulos (Conforme · Atenção · Crítico · Não avaliável).
-                            var cardsDiv = document.getElementById('revModulosCards');
-                            if(cardsDiv && mods.length){
-                                var coresCl = { 'Conforme':'#10b981', 'Atenção':'#f59e0b', 'Crítico':'#ef4444', 'Não avaliável':'#64748b' };
-                                cardsDiv.innerHTML = mods.map(function(m){
-                                    var cor = coresCl[m.classificacao] || '#64748b';
-                                    return '<div class="kpi-box" style="border-left:4px solid '+cor+';">'
-                                         + '<div class="kpi-val" style="color:'+cor+';">'+ esc(m.classificacao||'—') +'</div>'
-                                         + '<div class="kpi-lbl" style="font-size:12px;line-height:1.3;">'+ esc(m.titulo||'') +'</div>'
-                                         + '</div>';
-                                }).join('\n');
-                            }
-
-                            // Detalhe por módulo (narrativa + regra + motivo + evidências).
-                            var detalheDiv = document.getElementById('revModulosDetalhe');
-                            if(detalheDiv && mods.length){
-                                var coresCl2 = { 'Conforme':'#10b981', 'Atenção':'#f59e0b', 'Crítico':'#ef4444', 'Não avaliável':'#64748b' };
-                                detalheDiv.innerHTML = mods.map(function(m){
-                                    var cor = coresCl2[m.classificacao] || '#64748b';
-                                    var ev = (m.evidencias && m.evidencias.length) ?
-                                        '<ul style="font-size:11px;margin:6px 0 0 18px;color:#334155;">'
-                                        + m.evidencias.map(function(e){ return '<li>'+esc(e)+'</li>'; }).join('')
-                                        + '</ul>' : '';
-                                    return '<div class="card" style="border-left:5px solid '+cor+';margin-bottom:10px;">'
-                                         + '<div class="card-title"><span style="background:'+cor+';color:#fff;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700;margin-right:6px;">'+ esc(m.classificacao||'—') +'</span> '+ esc(m.titulo||'') +'</div>'
-                                         + '<div class="aula-box" style="font-size:12px;">'+ esc(m.narrativa||'') +'</div>'
-                                         + '<div style="font-size:11px;margin-top:6px;"><strong>Regra:</strong> '+ esc(m.regra||'') +'</div>'
-                                         + (m.motivo ? '<div style="font-size:11px;margin-top:4px;"><strong>Motivo (não avaliável):</strong> '+ esc(m.motivo) +'</div>' : '')
-                                         + ev
-                                         + '</div>';
-                                }).join('\n');
-                            }
-
-                            // Gráfico: faixas de distância por município (barras empilhadas, top 15).
-                            var munDiv = document.getElementById('revDistMunChart');
-                            if(munDiv && typeof Plotly !== 'undefined' && (typeof revDistMunFaixas !== 'undefined') && revDistMunFaixas && revDistMunFaixas.length){
-                                var faixas = ['<1 km','1–3 km','3–5 km','5–10 km','10–20 km','20–30 km','>30 km'];
-                                var coresFaixa = ['#6366f1','#22d3ee','#34d399','#fbbf24','#f97316','#ef4444','#7c3aed'];
-                                var munNomes = revDistMunFaixas.map(function(d){ return d['MUNICÍPIO'] !== undefined ? esc(d['MUNICÍPIO']) : esc(d['MUNICIPIO'] || ''); });
-                                var traces = faixas.map(function(fb, idx){
-                                    var vals = revDistMunFaixas.map(function(d){ return num(d[fb]); });
-                                    return { x: munNomes, y: vals, type:'bar', name: fb, marker:{ color: coresFaixa[idx % coresFaixa.length] } };
-                                });
-                                var mlayout = { barmode:'stack', height:360, margin:{l:70,r:20,t:50,b:90},
-                                   title:{text:'Distância por município — faixas empilhadas (top 15 por participantes)', font:{size:14}},
-                                   xaxis:{title:'Município', tickangle:-35}, yaxis:{title:'Participantes'} };
-                                try { Plotly.newPlot('revDistMunChart', traces, mlayout, {responsive:true, displaylogo:false}); }
-                                catch(e){ munDiv.innerHTML = '<div class="aula-box">Gráfico indisponível.</div>'; }
-                            }
-
-                            // Gráfico: histograma da diferença capacidade − ensalados.
-                            var capDiv = document.getElementById('revCapHistChart');
-                            if(capDiv && typeof Plotly !== 'undefined' && (typeof revCapHist !== 'undefined') && revCapHist && revCapHist.length){
-                                var capX = revCapHist.map(function(d){ return d['FAIXA']||''; });
-                                var capY = revCapHist.map(function(d){ return num(d['SALAS']); });
-                                var clayout = { height:320, margin:{l:70,r:20,t:50,b:120},
-                                   title:{text:'Diferença capacidade − ensalados por sala', font:{size:14}},
-                                   xaxis:{title:'Diferença (ensalados − capacidade)', tickangle:-25}, yaxis:{title:'Salas'} };
-                                try { Plotly.newPlot('revCapHistChart', [{x: capX, y: capY, type:'bar', marker:{color:'#6366f1'}}], clayout, {responsive:true, displaylogo:false}); }
-                                catch(e){ capDiv.innerHTML = '<div class="aula-box">Gráfico indisponível.</div>'; }
-                            }
-
-                            // Matriz Relatório × Aplicação (tabela).
-                            var mRel = document.getElementById('revMatrizRel');
-                            if(mRel && (typeof revMatrizRel !== 'undefined') && revMatrizRel && revMatrizRel.length){
-                                var hdrs = ['Relatório','Análise no relatório','Módulo no app','Status','Justificativa'];
-                                var rows = revMatrizRel.map(function(d){
-                                    return [d['RELATÓRIO']||d['RELATORIO']||'—', d['ANÁLISE NO RELATÓRIO']||d['ANALISE NO RELATORIO']||'—', d['MÓDULO NO APP']||d['MODULO NO APP']||'—', d['STATUS']||'—', d['JUSTIFICATIVA']||'—'].map(esc);
-                                });
-                                mRel.innerHTML = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>'
-                                    + hdrs.map(function(h){ return '<th style="background:#1E293B;color:#fff;padding:8px;text-align:left;">'+esc(h)+'</th>'; }).join('') +'</tr></thead><tbody>'
-                                    + rows.map(function(r){ return '<tr>'+ r.map(function(c){ return '<td style="border:1px solid #E2E8F0;padding:6px;">'+c+'</td>'; }).join('') +'</tr>'; }).join('')
-                                    + '</tbody></table></div>';
-                            }
-
-                            // Matriz Análise × Dados Necessários (tabela).
-                            var mAna = document.getElementById('revMatrizAna');
-                            if(mAna && (typeof revMatrizAna !== 'undefined') && revMatrizAna && revMatrizAna.length){
-                                var hdrs2 = ['Análise','Dados necessários','Fonte nas layouts','Disponível','Status','Motivo'];
-                                var rows2 = revMatrizAna.map(function(d){
-                                    return [d['ANÁLISE']||d['ANALISE']||'—', d['DADOS NECESSÁRIOS']||'—', d['FONTE NAS LAYOUTS']||'—', d['DISPONÍVEL']||'—', d['STATUS']||'—', d['MOTIVO']||'—'].map(esc);
-                                });
-                                mAna.innerHTML = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>'
-                                    + hdrs2.map(function(h){ return '<th style="background:#1E293B;color:#fff;padding:8px;text-align:left;">'+esc(h)+'</th>'; }).join('') +'</tr></thead><tbody>'
-                                    + rows2.map(function(r){ return '<tr>'+ r.map(function(c){ return '<td style="border:1px solid #E2E8F0;padding:6px;">'+c+'</td>'; }).join('') +'</tr>'; }).join('')
-                                    + '</tbody></table></div>';
-                            }
-
-                            console.log('Engenharia Reversa dos Relatórios renderizada com sucesso.');
-                        } catch(err){ console.warn('Engenharia Reversa dos Relatórios não pôde ser renderizada:', err); }
-                    })();
-
                     // ================= TABELA MESTRE INTERATIVA =================
                     (function initMasterTable(){
                         try {
@@ -8134,93 +6792,6 @@ class VisualizerAndExporter:
                                 Plotly.react('chartAtendFaixa', [{ type:'bar', x: dr.map(function(r){ return r['FAIXA_ETARIA']; }), y: dr.map(function(r){ return r['TAXA_ATENDIMENTO (%)']; }), marker:{ color:'#7C3AED' }, text: dr.map(function(r){ return Number(r['TAXA_ATENDIMENTO (%)']).toFixed(1)+'%'; }), textposition:'auto', customdata: dr.map(function(r){ return [r['CANDIDATOS'], r['COM_ATENDIMENTO']]; }), hovertemplate:'%{x}: %{y}% de atendimento<br>%{customdata[1]} de %{customdata[0]} candidatos<extra></extra>' }], { margin:{l:50,r:20,t:10,b:40}, xaxis:{title:'Faixa etária (N90)'}, yaxis:{title:'Taxa de atendimento (%)'} }, {responsive:true, displayModeBar:false});
                             }
                         } catch(err){ console.warn('Atendimento por faixa não pôde ser renderizado:', err); }
-                    })();
-
-                    // ============================================================
-                    // RENDERIZADOR ADAPTATIVO (v34) — Cobertura Analítica & Referências
-                    // Consome o MESMO bundle de disponibilidade do motor Python
-                    // (JSON_AVAILABILITY) e os relatórios de referência (JSON_REFERENCIAS).
-                    // ============================================================
-                    (function availabilityRenderer(){
-                        try {
-                            var av = availData || {};
-                            var statusBadge = function(s){
-                                var cores = { 'disponivel':'#10B981', 'layout_ausente':'#EF4444', 'campo_ausente':'#F59E0B', 'campo_vazio':'#F59E0B', 'sem_chave':'#8B5CF6' };
-                                var rot = { 'disponivel':'Disponível', 'layout_ausente':'Layout ausente', 'campo_ausente':'Campo ausente', 'campo_vazio':'Campo vazio', 'sem_chave':'Sem chave' };
-                                return '<span style="display:inline-block; padding:2px 10px; border-radius:20px; font-size:0.75rem; font-weight:700; color:#fff; background:'+(cores[s]||'#64748B')+';">'+(rot[s]||s)+'</span>';
-                            };
-                            // Narrativa
-                            var narr = av.narrativa || [];
-                            var elN = document.getElementById('avail-narrativa');
-                            if(elN){ elN.innerHTML = narr.length ? '<ul style="margin:0; padding-left:18px; line-height:1.8;">' + narr.map(function(t){ return '<li>'+t+'</li>'; }).join('') + '</ul>' : '<p>Sem narrativa de disponibilidade.</p>'; }
-                            // Layouts reconhecidos
-                            var resumo = av.resumo_por_layout || {};
-                            var elL = document.getElementById('avail-layouts');
-                            if(elL){
-                                var lays = Object.keys(resumo);
-                                if(lays.length){
-                                    elL.innerHTML = lays.map(function(k){
-                                        var r = resumo[k] || {};
-                                        var cor = r.presente ? '#10B981' : '#94A3B8';
-                                        return '<div style="background:#F8FAFC; border-radius:10px; padding:12px; border-top:4px solid '+cor+';">'+
-                                            '<strong style="font-size:0.95rem;">'+k+'</strong><br>'+
-                                            '<span style="font-size:0.8rem; color:'+(r.presente?'#16A34A':'#64748B')+';">'+(r.presente?('Presente · '+r.linhas+' linhas · '+r.colunas+' colunas'):'Ausente na base')+'</span></div>';
-                                    }).join('');
-                                } else { elL.innerHTML = '<p>Nenhum layout normalizado reconhecido na base.</p>'; }
-                            }
-                            // Achados
-                            var ach = av.achados || [];
-                            var elA = document.getElementById('avail-achados');
-                            if(elA){
-                                if(ach.length){
-                                    elA.innerHTML = ach.map(function(a){
-                                        var cor = a.severidade === 'ATENÇÃO' ? '#F59E0B' : '#3B82F6';
-                                        return '<div style="padding:8px 12px; margin-bottom:8px; border-left:4px solid '+cor+'; background:#F8FAFC; border-radius:6px; font-size:0.9rem;">'+
-                                            '<span style="font-weight:700; color:'+cor+';">['+a.severidade+']</span> '+a.texto+'</div>';
-                                    }).join('');
-                                } else { elA.innerHTML = '<p>Sem achados de disponibilidade.</p>'; }
-                            }
-                            // Matriz de cobertura
-                            var mat = av.matriz_cobertura || [];
-                            var elM = document.getElementById('avail-matriz');
-                            if(elM){
-                                if(mat.length){
-                                    elM.innerHTML = mat.map(function(m){
-                                        return '<tr><td><strong>'+m.analise+'</strong></td><td>'+m.categoria+'</td><td>'+m.layouts+'</td><td>'+statusBadge(m.status)+'</td><td style="color:#475569;">'+m.motivo+'</td></tr>';
-                                    }).join('');
-                                } else { elM.innerHTML = '<tr><td colspan="5">Sem matriz de cobertura disponível.</td></tr>'; }
-                            }
-                            // Cruzamentos possíveis
-                            var cruz = av.cruzamentos_possiveis || [];
-                            var elC = document.getElementById('avail-cruzamentos');
-                            if(elC){
-                                if(cruz.length){
-                                    elC.innerHTML = cruz.map(function(c){
-                                        return '<tr><td>'+c.layout_esquerdo+'</td><td>'+c.layout_direito+'</td><td><code>'+(c.chave||'—')+'</code></td><td>'+statusBadge(c.status)+'</td></tr>';
-                                    }).join('');
-                                } else { elC.innerHTML = '<tr><td colspan="4">Nenhum cruzamento possível com os layouts presentes.</td></tr>'; }
-                            }
-                            // Resumo por UF
-                            var ufs = av.resumo_uf || [];
-                            var elU = document.getElementById('avail-uf');
-                            if(elU){
-                                if(ufs.length){
-                                    elU.innerHTML = ufs.map(function(u){ return '<tr><td>'+u.UF+'</td><td>'+u.registros+'</td></tr>'; }).join('');
-                                } else { elU.innerHTML = '<tr><td colspan="2">Coluna de UF não encontrada na base plana.</td></tr>'; }
-                            }
-                            // Referências
-                            var refs = refData || [];
-                            var elR = document.getElementById('avail-referencias');
-                            if(elR && refs.length){
-                                elR.innerHTML = refs.map(function(r){
-                                    var pat = (r.padroes || []);
-                                    var patTxt = pat.length ? pat.map(function(p){ return (p.tipo==='percentual') ? (p.valor+'% — '+p.contexto) : ('média '+p.valor); }).join('; ') : 'sem padrões extraídos';
-                                    return '<div style="padding:10px 14px; margin-bottom:8px; background:#F8FAFC; border-left:4px solid #8B5CF6; border-radius:6px;">'+
-                                        '<strong>'+r.titulo+'</strong> <span style="color:#64748B; font-size:0.78rem;">('+r.arquivo+')</span><br>'+
-                                        '<span style="font-size:0.85rem; color:#475569;">Padrões extraídos: '+patTxt+'</span></div>';
-                                }).join('');
-                            }
-                        } catch(err){ console.warn('Cobertura analítica não pôde ser renderizada:', err); }
                     })();
 
                     // ============================================================
@@ -8578,15 +7149,6 @@ class VisualizerAndExporter:
         html_content = html_content.replace('JSON_AUDIT_MASTER_ROWS', audit_master_json_str)
         html_content = html_content.replace('JSON_AUDIT_MASTER_TOTAL', str(audit_master_total))
         html_content = html_content.replace('JSON_AUDIT_RESUMO', audit_resumo_str)
-        # v34: engenharia reversa dos relatórios (LOTE RO / LOTE 3).
-        html_content = html_content.replace('JSON_REV_MODULOS', rev_modulos_json_str)
-        html_content = html_content.replace('JSON_REV_KPIS', rev_kpis_json_str)
-        html_content = html_content.replace('JSON_REV_ACHADOS', rev_achados_json_str)
-        html_content = html_content.replace('JSON_REV_MATRIZ_REL', rev_matriz_rel_json_str)
-        html_content = html_content.replace('JSON_REV_MATRIZ_ANA', rev_matriz_ana_json_str)
-        html_content = html_content.replace('JSON_REV_DIST_MUN_FAIXAS', rev_dist_mun_faixas_json_str)
-        html_content = html_content.replace('JSON_REV_CAP_HIST', rev_cap_hist_json_str)
-        html_content = html_content.replace('JSON_REV_RESUMO', rev_resumo_str)
         # Metadados de rastreabilidade (rodapé do painel de layouts).
         try:
             _cov = getattr(results, 'column_validation', {}) or {}
@@ -8606,23 +7168,12 @@ class VisualizerAndExporter:
                 html_content = html_content.replace(_tok, 'n/d')
         # Layouts efetivamente disponíveis/usados (para iniciar as caixas de seleção do dashboard).
         try:
-            _avail = []
-            # v34: prefere o bundle adaptativo (fonte única), cai para a auditoria e depois assume todos.
-            try:
-                _avail = sorted([k for k in (availability or {}).get('layouts_presentes', [])
-                                 if str(k) != 'BASE_PLANA'])
-            except Exception:
-                _avail = []
-            if not _avail:
-                _avail = sorted([k for k in (audit.L.keys() if (audit is not None and hasattr(audit, 'L')) else []) if not str(k).startswith('_')])
+            _avail = sorted([k for k in (audit.L.keys() if (audit is not None and hasattr(audit, 'L')) else []) if not str(k).startswith('_')])
         except Exception:
             _avail = []
         if not _avail:
             _avail = ['N02', 'N50', 'N52', 'N60', 'N90', 'N91']  # sem info → assume todos
         html_content = html_content.replace('JSON_AVAILABLE_LAYOUTS', json.dumps(_avail, ensure_ascii=True))
-        # v34: disponibilidade analítica adaptativa + referências.
-        html_content = html_content.replace('JSON_AVAILABILITY', availability_json_str)
-        html_content = html_content.replace('JSON_REFERENCIAS', referencias_json_str)
         html_content = html_content.replace('JSON_DICT_IDX_DATA', dict_idx_json_str)
         html_content = html_content.replace('JSON_DICT_DATA', dict_json_str)
         html_content = html_content.replace('JSON_CORR_VARS', corr_vars_str)
@@ -8885,10 +7436,10 @@ as novidades foram adicionadas de forma incremental.
             "numpy>=1.26.0\n"
             "scipy>=1.11.0\n"
             "scikit-learn>=1.3.0\n"
+            "xlsxwriter>=3.1.0\n"
             "openpyxl>=3.1.0\n"
             "\n"
             "# Dependências OPCIONAIS (enriquecem a saída; a aplicação roda sem elas)\n"
-            "xlsxwriter>=3.1.0      # gráficos nativos DENTRO das abas Excel (fallback: openpyxl)\n"
             "plotly>=5.18.0        # gráficos standalone (.html/.png)\n"
             "kaleido>=0.2.1        # exportação de imagens .png dos gráficos Plotly\n"
             "sweetviz>=2.3.0       # relatório EDA automático complementar\n"
@@ -11416,835 +9967,6 @@ class CrossLayoutAuditEngine:
         self.resumo_txt = " ".join(partes)
 
 
-class ReportAnalyticsReverseEngineer:
-    """ENGENHARIA REVERSA DAS ANÁLISES DOS RELATÓRIOS DE REFERÊNCIA (LOTE RO / LOTE 3).
-
-    Reconstrói DINAMICAMENTE, a partir dos layouts N02/N50/N52/N90/N91, as análises que
-    os relatórios de referência (LOTE RO e LOTE 3) apresentam em formato estático:
-
-      1. Distância de deslocamento por município (faixas <1, 1–3, 3–5, 5–10, 10–20,
-         20–30 e >30 km) + casos extremos (>20 km ATENÇÃO e >30 km CRÍTICO).
-      2. Capacidade e ocupação: salas acima da capacidade, subutilizadas, densidade
-         (m²/pessoa) e histograma da diferença capacidade − ensalados.
-      3. Geolocalização: qualidade das coordenadas dos locais (N52) e o quanto dos
-         ensalados (N02) está em locais sem coordenada válida.
-      4. Divergência de distância (NU_DISTANCIA × distância calculada por coordenadas):
-         só é calculada quando a base oferece as DUAS coordenadas (residência + local);
-         caso contrário a análise é marcada "Não avaliável" com o motivo explícito.
-      5. Ensalamento por município (N90 × N02): taxa e ranking.
-
-    As análises dos relatórios que dependem de dados EXTERNOS às layouts (posição de
-    assentos, confiança de geolocalização da comissão, coordenadas do censo, solução do
-    otimizador) NÃO são inventadas: entram na Matriz Relatório × Aplicação como "Não
-    implementável", com a justificativa de cada uma.
-
-    Princípios:
-      - Nunca embute número de relatório: tudo é recalculado da base carregada.
-      - Cada módulo entrega KPIs + achados + tabelas + narrativa + CLASSIFICAÇÃO
-        (Conforme / Atenção / Crítico / Não avaliável) com a REGRA usada e as EVIDÊNCIAS.
-      - Falhas isoladas nunca derrubam os demais módulos (motor defensivo).
-    """
-
-    FAIXAS = [-0.01, 1, 3, 5, 10, 20, 30, np.inf]
-    LABELS = ['<1 km', '1–3 km', '3–5 km', '5–10 km', '10–20 km', '20–30 km', '>30 km']
-    LIMIAR_EXTREMO_KM = 20.0   # alinhado às faixas dos relatórios (20–30 km)
-    LIMIAR_CRITICO_KM = 30.0   # casos > 30 km dos relatórios (LOTE RO: 125; LOTE 3: 1027)
-    RES_COLS = [
-        ('NU_LATITUDE_RESIDENCIA', 'NU_LONGITUDE_RESIDENCIA'),
-        ('NU_LATITUDE_END_RESIDENCIAL', 'NU_LONGITUDE_END_RESIDENCIAL'),
-        ('NU_LATITUDE_RESIDENCIAL', 'NU_LONGITUDE_RESIDENCIAL'),
-        ('NU_LATITUDE_END', 'NU_LONGITUDE_END'),
-        ('LAT_RESIDENCIA', 'LON_RESIDENCIA'),
-    ]
-
-    def __init__(self, layouts: Dict[str, pd.DataFrame], logger):
-        self.L = {k: (v.copy() if isinstance(v, pd.DataFrame) else pd.DataFrame()) for k, v in (layouts or {}).items()}
-        self.logger = logger
-        self.ativo = False
-        self.kpis: Dict[str, Any] = {}
-        self.achados: List[Dict[str, Any]] = []
-        self.tabelas: Dict[str, pd.DataFrame] = {}
-        self.modulos: List[Dict[str, Any]] = []
-        self.matriz_relatorio_aplicacao = pd.DataFrame()
-        self.matriz_analise_dados = pd.DataFrame()
-        self.resumo_txt = ""
-
-    # ---- helpers ----------------------------------------------------------------
-    @staticmethod
-    def _num(serie):
-        return pd.to_numeric(serie, errors='coerce')
-
-    @staticmethod
-    def _haversine_km(lat1, lon1, lat2, lon2):
-        R = 6371.0
-        phi1, phi2 = np.radians(lat1), np.radians(lat2)
-        dphi = np.radians(lat2 - lat1)
-        dlam = np.radians(lon2 - lon1)
-        a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
-        return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
-
-    def _key_col(self, df: pd.DataFrame) -> Optional[str]:
-        for c in ('CO_INSCRICAO_INEP', 'CO_INSCRICAO'):
-            if c in df.columns:
-                return c
-        return None
-
-    def _add(self, modulo, chave, titulo, categoria, severidade, valor, metricas, interpretacao, recomendacao=""):
-        self.achados.append({
-            'modulo': modulo, 'chave': chave, 'titulo': titulo, 'categoria': categoria,
-            'severidade': severidade, 'valor': valor, 'metricas': metricas or {},
-            'interpretacao': interpretacao, 'recomendacao': recomendacao,
-        })
-
-    def _register(self, mod: Dict[str, Any]) -> None:
-        tabelas = mod.get('tabelas') or {}
-        mod['tabelas'] = list(tabelas.keys())
-        self.modulos.append(mod)
-        self.kpis[f"{mod['id']}::classificacao"] = mod['classificacao']
-        for k, v in (mod.get('kpis') or {}).items():
-            self.kpis[f"{mod['id']}::{k}"] = v
-        for k, df in tabelas.items():
-            if isinstance(df, pd.DataFrame):
-                self.tabelas[k] = df
-
-    # ---- orquestração -----------------------------------------------------------
-    def run(self) -> "ReportAnalyticsReverseEngineer":
-        presentes = [k for k, v in self.L.items() if isinstance(v, pd.DataFrame) and not v.empty and not k.startswith('_')]
-        if not presentes:
-            return self
-        self.ativo = True
-        self.logger.info("Executando ENGENHARIA REVERSA das análises dos relatórios de referência (LOTE RO / LOTE 3)...")
-        etapas = [
-            ('distancia_municipio', self._mod_distancia_municipio),
-            ('capacidade_ocupacao', self._mod_capacidade_ocupacao),
-            ('geolocalizacao', self._mod_geolocalizacao),
-            ('divergencia_distancia', self._mod_divergencia_distancia),
-            ('ensalamento_municipio', self._mod_ensalamento_municipio),
-        ]
-        for nome, fn in etapas:
-            try:
-                fn()
-            except Exception as exc:
-                self.logger.warning(f"Engenharia reversa: módulo '{nome}' falhou de forma não fatal ({exc}).")
-        self._build_matrizes()
-        self._build_resumo()
-        return self
-
-    # ---- 1) Distância por município + casos extremos ---------------------------
-    def _mod_distancia_municipio(self):
-        n02 = self.L.get('N02')
-        base_ok = isinstance(n02, pd.DataFrame) and not n02.empty and 'NU_DISTANCIA' in n02.columns
-        if not base_ok:
-            self._register({
-                'id': 'distancia_municipio',
-                'titulo': 'Distância de deslocamento por município e casos extremos',
-                'categoria': 'Distâncias & Logística', 'status': 'nao_avaliavel',
-                'motivo': 'Layout N02 ausente ou sem a coluna NU_DISTANCIA (distância de deslocamento).',
-                'classificacao': 'Não avaliável',
-                'regra': 'Requer N02.NU_DISTANCIA e o município de prova para recompor faixas e casos extremos.',
-                'narrativa': 'Os relatórios LOTE RO e LOTE 3 reportam distância média por município e casos '
-                             'extremos de deslocamento. Sem NU_DISTANCIA não é possível recalcular.',
-                'kpis': {}, 'achados': [], 'tabelas': {},
-                'evidencias': ['N02.NU_DISTANCIA ausente'],
-            })
-            return
-        mcol = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
-        dist = _dist_km(n02['NU_DISTANCIA'])
-        tmp = n02.assign(_dist=dist).copy()
-        tmp = tmp[tmp['_dist'].notna() & (tmp['_dist'] >= 0)]
-        if tmp.empty:
-            self._register({
-                'id': 'distancia_municipio',
-                'titulo': 'Distância de deslocamento por município e casos extremos',
-                'categoria': 'Distâncias & Logística', 'status': 'nao_avaliavel',
-                'motivo': 'NU_DISTANCIA presente, porém sem valores válidos (vazio/zero) para recalcular.',
-                'classificacao': 'Não avaliável',
-                'regra': 'Exige ao menos um NU_DISTANCIA válido e >= 0.',
-                'narrativa': 'Não há deslocamentos válidos para recompor a análise dos relatórios.',
-                'kpis': {}, 'achados': [], 'tabelas': {},
-                'evidencias': ['NU_DISTANCIA 100% vazio'],
-            })
-            return
-        d = tmp['_dist']
-        stats = {
-            'media_km': round(float(d.mean()), 2), 'mediana_km': round(float(d.median()), 2),
-            'p90_km': round(float(d.quantile(0.90)), 2), 'max_km': round(float(d.max()), 2),
-        }
-        n_ext20 = int((d > self.LIMIAR_EXTREMO_KM).sum())
-        n_ext30 = int((d > self.LIMIAR_CRITICO_KM).sum())
-        kpis = {'participantes': int(len(tmp)), **stats, 'casos_acima_20km': n_ext20, 'casos_acima_30km': n_ext30}
-
-        # faixas gerais (histograma do relatório)
-        faixas = pd.cut(d, bins=self.FAIXAS, labels=self.LABELS)
-        fgeral = faixas.value_counts().reindex(self.LABELS).fillna(0).astype(int).reset_index()
-        fgeral.columns = ['FAIXA', 'QUANTIDADE']
-        total_f = int(fgeral['QUANTIDADE'].sum())
-        fgeral['PERCENTUAL (%)'] = (fgeral['QUANTIDADE'] / total_f * 100).round(2) if total_f else 0.0
-        tabelas = {'dist_faixas_gerais': fgeral}
-        evidencias = [f"Faixa com maior volume: {fgeral.loc[fgeral['QUANTIDADE'].idxmax(), 'FAIXA']} "
-                      f"({int(fgeral.loc[fgeral['QUANTIDADE'].idxmax(), 'QUANTIDADE']):,} participantes)"] if total_f else []
-
-        achados = []
-        if mcol:
-            agg = (tmp.groupby(mcol)['_dist'].agg(['mean', 'median', 'max', 'count'])
-                   .reset_index())
-            p90 = tmp.groupby(mcol)['_dist'].apply(lambda s: float(s.quantile(0.90))).reset_index(name='p90')
-            agg = agg.merge(p90, on=mcol, how='left')
-            agg.columns = ['MUNICÍPIO', 'DIST_MEDIA_KM', 'DIST_MEDIANA_KM', 'DIST_MAX_KM', 'PARTICIPANTES', 'DIST_P90_KM']
-            agg['DIST_MEDIA_KM'] = agg['DIST_MEDIA_KM'].round(2)
-            agg['DIST_MEDIANA_KM'] = agg['DIST_MEDIANA_KM'].round(2)
-            agg['DIST_P90_KM'] = agg['DIST_P90_KM'].round(2)
-            agg['DIST_MAX_KM'] = agg['DIST_MAX_KM'].round(2)
-            ext20 = tmp[tmp['_dist'] > self.LIMIAR_EXTREMO_KM]
-            ext30 = tmp[tmp['_dist'] > self.LIMIAR_CRITICO_KM]
-            cnt20 = ext20.groupby(mcol).size()
-            cnt30 = ext30.groupby(mcol).size()
-            agg['ACIMA_20KM'] = agg['MUNICÍPIO'].map(cnt20).fillna(0).astype(int)
-            agg['ACIMA_30KM'] = agg['MUNICÍPIO'].map(cnt30).fillna(0).astype(int)
-            agg = agg.sort_values(['ACIMA_30KM', 'DIST_MAX_KM'], ascending=False).reset_index(drop=True)
-            tabelas['dist_mun_resumo'] = agg
-            # faixas empilhadas por município (top 15) — alimenta o gráfico do dashboard.
-            band = pd.cut(tmp['_dist'], bins=self.FAIXAS, labels=self.LABELS)
-            pb = tmp.assign(_band=band).groupby([mcol, '_band'], observed=False).size().unstack(fill_value=0)
-            pb = pb.reindex(columns=self.LABELS, fill_value=0)
-            pb['PARTICIPANTES'] = pb.sum(axis=1)
-            pb = pb.sort_values('PARTICIPANTES', ascending=False).head(15)
-            pb.index.name = 'MUNICÍPIO'
-            tabelas['dist_mun_faixas'] = pb.reset_index()
-            # casos extremos (rastreáveis)
-            def _ext_lista(df_ext, chave):
-                if df_ext.empty:
-                    return pd.DataFrame()
-                cols = [c for c in ['CO_INSCRICAO', 'CO_INSCRICAO_INEP', mcol, 'CO_LOCAL'] if c in df_ext.columns]
-                out = df_ext[cols].copy()
-                out['DISTANCIA_KM'] = df_ext['_dist'].round(2)
-                return out.sort_values('DISTANCIA_KM', ascending=False).head(500).reset_index(drop=True)
-            tabelas['dist_extremos_20'] = _ext_lista(ext20, 'dist_extremos_20')
-            tabelas['dist_extremos_30'] = _ext_lista(ext30, 'dist_extremos_30')
-            top = agg[agg['ACIMA_30KM'] > 0].head(3)
-            if not top.empty:
-                evidencias.append("Municípios com mais casos >30 km: "
-                                  + ", ".join(f"{r['MUNICÍPIO']} ({int(r['ACIMA_30KM'])})" for _, r in top.iterrows()))
-            elif n_ext30:
-                evidencias.append(f"{n_ext30:,} caso(s) >30 km sem município identificável (coluna ausente).")
-
-        if n_ext30:
-            cl, sev = 'Crítico', 'CRÍTICO'
-        elif n_ext20:
-            cl, sev = 'Atenção', 'ATENÇÃO'
-        else:
-            cl, sev = 'Conforme', 'OK'
-        achados.append({
-            'modulo': 'distancia_municipio', 'chave': 'distancia_extremos',
-            'titulo': 'Casos extremos de deslocamento (>20 km e >30 km) — N02',
-            'categoria': 'Distâncias & Logística', 'severidade': sev,
-            'valor': n_ext30 if n_ext30 else n_ext20,
-            'metricas': {'media_km': stats['media_km'], 'mediana_km': stats['mediana_km'],
-                         'p90_km': stats['p90_km'], 'max_km': stats['max_km'],
-                         'casos_acima_20km': n_ext20, 'casos_acima_30km': n_ext30},
-            'interpretacao': (f"A distância média de deslocamento é {stats['media_km']:.2f} km "
-                              f"(mediana {stats['mediana_km']:.2f} km; p90 {stats['p90_km']:.2f} km; máx {stats['max_km']:.2f} km). "
-                              f"Existem {n_ext20:,} caso(s) acima de {self.LIMIAR_EXTREMO_KM:.0f} km e "
-                              f"{n_ext30:,} acima de {self.LIMIAR_CRITICO_KM:.0f} km. Os relatórios de referência "
-                              f"tratam deslocamentos >30 km como inconsistência de distância (LOTE RO: 125 casos em "
-                              f"Porto Velho; LOTE 3: 1027 casos). Estes valores foram RECALCULADOS da base."),
-            'recomendacao': ('Revisar a alocação dos casos >30 km (possível barreira geográfica real ou erro de '
-                             'georreferência); confirmar CEP único/confiança de geolocalização caso a caso.'
-                             if n_ext30 else ('Revisar os casos entre 20 e 30 km para antecipar risco de ausência.'
-                                              if n_ext20 else 'Deslocamentos dentro dos padrões dos relatórios.')),
-        })
-        self._register({
-            'id': 'distancia_municipio',
-            'titulo': 'Distância de deslocamento por município e casos extremos',
-            'categoria': 'Distâncias & Logística', 'status': 'disponivel',
-            'motivo': '',
-            'classificacao': cl,
-            'regra': (f"Faixas de {self.LABELS[0]} a {self.LABELS[-1]} (limiares dos relatórios). "
-                      f"{self.LIMIAR_EXTREMO_KM:.0f} km < deslocamento <= {self.LIMIAR_CRITICO_KM:.0f} km → ATENÇÃO; "
-                      f"> {self.LIMIAR_CRITICO_KM:.0f} km → CRÍTICO; senão CONFORME."),
-            'narrativa': (f"{kpis['participantes']:,} deslocamento(s) validado(s). Média {stats['media_km']:.2f} km, "
-                          f"mediana {stats['mediana_km']:.2f} km, p90 {stats['p90_km']:.2f} km, máximo {stats['max_km']:.2f} km. "
-                          f"{n_ext30:,} caso(s) >{self.LIMIAR_CRITICO_KM:.0f} km e {n_ext20:,} >{self.LIMIAR_EXTREMO_KM:.0f} km."),
-            'kpis': kpis, 'achados': achados, 'tabelas': tabelas, 'evidencias': evidencias,
-        })
-
-    # ---- 2) Capacidade & ocupação ----------------------------------------------
-    def _mod_capacidade_ocupacao(self):
-        n02, n50 = self.L.get('N02'), self.L.get('N50')
-        ok = (isinstance(n02, pd.DataFrame) and not n02.empty and isinstance(n50, pd.DataFrame) and not n50.empty
-              and all(c in n02.columns for c in ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA'])
-              and 'QT_CAPACIDADE_MAXIMA_SALA' in n50.columns)
-        if not ok:
-            self._register({
-                'id': 'capacidade_ocupacao',
-                'titulo': 'Capacidade e ocupação das salas (superlotadas, subutilizadas, densidade)',
-                'categoria': 'Capacidade & Ocupação', 'status': 'nao_avaliavel',
-                'motivo': 'Requer N02 (ensalados por CO_LOCAL/CO_BLOCO/ID_SALA) e N50 (QT_CAPACIDADE_MAXIMA_SALA).',
-                'classificacao': 'Não avaliável',
-                'regra': 'Ocupação = ensalados (N02) ÷ capacidade (N50). Sem capacidade declarada não há teto para avaliar.',
-                'narrativa': 'Os relatórios LOTE RO e LOTE 3 reportam salas acima da capacidade (RO: 7/353 = 1,9%; '
-                             'LOTE 3: 169/1979 = 8,5% acima da fórmula(1)). Sem capacidade/ensalados não é recalculável.',
-                'kpis': {}, 'achados': [], 'tabelas': {},
-                'evidencias': ['N50.QT_CAPACIDADE_MAXIMA_SALA ausente'],
-            })
-            return
-        key = ['CO_LOCAL', 'CO_BLOCO', 'ID_SALA']
-        occ = n02.groupby(key).size().reset_index(name='ENSALADOS')
-        cap = n50[key + ['QT_CAPACIDADE_MAXIMA_SALA']].drop_duplicates(subset=key)
-        m = cap.merge(occ, on=key, how='left')
-        m['ENSALADOS'] = m['ENSALADOS'].fillna(0).astype(int)
-        m['CAPACIDADE'] = self._num(m['QT_CAPACIDADE_MAXIMA_SALA'])
-        m = m[m['CAPACIDADE'].notna()]
-        if m.empty:
-            self._register({'id': 'capacidade_ocupacao',
-                            'titulo': 'Capacidade e ocupação das salas',
-                            'categoria': 'Capacidade & Ocupação', 'status': 'nao_avaliavel',
-                            'motivo': 'Capacidade declarada 100% vazia no N50.',
-                            'classificacao': 'Não avaliável',
-                            'regra': 'Exige QT_CAPACIDADE_MAXIMA_SALA preenchida.',
-                            'narrativa': 'Sem capacidade válida não há como medir superlotação.',
-                            'kpis': {}, 'achados': [], 'tabelas': {}, 'evidencias': ['Capacidade vazia']})
-            return
-        m['OCUPACAO (%)'] = np.where(m['CAPACIDADE'] > 0, (m['ENSALADOS'] / m['CAPACIDADE'] * 100).round(1), np.nan)
-        m['DIFERENCA'] = (m['ENSALADOS'] - m['CAPACIDADE']).astype(int)
-        if 'NU_LARGURA' in n50.columns and 'NU_COMPRIMENTO' in n50.columns:
-            dim = n50[key + ['NU_LARGURA', 'NU_COMPRIMENTO']].drop_duplicates(subset=key)
-            m = m.merge(dim, on=key, how='left')
-            area = (self._num(m['NU_LARGURA']) / 100.0) * (self._num(m['NU_COMPRIMENTO']) / 100.0)
-            m['DENSIDADE_PLANEJADA (m²/pessoa)'] = np.where(area > 0, (area / m['CAPACIDADE']).round(2), np.nan)
-            m['DENSIDADE_REAL (m²/pessoa)'] = np.where((area > 0) & (m['ENSALADOS'] > 0), (area / m['ENSALADOS']).round(2), np.nan)
-        superlot = m[m['OCUPACAO (%)'] > 100]
-        subutil = m[m['OCUPACAO (%)'] < 50]
-        dens_apertada = int((m['DENSIDADE_REAL (m²/pessoa)'] < 1.0).sum()) if 'DENSIDADE_REAL (m²/pessoa)' in m.columns else 0
-        n_salas = len(m)
-        cap_total = int(m['CAPACIDADE'].sum())
-        ens_total = int(m['ENSALADOS'].sum())
-        ocp_media = round(float(m['OCUPACAO (%)'].mean()), 1) if m['OCUPACAO (%)'].notna().any() else 0.0
-        n_sup = len(superlot)
-        n_sub = len(subutil)
-        kpis = {
-            'qtd_salas': n_salas, 'capacidade_total': cap_total, 'ensalados_em_salas': ens_total,
-            'ocupacao_media_pct': ocp_media, 'qtd_superlotadas': n_sup,
-            'pct_superlotadas': round(100 * n_sup / n_salas, 2) if n_salas else 0.0,
-            'qtd_subutilizadas': n_sub, 'pct_subutilizadas': round(100 * n_sub / n_salas, 2) if n_salas else 0.0,
-            'qtd_densidade_apertada': dens_apertada,
-        }
-
-        hist_bins = [-np.inf, -20, -1, 1, 20, np.inf]
-        hist_labels = ['Muito abaixo (≤ -20)', 'Abaixo (-19 a -1)', 'No limite (-1 a 1)', 'Acima (2 a 20)', 'Muito acima (> 20)']
-        hist = pd.cut(m['DIFERENCA'], bins=hist_bins, labels=hist_labels)
-        hd = hist.value_counts().reindex(hist_labels).fillna(0).astype(int).reset_index()
-        hd.columns = ['FAIXA', 'SALAS']
-        tabelas = {
-            'cap_histograma': hd,
-            'cap_salas': m.sort_values('OCUPACAO (%)', ascending=False).head(1000).reset_index(drop=True),
-        }
-        if not superlot.empty:
-            tabelas['cap_salas_superlotadas'] = superlot.sort_values('OCUPACAO (%)', ascending=False).head(500).reset_index(drop=True)
-
-        # ocupação por LOCAL (N52 ou agregado do N50)
-        occ_l = n02.groupby('CO_LOCAL').size().reset_index(name='ENSALADOS')
-        cap_l = None
-        n52 = self.L.get('N52')
-        if n52 is not None and not n52.empty and 'CO_LOCAL' in n52.columns and 'QT_CAPACIDADE_MAXIMA' in n52.columns:
-            cap_l = n52.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA'].sum().reset_index(name='CAPACIDADE')
-        elif 'CO_LOCAL' in n50.columns:
-            cap_l = n50.groupby('CO_LOCAL')['QT_CAPACIDADE_MAXIMA_SALA'].sum().reset_index(name='CAPACIDADE')
-        if cap_l is not None:
-            ml = cap_l.merge(occ_l, on='CO_LOCAL', how='left')
-            ml['ENSALADOS'] = ml['ENSALADOS'].fillna(0).astype(int)
-            ml['CAPACIDADE'] = self._num(ml['CAPACIDADE'])
-            ml['OCUPACAO (%)'] = np.where(ml['CAPACIDADE'] > 0, (ml['ENSALADOS'] / ml['CAPACIDADE'] * 100).round(1), np.nan)
-            tabelas['cap_locais'] = ml.sort_values('OCUPACAO (%)', ascending=False).head(500).reset_index(drop=True)
-
-        achados = []
-        achados.append({
-            'modulo': 'capacidade_ocupacao', 'chave': 'salas_superlotadas',
-            'titulo': 'Salas acima da capacidade (superlotadas) — N02 × N50',
-            'categoria': 'Capacidade & Ocupação', 'severidade': 'CRÍTICO' if n_sup else 'OK', 'valor': n_sup,
-            'metricas': {'ocupacao_media_pct': ocp_media, 'superlotadas': n_sup,
-                         'pct_superlotadas': kpis['pct_superlotadas'], 'subutilizadas': n_sub},
-            'interpretacao': (f"A ocupação média das salas é {ocp_media:.1f}% com {n_sup:,} sala(s) SUPERLOTADA(s) "
-                              f"({kpis['pct_superlotadas']:.1f}% do total) — os relatórios reportavam 1,9% (LOTE RO) e "
-                              f"8,5% (LOTE 3) de salas acima da capacidade; aqui o valor é recalculado da base.")
-                             + (f" Há ainda {n_sub:,} sala(s) subutilizada(s) (<50%)." if n_sub else ""),
-            'recomendacao': 'Redistribuir ensalados das salas superlotadas para as subutilizadas (rebalanceamento).'
-                            if (n_sup or n_sub) else 'Nenhuma sala excede a capacidade.',
-        })
-        achados.append({
-            'modulo': 'capacidade_ocupacao', 'chave': 'salas_subutilizadas',
-            'titulo': 'Salas subutilizadas (<50% da capacidade) — N02 × N50',
-            'categoria': 'Capacidade & Ocupação', 'severidade': 'ATENÇÃO' if n_sub else 'OK', 'valor': n_sub,
-            'metricas': {'subutilizadas': n_sub, 'pct_subutilizadas': kpis['pct_subutilizadas']},
-            'interpretacao': (f"{n_sub:,} sala(s) operando abaixo de 50% da capacidade — oportunidade de consolidar "
-                              f"ensalados e reduzir custo operacional (fiscais, materiais, logística)."),
-            'recomendacao': 'Consolidar ensalados das salas subutilizadas em salas com folga.' if n_sub else 'Nenhuma ação necessária.',
-        })
-        if dens_apertada:
-            achados.append({
-                'modulo': 'capacidade_ocupacao', 'chave': 'densidade_apertada',
-                'titulo': 'Salas com densidade apertada (<1,0 m²/pessoa) — N50',
-                'categoria': 'Capacidade & Ocupação', 'severidade': 'ATENÇÃO', 'valor': dens_apertada,
-                'metricas': {'densidade_apertada': dens_apertada},
-                'interpretacao': (f"{dens_apertada:,} sala(s) com menos de 1,0 m²/pessoa de área útil por ensalado — "
-                                  f"proxy da fórmula(1) de espaçamento usada no relatório LOTE 3."),
-                'recomendacao': 'Revisar o leiaute dessas salas ou redistribuir participantes.',
-            })
-
-        if n_sup:
-            cl, sev_master = 'Crítico', 'CRÍTICO'
-        elif n_sub or dens_apertada:
-            cl, sev_master = 'Atenção', 'ATENÇÃO'
-        else:
-            cl, sev_master = 'Conforme', 'OK'
-        evidencias = []
-        if n_sup:
-            top_s = superlot.sort_values('OCUPACAO (%)', ascending=False).head(5)
-            evidencias.append("Salas mais superlotadas: "
-                              + ", ".join(f"{r['ID_SALA']} ({float(r['OCUPACAO (%)']):.0f}%)" for _, r in top_s.iterrows()))
-        elif n_sub:
-            evidencias.append(f"{n_sub:,} salas subutilizadas (<50%).")
-        self._register({
-            'id': 'capacidade_ocupacao',
-            'titulo': 'Capacidade e ocupação das salas (superlotadas, subutilizadas, densidade)',
-            'categoria': 'Capacidade & Ocupação', 'status': 'disponivel', 'motivo': '',
-            'classificacao': cl,
-            'regra': ('Ocupação = ensalados (N02) ÷ capacidade (N50). >100% = superlotada (CRÍTICO); <50% = subutilizada '
-                      '(ATENÇÃO); densidade real < 1,0 m²/pessoa = apertada (ATENÇÃO).'),
-            'narrativa': (f"{n_salas:,} sala(s) com capacidade instalada de {cap_total:,} assentos e "
-                          f"{ens_total:,} ensalado(s) (ocupação média {ocp_media:.1f}%). "
-                          f"{n_sup:,} superlotada(s) e {n_sub:,} subutilizada(s)."),
-            'kpis': kpis, 'achados': achados, 'tabelas': tabelas, 'evidencias': evidencias,
-        })
-
-    # ---- 3) Geolocalização (qualidade das coordenadas dos locais) ---------------
-    def _mod_geolocalizacao(self):
-        n52 = self.L.get('N52')
-        ok = (isinstance(n52, pd.DataFrame) and not n52.empty
-              and all(c in n52.columns for c in ['CO_LOCAL', 'NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL']))
-        if not ok:
-            self._register({
-                'id': 'geolocalizacao',
-                'titulo': 'Geolocalização: qualidade das coordenadas dos locais e dos ensalados',
-                'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
-                'motivo': 'Requer N52 com CO_LOCAL, NU_LATITUDE_LOCAL e NU_LONGITUDE_LOCAL.',
-                'classificacao': 'Não avaliável',
-                'regra': 'Exige coordenadas dos locais (N52) para medir qualidade e cobertura.',
-                'narrativa': 'Os relatórios avaliam a confiança da geolocalização (níveis 1–4) dos candidatos. '
-                             'Esse dado é da comissão/aplicador e não existe nas layouts; aqui o proxy é a '
-                             'validade das coordenadas cadastradas dos locais.',
-                'kpis': {}, 'achados': [], 'tabelas': {},
-                'evidencias': ['N52 sem coordenadas'],
-            })
-            return
-        lat = self._num(n52['NU_LATITUDE_LOCAL'])
-        lon = self._num(n52['NU_LONGITUDE_LOCAL'])
-        coord_valida = lat.notna() & lon.notna() & (lat.abs() <= 90) & (lon.abs() <= 180) & ((lat != 0) | (lon != 0))
-        n52 = n52.copy()
-        n52['_TEM_LAT'] = lat.notna()
-        n52['_TEM_LON'] = lon.notna()
-        n52['_COORD_VALIDA'] = coord_valida
-        total_locais = len(n52)
-        locais_validos = int(coord_valida.sum())
-        locais_invalidos = total_locais - locais_validos
-        pct_validos = round(100 * locais_validos / total_locais, 1) if total_locais else 0.0
-
-        ens_sem = 0
-        ens_pct = 0.0
-        occ_l = pd.DataFrame({'CO_LOCAL': [], 'ENSALADOS': []})
-        n02 = self.L.get('N02')
-        if isinstance(n02, pd.DataFrame) and not n02.empty and 'CO_LOCAL' in n02.columns:
-            ref = n52[['CO_LOCAL', '_COORD_VALIDA']].drop_duplicates('CO_LOCAL')
-            j = n02[['CO_LOCAL']].merge(ref, on='CO_LOCAL', how='left')
-            sem = j['_COORD_VALIDA'].isna() | (j['_COORD_VALIDA'] == False)  # noqa: E712
-            ens_sem = int(sem.sum())
-            ens_pct = round(100 * ens_sem / len(j), 1) if len(j) else 0.0
-            occ_l = n02.groupby('CO_LOCAL').size().reset_index(name='ENSALADOS')
-
-        kpis = {
-            'total_locais': total_locais, 'locais_com_coord_valida': locais_validos,
-            'pct_locais_com_coord_valida': pct_validos, 'locais_sem_coord_valida': locais_invalidos,
-            'ensalados_sem_coord': ens_sem, 'pct_ensalados_sem_coord': ens_pct,
-        }
-
-        geo = n52[['CO_LOCAL', '_TEM_LAT', '_TEM_LON', '_COORD_VALIDA']].copy()
-        if 'NO_LOCAL' in n52.columns:
-            geo['NO_LOCAL'] = n52['NO_LOCAL']
-        geo = geo.merge(occ_l, on='CO_LOCAL', how='left')
-        geo['ENSALADOS'] = geo['ENSALADOS'].fillna(0).astype(int)
-        geo['COORD_VALIDA'] = np.where(geo['_COORD_VALIDA'], 'Sim', 'Não')
-        geo['TEM_LATITUDE'] = np.where(geo['_TEM_LAT'], 'Sim', 'Não')
-        geo['TEM_LONGITUDE'] = np.where(geo['_TEM_LON'], 'Sim', 'Não')
-        geo = geo.drop(columns=['_TEM_LAT', '_TEM_LON', '_COORD_VALIDA'])
-        tabelas = {'geo_qualidade': geo.sort_values('ENSALADOS', ascending=False).head(1000).reset_index(drop=True)}
-
-        if ens_pct >= 30:
-            cl, sev = 'Crítico', 'CRÍTICO'
-        elif ens_pct >= 5 or pct_validos < 90:
-            cl, sev = 'Atenção', 'ATENÇÃO'
-        else:
-            cl, sev = 'Conforme', 'OK'
-        achados = [{
-            'modulo': 'geolocalizacao', 'chave': 'coord_locais',
-            'titulo': 'Qualidade das coordenadas dos locais de prova (N52)',
-            'categoria': 'Geolocalização', 'severidade': sev,
-            'valor': ens_sem if ens_sem else locais_invalidos,
-            'metricas': {'locais_validos': locais_validos, 'pct_locais_validos': pct_validos,
-                         'locais_invalidos': locais_invalidos,
-                         'ensalados_sem_coord': ens_sem, 'pct_ensalados_sem_coord': ens_pct},
-            'interpretacao': (f"{pct_validos:.1f}% dos {total_locais:,} locais têm coordenadas válidas "
-                              f"({locais_invalidos:,} sem/ inválidas) e {ens_pct:.1f}% dos ensalados estão em locais "
-                              f"sem coordenada válida. A confiança de geolocalização (níveis 1–4) dos relatórios "
-                              f"depende de dados da comissão; aqui o proxy é a coordenada cadastrada."),
-            'recomendacao': 'Completar/corrigir as coordenadas dos locais sem valor válido antes do georreferenciamento.'
-                            if (locais_invalidos or ens_sem) else 'Coordenadas consistentes.',
-        }]
-        evidencias = []
-        sem_list = geo[geo['COORD_VALIDA'] == 'Não'].head(5)
-        if not sem_list.empty:
-            evidencias.append("Locais sem coordenada válida (amostra): "
-                              + ", ".join(str(r.get('CO_LOCAL', '')) for _, r in sem_list.iterrows()))
-        self._register({
-            'id': 'geolocalizacao',
-            'titulo': 'Geolocalização: qualidade das coordenadas dos locais e dos ensalados',
-            'categoria': 'Geolocalização', 'status': 'disponivel', 'motivo': '',
-            'classificacao': cl,
-            'regra': ('Coordenada válida = lat em [-90,90], lon em [-180,180] e não (0,0). '
-                      '>=30% dos ensalados sem coordenada → CRÍTICO; >=5% ou <90% dos locais válidos → ATENÇÃO; senão CONFORME.'),
-            'narrativa': (f"{pct_validos:.1f}% dos locais têm coordenadas válidas; "
-                          f"{ens_pct:.1f}% dos ensalados estão em locais sem coordenada válida."),
-            'kpis': kpis, 'achados': achados, 'tabelas': tabelas, 'evidencias': evidencias,
-        })
-
-    # ---- 4) Divergência de distância (NU_DISTANCIA × coordenadas) ---------------
-    def _mod_divergencia_distancia(self):
-        n02 = self.L.get('N02')
-        if not (isinstance(n02, pd.DataFrame) and not n02.empty and 'NU_DISTANCIA' in n02.columns):
-            self._register({
-                'id': 'divergencia_distancia',
-                'titulo': 'Divergência de distância (NU_DISTANCIA × distância por coordenadas)',
-                'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
-                'motivo': 'Requer N02.NU_DISTANCIA.',
-                'classificacao': 'Não avaliável',
-                'regra': 'Compara a distância declarada com a distância haversine (residência × local).',
-                'narrativa': 'Sem NU_DISTANCIA não há referência para confrontar.',
-                'kpis': {}, 'achados': [], 'tabelas': {}, 'evidencias': ['N02.NU_DISTANCIA ausente'],
-            })
-            return
-        k = self._key_col(n02)
-        if not k:
-            self._register({'id': 'divergencia_distancia',
-                            'titulo': 'Divergência de distância (NU_DISTANCIA × coordenadas)',
-                            'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
-                            'motivo': 'Sem chave de participante (CO_INSCRICAO) no N02.',
-                            'classificacao': 'Não avaliável', 'regra': 'Exige chave de participante.',
-                            'narrativa': 'Não há como associar distância a coordenadas sem a chave.',
-                            'kpis': {}, 'achados': [], 'tabelas': {}, 'evidencias': ['Chave ausente']})
-            return
-        base = n02[[k, 'NU_DISTANCIA']].copy()
-        base['_D_KM'] = _dist_km(base['NU_DISTANCIA'])
-        # coordenadas do LOCAL: direto no N02 ou via N52
-        if 'NU_LATITUDE_LOCAL' in n02.columns and 'NU_LONGITUDE_LOCAL' in n02.columns:
-            base['_LAT_LOC'] = self._num(n02['NU_LATITUDE_LOCAL'])
-            base['_LON_LOC'] = self._num(n02['NU_LONGITUDE_LOCAL'])
-        else:
-            n52 = self.L.get('N52')
-            if (isinstance(n52, pd.DataFrame) and not n52.empty and 'CO_LOCAL' in n52.columns
-                    and 'NU_LATITUDE_LOCAL' in n52.columns and 'NU_LONGITUDE_LOCAL' in n52.columns
-                    and 'CO_LOCAL' in n02.columns):
-                ref = n52[['CO_LOCAL', 'NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL']].drop_duplicates('CO_LOCAL')
-                base = base.merge(n02[['CO_LOCAL', k]], on=k, how='left').merge(ref, on='CO_LOCAL', how='left')
-                base['_LAT_LOC'] = self._num(base['NU_LATITUDE_LOCAL'])
-                base['_LON_LOC'] = self._num(base['NU_LONGITUDE_LOCAL'])
-            else:
-                base['_LAT_LOC'] = np.nan
-                base['_LON_LOC'] = np.nan
-        # coordenadas de RESIDÊNCIA: não existem nos layouts oficiais (só o município)
-        res_df, c_lat, c_lon = None, None, None
-        for df_cand in (n02, self.L.get('N90')):
-            if not isinstance(df_cand, pd.DataFrame) or df_cand.empty or k not in df_cand.columns:
-                continue
-            cols = set(df_cand.columns)
-            for cl_, cn_ in self.RES_COLS:
-                if cl_ in cols and cn_ in cols:
-                    res_df, c_lat, c_lon = df_cand, cl_, cn_
-                    break
-            if res_df is not None:
-                break
-        if res_df is None:
-            self._register({
-                'id': 'divergencia_distancia',
-                'titulo': 'Divergência de distância (NU_DISTANCIA × distância por coordenadas)',
-                'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
-                'motivo': ('As layouts oficiais não trazem as coordenadas de RESIDÊNCIA do participante (só o '
-                           'município). A distância por coordenadas (haversine) exige residência + local. Os '
-                           'relatórios obtiveram essa divergência de fontes externas (aplicador/otimizador).'),
-                'classificacao': 'Não avaliável',
-                'regra': 'Compara NU_DISTANCIA (declarada) com a distância haversine calculada entre as coordenadas '
-                         'de residência e do local de prova.',
-                'narrativa': ('Sem as coordenadas de residência, a divergência de distância não é calculável. '
-                              'A existência da coluna NU_DISTANCIA permite apenas a análise de faixas/extremos '
-                              '(módulo distancia_municipio), não o confronto com coordenadas.'),
-                'kpis': {}, 'achados': [], 'tabelas': {},
-                'evidencias': ['Coordenada de residência ausente nas layouts', 'Distância de referência externa ausente'],
-            })
-            return
-        base = base.merge(res_df[[k, c_lat, c_lon]], on=k, how='left')
-        lat1, lon1 = self._num(base['_LAT_LOC']), self._num(base['_LON_LOC'])
-        lat2, lon2 = self._num(base[c_lat]), self._num(base[c_lon])
-        valid = lat1.notna() & lon1.notna() & lat2.notna() & lon2.notna() & base['_D_KM'].notna()
-        if not valid.any():
-            self._register({'id': 'divergencia_distancia',
-                            'titulo': 'Divergência de distância (NU_DISTANCIA × coordenadas)',
-                            'categoria': 'Geolocalização', 'status': 'nao_avaliavel',
-                            'motivo': 'Coordenadas presentes, porém sem par residência+local válido para nenhum participante.',
-                            'classificacao': 'Não avaliável',
-                            'regra': 'Exige ao menos um participante com coordenadas válidas dos dois lados.',
-                            'narrativa': 'Não há pares de coordenadas válidos para calcular a divergência.',
-                            'kpis': {}, 'achados': [], 'tabelas': {},
-                            'evidencias': ['Coordenadas 100% vazias ou inválidas']})
-            return
-        h = self._haversine_km(lat1[valid], lon1[valid], lat2[valid], lon2[valid])
-        df = pd.DataFrame({
-            k: base.loc[valid, k].astype(str).values,
-            'NU_DISTANCIA_KM': base.loc[valid, '_D_KM'].round(2).values,
-            'DIST_COORDS_KM': np.round(h, 2),
-        })
-        df['DIFERENCA_ABS_KM'] = (df['NU_DISTANCIA_KM'] - df['DIST_COORDS_KM']).abs().round(2)
-
-        def _classif(x):
-            if x <= 1:
-                return 'Concordam (≤1 km)'
-            if x <= 5:
-                return 'Divergência leve (1–5 km)'
-            if x <= 20:
-                return 'Divergência relevante (5–20 km)'
-            return 'Divergência crítica (>20 km)'
-        df['CLASSIFICACAO'] = df['DIFERENCA_ABS_KM'].apply(_classif)
-        n_relev = int((df['DIFERENCA_ABS_KM'] > 5).sum())
-        n_crit = int((df['DIFERENCA_ABS_KM'] > 20).sum())
-        kpis = {'comparados': int(len(df)), 'divergentes_relevantes': n_relev,
-                'divergentes_criticos': n_crit,
-                'media_diferenca_abs_km': round(float(df['DIFERENCA_ABS_KM'].mean()), 2) if len(df) else 0.0}
-        tabelas = {'divergencia_distancia': df.sort_values('DIFERENCA_ABS_KM', ascending=False).head(1000).reset_index(drop=True)}
-        if n_crit:
-            cl, sev = 'Crítico', 'CRÍTICO'
-        elif n_relev:
-            cl, sev = 'Atenção', 'ATENÇÃO'
-        else:
-            cl, sev = 'Conforme', 'OK'
-        achados = [{
-            'modulo': 'divergencia_distancia', 'chave': 'divergencia_km',
-            'titulo': 'Divergência entre NU_DISTANCIA e a distância calculada por coordenadas',
-            'categoria': 'Geolocalização', 'severidade': sev, 'valor': n_crit if n_crit else n_relev,
-            'metricas': {'comparados': int(len(df)), 'relevantes': n_relev, 'criticos': n_crit,
-                         'media_diferenca_abs_km': kpis['media_diferenca_abs_km']},
-            'interpretacao': (f"Entre {len(df):,} participantes com coordenadas válidas dos dois lados, "
-                              f"{n_relev:,} têm divergência >5 km e {n_crit:,} >20 km entre a distância declarada "
-                              f"(NU_DISTANCIA) e a calculada por haversine — casos a investigar (possível erro de "
-                              f"coordenadas ou de NU_DISTANCIA)."),
-            'recomendacao': 'Revisar os casos de divergência crítica (coordenadas vs NU_DISTANCIA).'
-                            if n_crit else 'Divergências dentro do aceitável.',
-        }]
-        self._register({
-            'id': 'divergencia_distancia',
-            'titulo': 'Divergência de distância (NU_DISTANCIA × distância por coordenadas)',
-            'categoria': 'Geolocalização', 'status': 'disponivel', 'motivo': '',
-            'classificacao': cl,
-            'regra': ('Diferença absoluta entre NU_DISTANCIA e a distância haversine (residência × local). '
-                      '≤1 km = conforme; ≤5 km = leve; ≤20 km = relevante (ATENÇÃO); >20 km = crítica (CRÍTICO).'),
-            'narrativa': (f"{len(df):,} participante(s) comparado(s) — {n_crit:,} divergência(s) crítica(s) "
-                          f"(>20 km) e {n_relev:,} relevante(s) (>5 km)."),
-            'kpis': kpis, 'achados': achados, 'tabelas': tabelas,
-            'evidencias': ['Cálculo haversine R=6371 km', f"Chave usada: {k}"],
-        })
-
-    # ---- 5) Ensalamento por município (N90 × N02) ------------------------------
-    def _mod_ensalamento_municipio(self):
-        n90, n02 = self.L.get('N90'), self.L.get('N02')
-        ok = (isinstance(n90, pd.DataFrame) and not n90.empty and isinstance(n02, pd.DataFrame) and not n02.empty)
-        if not ok:
-            self._register({
-                'id': 'ensalamento_municipio',
-                'titulo': 'Ensalamento por município (inscritos × ensalados)',
-                'categoria': 'Ensalamento', 'status': 'nao_avaliavel',
-                'motivo': 'Requer N90 (inscritos) e N02 (ensalados).',
-                'classificacao': 'Não avaliável',
-                'regra': 'Taxa = ensalados (N02) ÷ inscritos (N90) por município.',
-                'narrativa': 'Sem os dois layouts não é possível medir a cobertura de ensalamento.',
-                'kpis': {}, 'achados': [], 'tabelas': {}, 'evidencias': ['N90 ou N02 ausente'],
-            })
-            return
-        k90, k02 = self._key_col(n90), self._key_col(n02)
-        m90 = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n90.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n90.columns else None)
-        m02 = 'CO_MUNICIPIO_PROVA' if 'CO_MUNICIPIO_PROVA' in n02.columns else ('CO_MUNICIPIO' if 'CO_MUNICIPIO' in n02.columns else None)
-        if not (k90 and k02 and m90):
-            self._register({'id': 'ensalamento_municipio',
-                            'titulo': 'Ensalamento por município (inscritos × ensalados)',
-                            'categoria': 'Ensalamento', 'status': 'nao_avaliavel',
-                            'motivo': 'Faltam a chave de participante ou o município de prova nos layouts.',
-                            'classificacao': 'Não avaliável',
-                            'regra': 'Requer CO_INSCRICAO e município de prova.',
-                            'narrativa': 'Sem chave/município não há agregação possível.',
-                            'kpis': {}, 'achados': [], 'tabelas': {},
-                            'evidencias': ['Chave ou município ausente']})
-            return
-        a = n90[[k90, m90]].copy()
-        a['_K'] = a[k90].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-        a['_MUN'] = a[m90].astype(str).str.strip()
-        a = a.drop_duplicates('_K')
-        b = n02[[k02, m02]].copy()
-        b['_K'] = b[k02].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-        b['_MUN'] = b[m02].astype(str).str.strip()
-        b = b.drop_duplicates('_K')
-        matched = a[['_K', '_MUN']].merge(b[['_K']], on='_K', how='inner')
-        total_insc = len(a)
-        total_ens = len(matched)
-        taxa_geral = round(100 * total_ens / total_insc, 1) if total_insc else 0.0
-        ins_per = a.groupby('_MUN').size()
-        ens_per = matched.groupby('_MUN').size()
-        idx = list(ins_per.index)
-        per = pd.DataFrame({'MUNICÍPIO': idx,
-                            'INSCRITOS': [int(ins_per.get(i, 0)) for i in idx],
-                            'ENSALADOS': [int(ens_per.get(i, 0)) for i in idx]})
-        per['TAXA (%)'] = (per['ENSALADOS'] / per['INSCRITOS'] * 100).round(1)
-        n_mun_zero = int((per['TAXA (%)'] == 0).sum())
-        n_mun_baixo = int((per['TAXA (%)'] < 90).sum())
-        kpis = {
-            'inscritos_total': total_insc, 'ensalados_total': total_ens, 'taxa_geral_pct': taxa_geral,
-            'municipios_com_inscritos': len(per), 'municipios_taxa_zero': n_mun_zero,
-            'municipios_abaixo_90': n_mun_baixo,
-        }
-        tabelas = {'ens_mun_resumo': per.sort_values('TAXA (%)').reset_index(drop=True)}
-        if n_mun_zero:
-            cl, sev = 'Crítico', 'CRÍTICO'
-        elif taxa_geral < 98 or n_mun_baixo:
-            cl, sev = 'Atenção', 'ATENÇÃO'
-        else:
-            cl, sev = 'Conforme', 'OK'
-        achados = [{
-            'modulo': 'ensalamento_municipio', 'chave': 'taxa_ensalamento_mun',
-            'titulo': 'Taxa de ensalamento por município (N90 × N02)',
-            'categoria': 'Ensalamento', 'severidade': sev,
-            'valor': int(per['ENSALADOS'].sum()) if False else (n_mun_zero if n_mun_zero else n_mun_baixo),
-            'metricas': {'inscritos': total_insc, 'ensalados': total_ens, 'taxa_geral_pct': taxa_geral,
-                         'municipios_taxa_zero': n_mun_zero, 'municipios_abaixo_90': n_mun_baixo},
-            'interpretacao': (f"Taxa geral de ensalamento de {taxa_geral:.1f}% ({total_ens:,} de {total_insc:,} "
-                              f"inscritos). {n_mun_zero:,} município(s) com taxa 0% e {n_mun_baixo:,} abaixo de 90%."),
-            'recomendacao': 'Ensalar com urgência os inscritos dos municípios com taxa zero/baixa.'
-                            if (n_mun_zero or n_mun_baixo or taxa_geral < 98) else 'Cobertura de ensalamento adequada.',
-        }]
-        evidencias = []
-        if not per.empty:
-            pior = per.sort_values('TAXA (%)').head(3)
-            evidencias.append("Municípios com menor taxa: "
-                              + ", ".join(f"{r['MUNICÍPIO']} ({r['TAXA (%)']:.0f}%)" for _, r in pior.iterrows()))
-        self._register({
-            'id': 'ensalamento_municipio',
-            'titulo': 'Ensalamento por município (inscritos × ensalados)',
-            'categoria': 'Ensalamento', 'status': 'disponivel', 'motivo': '', 'classificacao': cl,
-            'regra': ('Taxa = ensalados (N02) ÷ inscritos (N90) por município de prova. '
-                      'Município com taxa 0% → CRÍTICO; taxa geral <98% ou município <90% → ATENÇÃO; senão CONFORME.'),
-            'narrativa': (f"{total_ens:,} de {total_insc:,} inscritos ensalados ({taxa_geral:.1f}%). "
-                          f"{n_mun_zero:,} município(s) com taxa zero."),
-            'kpis': kpis, 'achados': achados, 'tabelas': tabelas, 'evidencias': evidencias,
-        })
-
-    # ---- Matrizes ---------------------------------------------------------------
-    def _build_matrizes(self):
-        rows_rel = [
-            ('LOTE RO', 'Distância média de deslocamento por município', 'distancia_municipio',
-             'Implementada dinamicamente',
-             'Recalculada de N02.NU_DISTANCIA por município de prova (faixas <1 km a >30 km).'),
-            ('LOTE RO', 'Casos de distância > 30 km (relatório: 125 casos em Porto Velho)', 'distancia_municipio',
-             'Implementada dinamicamente',
-             'Extremos >20 km (atenção) e >30 km (crítico) recalculados por município; os valores da base substituem os do relatório.'),
-            ('LOTE RO', 'Salas acima da capacidade (relatório: 7 de 353 = 1,9%)', 'capacidade_ocupacao',
-             'Implementada dinamicamente',
-             'Ocupação = ensalados (N02) ÷ capacidade (N50); superlotadas (>100%) recalculadas da base.'),
-            ('LOTE RO', 'Qualidade do ensalamento (distribuição por faixa de distância)', 'distancia_municipio',
-             'Implementada dinamicamente',
-             'Histograma e faixas gerais de deslocamento (N02.NU_DISTANCIA).'),
-            ('LOTE 3', 'Distância média por município (relatório destaca Lábrea, Itacoatiara, Humaitá)', 'distancia_municipio',
-             'Implementada dinamicamente',
-             'Ranking por média/mediana/máximo e casos extremos por município.'),
-            ('LOTE 3', '1027 casos de distância > 30 km (relatório: CEP único / confiança 4)', 'distancia_municipio',
-             'Implementada parcialmente',
-             'Os casos >30 km são recalculados; a CONFIANÇA de geolocalização (níveis 1–4) vem da comissão e não existe nas layouts.'),
-            ('LOTE 3', 'Salas superlotadas (relatório: 169 de 1979 = 8,5% acima da fórmula(1))', 'capacidade_ocupacao',
-             'Implementada parcialmente',
-             'Ocupação real recalculada; a fórmula(1) original (espaçamento de assentos) é aproximada pela densidade m²/pessoa.'),
-            ('Ambos', 'Confiança da geolocalização dos candidatos (níveis 1–4)', 'geolocalizacao',
-             'Não implementável',
-             'Dado da comissão/aplicador; as layouts não possuem os níveis de confiança. Proxy usado: validade das coordenadas cadastradas (N52).'),
-            ('Ambos', 'Posição dos assentos / maior distância mínima entre candidatos', '(sem módulo)',
-             'Não implementável',
-             'Requer coordenadas de assento (planta/leiaute) que não existem nas layouts.'),
-            ('Ambos', 'Qualidade da localização da escola (aplicador × comissão/censo)', '(sem módulo)',
-             'Não implementável',
-             'Requer coordenadas da comissão/censo; ausentes nas layouts.'),
-            ('Ambos', 'Divergência de distância (aplicador × otimizador)', 'divergencia_distancia',
-             'Condicional',
-             'Calculada apenas quando a base fornece coordenadas de residência + local; senão marcada "Não avaliável".'),
-            ('Ambos', 'Comparação solução aplicada × solução otimizada', '(sem módulo)',
-             'Não implementável',
-             'A solução do otimizador é externa (resultado de processo) e não consta nas layouts.'),
-            ('Ambos', 'Kits de prova e atendimentos (cobertura, funil, laudo)', 'auditoria_cruzamento',
-             'Implementada',
-             'Já coberta integralmente pela Auditoria de Cruzamento (módulo relacional N02×N90×N91).'),
-        ]
-        self.matriz_relatorio_aplicacao = pd.DataFrame(
-            rows_rel, columns=['RELATÓRIO', 'ANÁLISE NO RELATÓRIO', 'MÓDULO NO APP', 'STATUS', 'JUSTIFICATIVA'])
-
-        def _add(an, dados, fonte, disp, status, motivo):
-            rows_an.append({'ANÁLISE': an, 'DADOS NECESSÁRIOS': dados, 'FONTE NAS LAYOUTS': fonte,
-                            'DISPONÍVEL': disp, 'STATUS': status, 'MOTIVO': motivo})
-
-        rows_an = []
-        _add('Distância por município', 'NU_DISTANCIA + município de prova', 'N02.NU_DISTANCIA / N02.CO_MUNICIPIO_PROVA',
-             'Sim', 'Implementada', '')
-        _add('Casos extremos >20 km e >30 km', 'NU_DISTANCIA', 'N02.NU_DISTANCIA', 'Sim', 'Implementada', '')
-        _add('Salas superlotadas (>100%)', 'ensalados por sala + capacidade', 'N02 (CO_LOCAL/CO_BLOCO/ID_SALA) × N50.QT_CAPACIDADE_MAXIMA_SALA',
-             'Sim', 'Implementada', '')
-        _add('Salas subutilizadas (<50%)', 'ensalados por sala + capacidade', 'N02 × N50.QT_CAPACIDADE_MAXIMA_SALA',
-             'Sim', 'Implementada', '')
-        _add('Densidade m²/pessoa (proxy da fórmula(1))', 'área da sala + capacidade/ensalados',
-             'N50.NU_LARGURA / NU_COMPRIMENTO', 'Condicional', 'Implementada parcial',
-             'Só quando o N50 traz NU_LARGURA e NU_COMPRIMENTO.')
-        _add('Geolocalização dos locais', 'latitude/longitude dos locais', 'N52.NU_LATITUDE_LOCAL / NU_LONGITUDE_LOCAL',
-             'Sim', 'Implementada', '')
-        _add('Confiança de geolocalização (níveis 1–4)', 'níveis de confiança da comissão', '(externo)',
-             'Não', 'Não avaliável', 'Não consta nas layouts; só o proxy de coordenadas válidas é calculado.')
-        _add('Divergência de distância (coordenadas)', 'coordenadas de residência + local',
-             'NU_DISTANCIA (N02) + coords locais (N52)', 'Condicional', 'Condicional',
-             'Exige coordenadas de residência (ausentes nas layouts oficiais).')
-        _add('Maior distância mínima entre assentos', 'posição/leiaute dos assentos', '(externo)',
-             'Não', 'Não avaliável', 'Sem planta de assentos nas layouts.')
-        _add('Qualidade da localização da escola', 'coordenadas do censo/comissão', '(externo)',
-             'Não', 'Não avaliável', 'Comparação aplicador × comissão exige fonte externa.')
-        _add('Ensalamento por município', 'inscritos × ensalados', 'N90.CO_INSCRICAO × N02.CO_INSCRICAO',
-             'Sim', 'Implementada', '')
-        self.matriz_analise_dados = pd.DataFrame(
-            rows_an, columns=['ANÁLISE', 'DADOS NECESSÁRIOS', 'FONTE NAS LAYOUTS', 'DISPONÍVEL', 'STATUS', 'MOTIVO'])
-
-    def _build_resumo(self):
-        cont = {}
-        for m in self.modulos:
-            cont[m['classificacao']] = cont.get(m['classificacao'], 0) + 1
-        self.kpis['qtd_modulos'] = len(self.modulos)
-        self.kpis['qtd_conforme'] = cont.get('Conforme', 0)
-        self.kpis['qtd_atencao'] = cont.get('Atenção', 0)
-        self.kpis['qtd_critico'] = cont.get('Crítico', 0)
-        self.kpis['qtd_nao_avaliavel'] = cont.get('Não avaliável', 0)
-        partes = [f"Engenharia reversa dos relatórios de referência (LOTE RO / LOTE 3): "
-                  f"{len(self.modulos)} módulo(s) recalculado(s) da base — "
-                  f"{cont.get('Conforme', 0)} conforme(s), {cont.get('Atenção', 0)} em atenção, "
-                  f"{cont.get('Crítico', 0)} crítico(s) e {cont.get('Não avaliável', 0)} não avaliável(is)."]
-        for m in self.modulos:
-            partes.append(f"[{m['classificacao']}] {m['titulo']}: {m['narrativa']}")
-        self.resumo_txt = " ".join(partes)
-
-
 # ==========================================
 # ORQUESTRADOR CENTRAL DEFINITIVO DO SISTEMA (PIPELINE)
 # ==========================================
@@ -12259,8 +9981,7 @@ class AnalyticsPipeline:
 
     def __init__(self, input_override: Optional[str] = None, demo: bool = False,
                  output_override: Optional[str] = None, layouts_override: Optional[str] = None,
-                 offline: bool = False, mapa_path: Optional[str] = None,
-                 relatorios_dir: Optional[str] = None) -> None:
+                 offline: bool = False, mapa_path: Optional[str] = None) -> None:
         self.env = EnvironmentManager(input_override=input_override, demo=demo, output_override=output_override)
         self.logger = self.env.logger
         self.offline_mode = bool(offline)
@@ -12268,9 +9989,6 @@ class AnalyticsPipeline:
         self.selected_layouts = self._parse_layout_selection(layouts_override)
         # Mapeamento de colunas (--mapa arquivo.json): {COLUNA_ESPERADA: "coluna_na_minha_base"}.
         self.column_map = self._carregar_mapa_colunas(mapa_path)
-        # Diretório de relatórios de referência (--relatorios): serve de contexto às interpretações.
-        self.relatorios_dir = relatorios_dir
-        self._availability_bundle: Optional[Dict[str, Any]] = None
 
     def _carregar_mapa_colunas(self, caminho: Optional[str]):
         if not caminho:
@@ -12489,37 +10207,6 @@ class AnalyticsPipeline:
                     self.logger.warning(f"Auditoria de cruzamento não executada ({exc}); pipeline segue normalmente.")
                     audit = None
 
-                # 3b2. ENGENHARIA REVERSA DOS RELATÓRIOS (v34): reconstrução dinâmica das
-                # análises dos relatórios de referência (LOTE RO / LOTE 3) a partir das layouts.
-                reverse = None
-                try:
-                    reverse = ReportAnalyticsReverseEngineer(layouts, self.logger).run()  # noqa
-                    if not (reverse and reverse.ativo):
-                        reverse = None
-                except Exception as exc:
-                    self.logger.warning(f"Engenharia reversa dos relatórios não executada ({exc}); pipeline segue normalmente.")
-                    reverse = None
-
-                # 3c. CAMADA ADAPTATIVA (v34): disponibilidade analítica por layout + referências.
-                # O MESMO bundle é consumido pelo Excel, pelo HTML e pelo Streamlit (uma única lógica).
-                availability = None
-                try:
-                    availability = AnalyticalAvailability(
-                        layouts=layouts if isinstance(layouts, dict) else {},
-                        flat_df=results.df,
-                        selected_layouts=getattr(self, '_selected_effective', None),
-                        logger=self.logger,
-                    ).resolve()
-                    self._availability_bundle = availability
-                except Exception as exc:
-                    self.logger.warning(f"Disponibilidade analítica não computada ({exc}); prosseguindo sem ela.")
-                    availability = None
-                referencias = []
-                try:
-                    referencias = ReportReferenceIngestor(self.relatorios_dir, self.logger).ingest()
-                except Exception as exc:
-                    self.logger.warning(f"Ingestão de relatórios de referência não executada ({exc}).")
-
                 viz = VisualizerAndExporter(self.env.dirs, self.logger)
                 viz.offline_mode = self.offline_mode
                 
@@ -12528,22 +10215,16 @@ class AnalyticsPipeline:
                 pbar.update(1)
 
                 # 5. Pipeline de Metadados JSON Dimensional Exato Limpo e Sweetviz Automático Ouro Exato Oficial
-                viz.export_auxiliary_files(results, metadata, didactic_pack, audit=audit,
-                                           availability=availability, referencias=referencias,
-                                           reverse=reverse)
+                viz.export_auxiliary_files(results, metadata, didactic_pack, audit=audit)
                 viz.generate_html_report(results)
                 pbar.update(1)
 
                 # 6. Pipeline Data Warehouse Corporativo Ouro Oficial Preditiva Matriz Oculta (Excel com 21 Abas Categóricas e Data Bars)
-                viz.build_excel_workbook(results, didactic_pack, audit=audit,
-                                         availability=availability, referencias=referencias,
-                                         reverse=reverse)
+                viz.build_excel_workbook(results, didactic_pack, audit=audit)
                 pbar.update(1)
 
                 # 7. Pipeline Front-End SPA Web Analytics Dimensional UI Corporativa (Dashboards Premium Inteligentes Ouro Formais Base, Cérebro JS e Cross-Filtering Blindado)
-                viz.generate_didactic_html_dashboard(results, didactic_pack, audit=audit,
-                                                     availability=availability, referencias=referencias,
-                                                     reverse=reverse)
+                viz.generate_didactic_html_dashboard(results, didactic_pack, audit=audit)
                 pbar.update(1)
                 
                 # 8. Pipeline Documentação W3C Formal WIKI Ouro Matriz
@@ -12611,10 +10292,6 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "esperada não for reconhecida: o sistema gera 'COLUNAS_NAO_RECONHECIDAS.json' (o que falta + o que "
                              "existe) e um 'mapa_colunas.json' para você preencher; ao rodar com --mapa, as colunas são "
                              "reconhecidas e as tabelas/gráficos correspondentes passam a ser gerados.")
-    parser.add_argument("--relatorios", "-r", dest="relatorios", default=None,
-                        help="Diretório (ou arquivo) com relatórios/notas técnicas do INEP (.txt/.md/.docx/.pdf) para servirem "
-                             "de REFERÊNCIA às interpretações do painel. Padrões quantitativos (percentuais, médias, limites) são "
-                             "extraídos automaticamente e exibidos na seção de Cobertura Analítica.")
     parser.add_argument("--version", "-v", action="version", version=f"Plataforma BI INEP v{APP_VERSION}")
     return parser.parse_args(argv)
 
@@ -12897,10 +10574,9 @@ def _run_streamlit_app() -> None:
                                 st.error(f"O filtro (UF={_ufs or '—'}, Município={_muns or '—'}) não deixou nenhuma linha. "
                                          "Verifique se essas siglas/códigos/nomes existem na base. A análise não foi executada.")
                                 st.stop()
-                            _w2, _ = _criar_excel_writer(_fpath, logger=None)
-                            with _w2:
+                            with _pdf.ExcelWriter(_fpath, engine="xlsxwriter") as _w:
                                 for _sh, _d in _sheets_out.items():
-                                    _d.to_excel(_w2, sheet_name=_sh[:31], index=False)
+                                    _d.to_excel(_w, sheet_name=_sh[:31], index=False)
                             inpath = _fpath
                             _desc = []
                             if _ufs:
@@ -13001,123 +10677,74 @@ def _run_streamlit_app() -> None:
         except Exception as e:  # noqa
             st.warning(f"Não foi possível ler a planilha para a visão nativa: {e}")
 
-    # ======================= META + HELPERS ==================================
-    _meta_bruto = {}
+    tab_vg, tab_nat, tab_fgv, tab_dash, tab_meta = st.tabs(
+        ["🏠 Visão Geral", "📊 Análises (nativo, interativo)", "🛰️ FGV × INEP",
+         "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
+
+    # Carrega metadados da auditoria (KPIs, achados, resumo) uma vez
+    _meta_ac = {}
     if json_path.exists():
         try:
-            _meta_bruto = _json.loads(json_path.read_text(encoding="utf-8"))
+            _meta_ac = _json.loads(json_path.read_text(encoding="utf-8")).get("auditoria_cruzamento", {})
         except Exception:
-            _meta_bruto = {}
-    _meta_ac = _meta_bruto.get("auditoria_cruzamento", {}) if isinstance(_meta_bruto, dict) else {}
-    _meta_dispon = _meta_bruto.get("disponibilidade_analitica", {}) if isinstance(_meta_bruto, dict) else {}
-    kp = _meta_ac.get("kpis") or {}
-    achados = _meta_ac.get("achados") or []
-    resumo = _meta_ac.get("resumo_executivo")
-
-    def _fmt_int(v):
-        try:
-            return f"{int(float(v)):,}".replace(",", ".")
-        except Exception:
-            return str(v)
-
-    def _fmt_dec(v, casas=2):
-        try:
-            return f"{float(v):,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        except Exception:
-            return str(v)
-
-    def _achar_col(cols, chaves):
-        for c in cols:
-            cu = str(c).upper()
-            if any(k in cu for k in chaves):
-                return c
-        return None
-
-    def _achar_abas(prefixos):
-        pref = [p.lower() for p in prefixos]
-        return [n for n in abas if any(p in str(n).lower() for p in pref)]
-
-    def _aba_maior(prefixos):
-        for n in _achar_abas(prefixos):
-            df = abas[n]
-            if df is not None and not df.empty:
-                return n, df
-        return None, None
-
-    def _kp(chaves):
-        for c in chaves:
-            if c in kp:
-                return kp[c]
-        for c in chaves:
-            for kk in kp:
-                if str(c).lower() in str(kk).lower():
-                    return kp[kk]
-        return None
-
-    tab_vg, tab_part, tab_ens, tab_loc, tab_al, tab_exp, tab_fgv, tab_dash, tab_meta = st.tabs([
-        "🏠 Visão Geral", "👥 Participantes", "🪑 Ensino", "📍 Localização",
-        "🎯 Alunos & Atendimentos", "🔬 Explorador", "🛰️ FGV × INEP",
-        "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
+            _meta_ac = {}
 
     # ======================= (0) VISÃO GERAL (dashboard executivo) ===========
     with tab_vg:
-        st.subheader("Resumo executivo")
-        st.caption("Visão geral de tudo que foi carregado e analisado — sempre a partir dos layouts efetivamente enviados.")
+        st.caption("Resumo executivo, dados carregados e principais alertas — só com o que os layouts enviados permitem calcular.")
+        kp = _meta_ac.get("kpis") or {}
+        achados_vg = _meta_ac.get("achados") or []
+        resumo_vg = _meta_ac.get("resumo_executivo")
 
         # --- Dados carregados: layouts detectados (adaptativo) ---
-        st.markdown("##### Dados carregados")
-        _dispon_resumo = _meta_dispon.get("resumo_por_layout", {}) if isinstance(_meta_dispon, dict) else {}
-        _presentes_avail = [str(k) for k in (_meta_dispon.get("layouts_presentes", []) or []) if str(k) != 'BASE_PLANA']
-        _linhas_det = []
+        st.subheader("Dados carregados")
+        layouts_det = []
         for lay in ["N90", "N02", "N91", "N52", "N50", "N60"]:
-            qt = None
             chave = f"total_registros_{lay.lower()}"
             if chave in kp:
-                qt = kp[chave]
-            elif _dispon_resumo and lay in _dispon_resumo:
-                qt = (_dispon_resumo[lay] or {}).get("linhas", 0)
-            if qt is not None and (qt or lay in _presentes_avail):
-                _linhas_det.append({"Layout": lay, "Registros": _fmt_int(qt)})
-        if _linhas_det:
-            cols_l = st.columns(len(_linhas_det))
-            for c, row in zip(cols_l, _linhas_det):
-                c.metric(row["Layout"], row["Registros"])
-            st.caption(f"{len(_linhas_det)} layout(s) em análise · {len(abas)} análises geradas. "
+                layouts_det.append((lay, kp[chave]))
+        if layouts_det:
+            cols_l = st.columns(len(layouts_det))
+            for c, (lay, qt) in zip(cols_l, layouts_det):
+                try:
+                    c.metric(lay, f"{int(qt):,}".replace(",", "."), help=f"Registros no layout {lay}.")
+                except Exception:
+                    c.metric(lay, str(qt))
+            st.caption(f"{len(layouts_det)} de 6 layouts presentes · {len(abas)} análises geradas. "
                        "As análises que dependem de layouts ausentes não são exibidas (adaptativo).")
         else:
             st.info("Layouts detectados aparecerão aqui após a execução.")
 
         # --- Principais indicadores (só os que existem) ---
+        st.subheader("Principais indicadores")
         _rotulos = [
             ("total_inscritos", "Inscritos"), ("total_ensalados", "Ensalados"),
-            ("qtd_sem_ensalamento", "Não ensalados"), ("pct_ensalamento", "Taxa ensalamento (%)"),
+            ("total_nao_ensalados", "Não ensalados"), ("pct_ensalamento", "Taxa ensalamento (%)"),
             ("tg_locais", "Locais"), ("tg_salas", "Salas"),
-            ("distancia_media_km", "Distância média (km)"), ("qtd_forasteiros", "Forasteiros"),
-            ("tg_capacidade_total", "Capacidade instalada"), ("kits_gap", "Kits em falta"),
-            ("validacoes_divergentes", "Validações divergentes"),
+            ("distancia_media_km", "Distância média (km)"), ("total_forasteiros", "Forasteiros"),
+            ("tg_capacidade_total", "Capacidade instalada"), ("kit_tipos_so_n91", "Kits só no N91"),
+            ("validacoes_divergentes", "Validações divergentes"), ("total_indicadores_consolidados", "Totais consolidados"),
         ]
         presentes = [(k, r) for k, r in _rotulos if k in kp]
         if presentes:
-            st.markdown("##### Principais indicadores")
             for i in range(0, len(presentes), 4):
                 for c, (k, r) in zip(st.columns(4), presentes[i:i + 4]):
-                    try:
-                        c.metric(r, _fmt_dec(kp[k], 1) if isinstance(kp[k], float) else _fmt_int(kp[k]))
-                    except Exception:
-                        c.metric(r, str(kp[k]))
+                    c.metric(r, str(kp[k]))
+        else:
+            st.caption("Indicadores aparecerão conforme os layouts disponíveis.")
         with st.expander(f"Ver todos os indicadores calculados ({len(kp)})"):
             if kp:
                 st.dataframe(_pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()]),
                              use_container_width=True, height=300)
 
         # --- Principais alertas (achados críticos/atenção) ---
-        if isinstance(achados, list) and achados:
-            df_a = _pd.DataFrame(achados)
+        if isinstance(achados_vg, list) and achados_vg:
+            df_a = _pd.DataFrame(achados_vg)
             if "severidade" in df_a.columns:
                 sevu = df_a["severidade"].astype(str).str.upper()
                 crit = df_a[sevu == "CRÍTICO"]
                 aten = df_a[sevu == "ATENÇÃO"]
-                st.markdown("##### Principais alertas")
+                st.subheader("Principais alertas")
                 cA, cB, cC = st.columns(3)
                 cA.metric("🔴 Críticos", len(crit))
                 cB.metric("🟡 Atenção", len(aten))
@@ -13128,58 +10755,70 @@ def _run_streamlit_app() -> None:
                     st.markdown(f"- **{titulo}** — {str(row.get('recomendacao', row.get('interpretacao', '')))[:160]}")
                 st.caption("Veja todos na aba « 🧾 Achados & Metadados ».")
 
-        # --- Narrativa analítica automática ---
-        st.markdown("##### 📝 Narrativa analítica")
+        # --- Narrativa analítica automática (seções 26 e 42) ---
+        st.subheader("📝 Narrativa analítica")
+        st.caption("Texto gerado a partir dos números efetivamente calculados — auditável, sem justificativas inventadas.")
+
+        def _fmt(v, casas=0):
+            try:
+                if casas:
+                    return f"{float(v):,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                return f"{int(float(v)):,}".replace(",", ".")
+            except Exception:
+                return str(v)
+
         _frases = []
         _ins = kp.get("total_inscritos")
         _ens = kp.get("total_ensalados")
         _pct = kp.get("pct_ensalamento")
         if _ins is not None and _ens is not None:
-            _fr = f"Foram analisados **{_fmt_int(_ins)}** inscritos, dos quais **{_fmt_int(_ens)}** foram ensalados"
+            _fr = f"Foram analisados **{_fmt(_ins)}** inscritos, dos quais **{_fmt(_ens)}** foram ensalados"
             if _pct is not None:
-                _fr += f", correspondendo a **{_fmt_dec(_pct, 1)}%** do universo"
+                _fr += f", correspondendo a **{_fmt(_pct, 1)}%** do universo"
             _frases.append(_fr + ".")
             try:
                 _nao = int(float(_ins)) - int(float(_ens))
                 if _nao > 0:
-                    _frases.append(f"Há **{_fmt_int(_nao)}** inscrito(s) ainda **sem ensalamento**, que exigem atenção.")
+                    _frases.append(f"Há **{_fmt(_nao)}** inscrito(s) ainda **sem ensalamento**, que exigem atenção.")
             except Exception:
                 pass
-        _for = kp.get("qtd_forasteiros")
+        _for = kp.get("total_forasteiros")
         if _for is not None:
-            _fr = f"Foram identificados **{_fmt_int(_for)}** forasteiros (participantes cuja UF de residência difere da UF de prova)"
+            _fr = f"Foram identificados **{_fmt(_for)}** forasteiros (participantes cuja UF de residência difere da UF de prova)"
             if _ins:
                 try:
-                    _fr += f", equivalentes a **{_fmt_dec(int(float(_for)) / int(float(_ins)) * 100, 1)}%** dos inscritos"
+                    _fr += f", equivalentes a **{_fmt(int(float(_for)) / int(float(_ins)) * 100, 1)}%** dos inscritos"
                 except Exception:
                     pass
             _frases.append(_fr + ".")
         _dm = kp.get("distancia_media_km")
-        _crit = kp.get("qtd_dist_criticos") or kp.get("distancia_casos_criticos")
+        _crit = kp.get("distancia_criticos") or kp.get("locais_criticos_distancia")
         if _dm is not None:
-            _frases.append(f"A distância média de deslocamento foi de **{_fmt_dec(_dm, 2)} km**.")
+            _fr = f"A distância média de deslocamento foi de **{_fmt(_dm, 2)} km**"
+            _frases.append(_fr + ".")
         if _crit is not None:
-            _frases.append(f"Foram identificados **{_fmt_int(_crit)}** caso(s) crítico(s) de deslocamento (acima do limite contratual de 20 km).")
-        _sup = kp.get("locais_superlotados") or kp.get("qtd_locais_superlotados") or kp.get("qtd_salas_superlotadas")
+            _frases.append(f"Foram identificados **{_fmt(_crit)}** caso(s) crítico(s) de deslocamento (acima do limite contratual de 20 km).")
+        _sup = kp.get("locais_superlotados") or kp.get("salas_superlotadas")
         _cap = kp.get("tg_capacidade_total")
         if _sup is not None:
-            _fr = f"A análise de capacidade identificou **{_fmt_int(_sup)}** ocorrência(s) de superlotação"
+            _fr = f"A análise de capacidade identificou **{_fmt(_sup)}** ocorrência(s) de superlotação"
             if _cap is not None:
-                _fr += f", ainda que a capacidade total instalada seja de **{_fmt_int(_cap)}** assentos"
+                _fr += f", ainda que a capacidade total instalada seja de **{_fmt(_cap)}** assentos"
             _frases.append(_fr + ".")
         _ssf = kp.get("locais_sem_sala_extra")
         if _ssf is not None:
-            _frases.append(f"Foram identificados **{_fmt_int(_ssf)}** local(is) **sem sala extra** de contingência.")
+            _frases.append(f"Foram identificados **{_fmt(_ssf)}** local(is) **sem sala extra** de contingência.")
         _divk = kp.get("kit_tipos_so_n91")
         if _divk is not None and int(float(_divk)) > 0:
-            _frases.append(f"Na reconciliação de kits, **{_fmt_int(_divk)}** tipo(s) constam no N91 mas ainda não no N02 "
+            _frases.append(f"Na reconciliação de kits, **{_fmt(_divk)}** tipo(s) constam no N91 mas ainda não no N02 "
                            "(o ID_KIT_PROVA do N02 deveria espelhar o N91 já validado).")
         _vd = kp.get("validacoes_divergentes")
         if _vd is not None:
             if int(float(_vd)) == 0:
                 _frases.append("Todas as verificações automáticas de consistência (KPIs × tabelas × layouts) **conferem**.")
             else:
-                _frases.append(f"**{_fmt_int(_vd)}** verificação(ões) de consistência apresentaram **divergência** e requerem investigação.")
+                _frases.append(f"**{_fmt(_vd)}** verificação(ões) de consistência apresentaram **divergência** e requerem investigação.")
+
         if _frases:
             st.markdown("\n\n".join(f"- {f}" for f in _frases))
         else:
@@ -13187,18 +10826,19 @@ def _run_streamlit_app() -> None:
                     "necessários (N90, N02, N91…) foram enviados.")
 
         # --- Resumo executivo ---
-        if resumo:
-            st.markdown("##### Resumo executivo da auditoria")
-            st.info(str(resumo))
+        if resumo_vg:
+            st.subheader("Resumo executivo")
+            st.info(str(resumo_vg))
 
-        # --- Painel técnico / observabilidade ---
+        # --- Painel técnico / observabilidade (item 13) ---
         with st.expander("🔧 Painel técnico e qualidade dos dados"):
+            _tempo = st.session_state.get("bi_tempo")
             _c1, _c2, _c3, _c4 = st.columns(4)
             _c1.metric("Motor (versão)", str(APP_VERSION))
             _c2.metric("Camada Streamlit", f"v{STREAMLIT_APP_VERSION}")
-            _c3.metric("Tempo de processamento", f"{st.session_state.get('bi_tempo')}s"
-                       if st.session_state.get("bi_tempo") is not None else "—")
+            _c3.metric("Tempo de processamento", f"{_tempo}s" if _tempo is not None else "—")
             _c4.metric("Análises geradas", len(abas))
+            # tamanhos dos artefatos
             def _kb(p):
                 try:
                     return f"{p.stat().st_size // 1024} KB"
@@ -13206,6 +10846,7 @@ def _run_streamlit_app() -> None:
                     return "—"
             st.caption(f"Dashboard: {_kb(html_path)} · Planilha: {_kb(xlsx_path)} · "
                        f"Base tratada: {_kb(csv_path)} · Metadados: {_kb(json_path)}")
+            # Qualidade dos dados: colunas totalmente vazias por análise
             _vazias = []
             for _n, _d in abas.items():
                 if _d is None or _d.empty:
@@ -13222,331 +10863,12 @@ def _run_streamlit_app() -> None:
             if st.session_state.get("bi_uf_info"):
                 st.caption("Recorte ativo: " + st.session_state["bi_uf_info"])
 
-    # ======================= (1) PARTICIPANTES ================================
-    with tab_part:
-        st.subheader("👥 Perfil dos participantes")
-        st.caption("Demografia e situação dos inscritos, montada a partir da base tratada (ou do layout N90).")
-
-        @st.cache_data(show_spinner=False)
-        def _ler_base(_bytes):
-            import io as _ioB
-            for _enc in ("utf-8-sig", "latin-1"):
-                try:
-                    return _pd.read_csv(_ioB.BytesIO(_bytes), encoding=_enc)
-                except Exception:
-                    continue
-            return _pd.DataFrame()
-
-        _base = _pd.DataFrame()
-        if csv_path.exists():
-            try:
-                _base = _ler_base(csv_path.read_bytes())
-            except Exception as _eb:  # noqa
-                st.caption(f"Base tratada indisponível: {_eb}")
-
-        def _acha_base(*chaves):
-            for c in _base.columns:
-                cu = str(c).upper()
-                if any(k in cu for k in chaves):
-                    return c
-            return None
-
-        if _base is None or _base.empty:
-            _n_base, _base = _aba_maior(["inscrit", "perfil", "n90"])
-            if _base is None or _base.empty:
-                st.info("Nenhuma base de participantes disponível para esta visualização.")
-            else:
-                st.caption(f"Fonte: aba « {_n_base} ».")
-
-        if _base is not None and not _base.empty:
-            _col_sexo = _acha_base("SEXO", "GENERO", "GÊNERO")
-            _col_uf = _acha_base("SG_UF", "_UF")
-            _col_mun = _acha_base("NO_MUNICIPIO", "MUNICIPIO")
-            _col_sit = _acha_base("SITUACAO", "SITUAÇÃO", "TP_SITUACAO")
-            _col_idade = _acha_base("IDADE", "NU_IDADE")
-            _col_insc = _acha_base("CO_INSCRICAO", "INSCRICAO")
-
-            _c1, _c2, _c3, _c4 = st.columns(4)
-            _c1.metric("Total de inscritos", _fmt_int(len(_base)))
-            if _col_sexo is not None:
-                try:
-                    _c2.metric("Sexo (distintos)", _fmt_int(_base[_col_sexo].nunique(dropna=True)))
-                except Exception:
-                    _c2.metric("Sexo (distintos)", "—")
-            if _col_uf is not None:
-                try:
-                    _c3.metric("UFs", _fmt_int(_base[_col_uf].nunique(dropna=True)))
-                except Exception:
-                    _c3.metric("UFs", "—")
-            if _col_mun is not None:
-                try:
-                    _c4.metric("Municípios", _fmt_int(_base[_col_mun].nunique(dropna=True)))
-                except Exception:
-                    _c4.metric("Municípios", "—")
-
-            if _px is not None:
-                _graf = st.selectbox("Distribuição por:", ["Sexo", "UF", "Situação", "Faixa etária", "Município (top 15)"],
-                                     key="graf_part")
-                try:
-                    _col_alvo = None
-                    _tit = ""
-                    if _graf == "Sexo" and _col_sexo:
-                        _col_alvo, _tit = _col_sexo, "Participantes por sexo"
-                    elif _graf == "UF" and _col_uf:
-                        _col_alvo, _tit = _col_uf, "Participantes por UF"
-                    elif _graf == "Situação" and _col_sit:
-                        _col_alvo, _tit = _col_sit, "Participantes por situação"
-                    elif _graf == "Faixa etária" and _col_idade:
-                        _tmp = _base[[_col_idade]].copy()
-                        _tmp[_col_idade] = _pd.to_numeric(_tmp[_col_idade], errors="coerce")
-                        _bins = [0, 17, 20, 24, 29, 34, 39, 44, 49, 59, 200]
-                        _lab = ["≤17", "18-20", "21-24", "25-29", "30-34", "35-39", "40-44", "45-49", "50-59", "≥60"]
-                        _tmp["fx"] = _pd.cut(_tmp[_col_idade], bins=_bins, labels=_lab, right=False)
-                        _dplot = _tmp["fx"].value_counts().reindex(_lab).dropna().reset_index()
-                        _dplot.columns = ["Faixa etária", "Participantes"]
-                        _fig = _px.bar(_dplot, x="Faixa etária", y="Participantes", text_auto=True,
-                                       title="Participantes por faixa etária")
-                        _fig.update_layout(xaxis_title="", margin=dict(t=40))
-                        st.plotly_chart(_fig, use_container_width=True)
-                        _col_alvo = None
-                    elif _graf == "Município (top 15)" and _col_mun:
-                        _dplot = _base[_col_mun].value_counts().head(15).reset_index()
-                        _dplot.columns = ["Município", "Participantes"]
-                        _fig = _px.bar(_dplot, x="Participantes", y="Município", orientation="h",
-                                       text_auto=True, title="Top 15 municípios")
-                        _fig.update_layout(yaxis_title="", margin=dict(t=40))
-                        st.plotly_chart(_fig, use_container_width=True)
-                        _col_alvo = None
-                    if _col_alvo is not None:
-                        _dplot = _base[_col_alvo].astype(str).value_counts().head(20).reset_index()
-                        _dplot.columns = [_tit, "Participantes"]
-                        _fig = _px.bar(_dplot, x=_tit, y="Participantes", text_auto=True, title=_tit)
-                        _fig.update_layout(xaxis_title="", margin=dict(t=40))
-                        st.plotly_chart(_fig, use_container_width=True)
-                except Exception as _eg:  # noqa
-                    st.caption(f"Não foi possível gerar o gráfico: {_eg}")
-
-            st.markdown("##### Dados")
-            with st.expander("Ver base de participantes"):
-                st.dataframe(_base, use_container_width=True, height=360)
-            st.download_button("⬇️ Baixar base (CSV)",
-                               _base.to_csv(index=False).encode("utf-8-sig"),
-                               file_name="participantes.csv", mime="text/csv", key="dl_part")
-
-    # ======================= (2) ENSINO (ENSALAMENTO & CAPACIDADE) ============
-    with tab_ens:
-        st.subheader("🪑 Ensalamento & capacidade")
-        st.caption("Ensino: distribuição do tipo de ensalamento (N02), salas por local (N50) e capacidade instalada (N52).")
-
-        _kp1, _kp2, _kp3, _kp4 = st.columns(4)
-        _kp1.metric("Ensalados", _fmt_int(_kp(["total_ensalados"])) if _kp(["total_ensalados"]) is not None else "—")
-        _kp2.metric("Não ensalados", _fmt_int(_kp(["qtd_sem_ensalamento"])) if _kp(["qtd_sem_ensalamento"]) is not None else "—")
-        _kp3.metric("Locais", _fmt_int(_kp(["tg_locais"])) if _kp(["tg_locais"]) is not None else "—")
-        _kp4.metric("Salas", _fmt_int(_kp(["tg_salas"])) if _kp(["tg_salas"]) is not None else "—")
-
-        # --- Distribuição por tipo de ensalamento (N02) ---
-        _n_tp, _df_tp = _aba_maior(["ensalamento", "tp_ensalamento", "tipo_ensalamento", "ensalad"])
-        if _df_tp is not None and not _df_tp.empty:
-            st.markdown("##### Distribuição do tipo de ensalamento")
-            _catc = _achar_col(_df_tp.columns, ["DESCRICAO", "TIPO", "TP_", "NOME", "CATEGORIA", "ENSALAMENTO"])
-            _numc = _achar_col(_df_tp.columns, ["QT", "TOTAL", "COUNT", "NUM", "PARTICIPANTE", "ALUNO", "VALOR"])
-            if _catc and _numc:
-                _dplot = _df_tp[[_catc, _numc]].copy()
-                _dplot.columns = ["Tipo de ensalamento", "Participantes"]
-                _dplot = _dplot[_dplot["Participantes"].notna()]
-                try:
-                    _dplot["Participantes"] = _pd.to_numeric(_dplot["Participantes"], errors="coerce")
-                except Exception:
-                    pass
-                _dplot = _dplot.dropna().sort_values("Participantes", ascending=False)
-                if _px is not None and not _dplot.empty:
-                    _fig = _px.bar(_dplot.head(20), x="Tipo de ensalamento", y="Participantes",
-                                   text_auto=True, title="Participantes por tipo de ensalamento")
-                    _fig.update_layout(xaxis_title="", margin=dict(t=40))
-                    st.plotly_chart(_fig, use_container_width=True)
-                with st.expander("Tabela de ensalamento"):
-                    st.dataframe(_df_tp, use_container_width=True, height=300)
-            else:
-                with st.expander(f"Tabela de ensalamento — {_n_tp}"):
-                    st.dataframe(_df_tp, use_container_width=True, height=300)
-        else:
-            st.info("Nenhuma análise de ensalamento disponível (o N02 não foi identificado).")
-
-        # --- Capacidade instalada (N52) e salas (N50) ---
-        _n_cap, _df_cap = _aba_maior(["capacidade", "sala", "ocupac", "folga", "superlot"])
-        if _df_cap is not None and not _df_cap.empty:
-            st.markdown("##### Capacidade e ocupação de salas")
-            if _px is not None:
-                _numc2 = [c for c in _df_cap.columns if _pd.api.types.is_numeric_dtype(_df_cap[c])]
-                _catc2 = [c for c in _df_cap.columns if not _pd.api.types.is_numeric_dtype(_df_cap[c])]
-                if _numc2 and _catc2 and len(_df_cap) <= 60:
-                    _cc1, _cc2 = st.columns(2)
-                    _ex = _cc1.selectbox("Categoria (eixo X):", _catc2, key="cx_cap")
-                    _ey = _cc2.selectbox("Valor (eixo Y):", _numc2, key="cy_cap")
-                    try:
-                        _dplot = _df_cap.sort_values(_ey, ascending=False).head(25)
-                        _fig = _px.bar(_dplot, x=_ex, y=_ey, text_auto=True,
-                                       title="Capacidade/ocupação de salas")
-                        _fig.update_layout(xaxis_title="", margin=dict(t=40))
-                        st.plotly_chart(_fig, use_container_width=True)
-                    except Exception as _eg2:  # noqa
-                        st.caption(f"Não foi possível gerar o gráfico: {_eg2}")
-            with st.expander(f"Tabela — {_n_cap}"):
-                st.dataframe(_df_cap, use_container_width=True, height=320)
-        else:
-            st.info("Nenhuma análise de capacidade disponível (N50/N52 não identificados).")
-
-        # --- Alerta de superlotação / sala extra ---
-        _sup = _kp(["locais_superlotados", "qtd_locais_superlotados", "qtd_salas_superlotadas"])
-        _ssf = _kp(["locais_sem_sala_extra"])
-        if _sup is not None and int(float(_sup)) > 0:
-            st.warning(f"⚠️ **{_fmt_int(_sup)}** ocorrência(s) de superlotação identificada(s) na análise de capacidade.")
-        if _ssf is not None and int(float(_ssf)) > 0:
-            st.warning(f"⚠️ **{_fmt_int(_ssf)}** local(is) **sem sala extra** de contingência.")
-
-    # ======================= (3) LOCALIZAÇÃO ==================================
-    with tab_loc:
-        st.subheader("📍 Localização, distância & deslocamento")
-        st.caption("Distância de deslocamento (N02/NU_DISTANCIA), forasteiros e geolocalização dos locais (N52).")
-
-        _c1, _c2, _c3, _c4 = st.columns(4)
-        _dm = _kp(["distancia_media_km"])
-        _c1.metric("Distância média (km)", _fmt_dec(_dm, 2) if _dm is not None else "—")
-        _c2.metric("Forasteiros", _fmt_int(_kp(["qtd_forasteiros"])) if _kp(["qtd_forasteiros"]) is not None else "—")
-        _crit = _kp(["qtd_dist_criticos", "distancia_casos_criticos"])
-        _c3.metric("Críticos >20 km", _fmt_int(_crit) if _crit is not None else "—")
-        _c4.metric("Locais", _fmt_int(_kp(["tg_locais"])) if _kp(["tg_locais"]) is not None else "—")
-
-        # --- Histograma de distância ---
-        _n_dist, _df_dist = _aba_maior(["distancia", "deslocament", "migrac"])
-        if _df_dist is not None and not _df_dist.empty:
-            _numc = [c for c in _df_dist.columns if _pd.api.types.is_numeric_dtype(_df_dist[c])]
-            _km_col = _achar_col(_df_dist.columns, ["KM", "DISTANCIA", "DISTÂNCIA"])
-            if _km_col is None and _numc:
-                _km_col = _numc[0]
-            if _km_col is not None:
-                st.markdown("##### Distribuição das distâncias")
-                if _px is not None:
-                    try:
-                        _serie = _pd.to_numeric(_df_dist[_km_col], errors="coerce").dropna()
-                        if not _serie.empty:
-                            _fig = _px.histogram(x=_serie, nbins=30,
-                                                 title="Histograma de distâncias (km)",
-                                                 labels={"x": "km"})
-                            _fig.update_layout(margin=dict(t=40), yaxis_title="Frequência")
-                            st.plotly_chart(_fig, use_container_width=True)
-                            _m1, _m2, _m3, _m4 = st.columns(4)
-                            _m1.metric("Mínimo", f"{_serie.min():.2f}")
-                            _m2.metric("Média", f"{_serie.mean():.2f}")
-                            _m3.metric("Mediana", f"{_serie.median():.2f}")
-                            _m4.metric("Máximo", f"{_serie.max():.2f}")
-                    except Exception as _egd:  # noqa
-                        st.caption(f"Não foi possível gerar o histograma: {_egd}")
-                with st.expander(f"Tabela — {_n_dist}"):
-                    st.dataframe(_df_dist, use_container_width=True, height=300)
-
-        # --- Mapa dos locais (N52) ---
-        _n_geo, _df_geo = _aba_maior(["local", "geo", "coordenad", "mapa", "municipio", "predio", "escola"])
-        if _df_geo is not None and not _df_geo.empty:
-            st.markdown("##### 🗺️ Mapa dos locais")
-            _col_lat = _achar_col(_df_geo.columns, ["LATITUDE", "_LAT", "NU_LAT"])
-            _col_lon = _achar_col(_df_geo.columns, ["LONGITUDE", "_LON", "_LNG", "NU_LON"])
-            if _col_lat and _col_lon:
-                try:
-                    _mp = _df_geo[[_col_lat, _col_lon]].copy()
-                    _mp.columns = ["lat", "lon"]
-                    _mp["lat"] = _pd.to_numeric(_mp["lat"], errors="coerce")
-                    _mp["lon"] = _pd.to_numeric(_mp["lon"], errors="coerce")
-                    _mp = _mp.dropna()
-                    _mp = _mp[(_mp["lat"].between(-90, 90)) & (_mp["lon"].between(-180, 180))]
-                    if not _mp.empty:
-                        st.map(_mp, size=30)
-                        st.caption(f"{len(_mp):,} ponto(s) com coordenadas válidas.".replace(",", "."))
-                    else:
-                        st.caption("Colunas de coordenadas encontradas, mas sem valores válidos para plotar.")
-                except Exception as _egm:  # noqa
-                    st.caption(f"Não foi possível gerar o mapa: {_egm}")
-            with st.expander(f"Tabela — {_n_geo}"):
-                st.dataframe(_df_geo, use_container_width=True, height=300)
-
-    # ======================= (4) ALUNOS & ATENDIMENTOS ========================
-    with tab_al:
-        st.subheader("🎯 Alunos & atendimentos especiais")
-        st.caption("Atendimentos especiais (N91), acessibilidade dos locais (N60) e kits de prova.")
-
-        _c1, _c2, _c3 = st.columns(3)
-        _c1.metric("Participantes c/ atendimento", _fmt_int(_kp(["qtd_participantes_com_atendimento"]))
-                   if _kp(["qtd_participantes_com_atendimento"]) is not None else "—")
-        _c2.metric("Itens de atendimento (N91)", _fmt_int(_kp(["total_itens_atendimento_n91", "n91_itens_total"]))
-                   if _kp(["total_itens_atendimento_n91", "n91_itens_total"]) is not None else "—")
-        _c3.metric("Kits divergentes", _fmt_int(_kp(["kits_gap", "qtd_kit_divergente"]))
-                   if _kp(["kits_gap", "qtd_kit_divergente"]) is not None else "—")
-
-        _n_n91, _df_n91 = _aba_maior(["atendiment", "recurso", "laudo", "necessidade", "cid", "n91"])
-        if _df_n91 is not None and not _df_n91.empty:
-            st.markdown("##### Atendimentos especiais")
-            _catc = _achar_col(_df_n91.columns, ["DESCRICAO", "TIPO", "ATENDIMENTO", "RECURSO", "NOME", "KIT", "ID_ITEM"])
-            _numc = _achar_col(_df_n91.columns, ["QT", "TOTAL", "COUNT", "NUM", "ALUNO", "PARTICIPANTE", "VALOR"])
-            if _catc and _numc:
-                _dplot = _df_n91[[_catc, _numc]].copy()
-                _dplot.columns = ["Atendimento", "Participantes"]
-                try:
-                    _dplot["Participantes"] = _pd.to_numeric(_dplot["Participantes"], errors="coerce")
-                except Exception:
-                    pass
-                _dplot = _dplot.dropna().sort_values("Participantes", ascending=False)
-                if _px is not None and not _dplot.empty:
-                    _fig = _px.bar(_dplot.head(20), x="Atendimento", y="Participantes",
-                                   text_auto=True, title="Participantes por atendimento especial")
-                    _fig.update_layout(xaxis_title="", margin=dict(t=40))
-                    st.plotly_chart(_fig, use_container_width=True)
-            with st.expander(f"Tabela — {_n_n91}"):
-                st.dataframe(_df_n91, use_container_width=True, height=300)
-        else:
-            st.info("Nenhuma análise de atendimentos especiais disponível (o N91 não foi identificado).")
-
-        # --- Kits de prova (N91 × N02) ---
-        _n_kit, _df_kit = _aba_maior(["kit", "reconcilia", "material", "envelope"])
-        if _df_kit is not None and not _df_kit.empty:
-            st.markdown("##### Kits de prova")
-            with st.expander(f"Tabela — {_n_kit}"):
-                st.dataframe(_df_kit, use_container_width=True, height=300)
-
-        # --- Acessibilidade (N60) ---
-        _n_acc, _df_acc = _aba_maior(["acessibilidade", "n60"])
-        if _df_acc is not None and not _df_acc.empty:
-            st.markdown("##### Acessibilidade dos locais (N60)")
-            _catc = _achar_col(_df_acc.columns, ["DESCRICAO", "TIPO", "ACESSIBILIDADE", "NOME", "ITEM"])
-            _numc = _achar_col(_df_acc.columns, ["QT", "TOTAL", "COUNT", "NUM", "LOCAL", "VALOR"])
-            if _catc and _numc:
-                _dplot = _df_acc[[_catc, _numc]].copy()
-                _dplot.columns = ["Acessibilidade", "Quantidade"]
-                try:
-                    _dplot["Quantidade"] = _pd.to_numeric(_dplot["Quantidade"], errors="coerce")
-                except Exception:
-                    pass
-                _dplot = _dplot.dropna().sort_values("Quantidade", ascending=False)
-                if _px is not None and not _dplot.empty:
-                    _fig = _px.bar(_dplot.head(20), x="Acessibilidade", y="Quantidade",
-                                   text_auto=True, title="Acessibilidade por tipo")
-                    _fig.update_layout(xaxis_title="", margin=dict(t=40))
-                    st.plotly_chart(_fig, use_container_width=True)
-            with st.expander(f"Tabela — {_n_acc}"):
-                st.dataframe(_df_acc, use_container_width=True, height=300)
-        else:
-            st.info("Nenhuma análise de acessibilidade disponível (o N60 não foi identificado).")
-
-        # --- Reconciliação de kits (alerta) ---
-        _divk = _kp(["kits_gap", "qtd_kit_divergente", "kit_tipos_so_n91"])
-        if _divk is not None and int(float(_divk)) > 0:
-            st.warning(f"⚠️ **{_fmt_int(_divk)}** divergência(s) de kit identificada(s) (N91 × N02) — "
-                       "verifique a reconciliação de kits de prova.")
-
-    # ======================= (5) EXPLORADOR (navegação por capítulos) ========
-    with tab_exp:
+    # ======================= (A) VISÃO NATIVA ===============================
+    with tab_nat:
         if not abas:
             st.info("A visão nativa usa as abas da planilha gerada. Rode a análise para populá-la.")
         else:
+            # KPIs a partir da aba que realmente tem colunas MÉTRICA + VALOR
             def _achar_tab_kpis(mapa):
                 for _n, _df in mapa.items():
                     _cm = next((c for c in _df.columns if "MÉTRICA" in str(c).upper() or "METRICA" in str(c).upper()), None)
@@ -13565,6 +10887,7 @@ def _run_streamlit_app() -> None:
                         c.metric(met[:42], val[:20])
                 st.divider()
 
+            # ---- Navegação por CAPÍTULOS temáticos (Rodada 3/4) ----------------
             CAPITULOS = {
                 "🏠 Visão Geral & Totais": ["capa", "guia", "painel", "totais", "total", "visual", "resumo", "metadad", "consolidad", "sumario"],
                 "👥 Inscritos & Perfil": ["inscrit", "perfil", "genero", "sexo", "idade", "faixa_etaria", "demografia"],
@@ -13583,6 +10906,7 @@ def _run_streamlit_app() -> None:
                 n = str(nome_aba).lower()
                 return [cap for cap, kws in CAPITULOS.items() if any(k in n for k in kws)]
 
+            # índice: capítulo -> abas
             idx_cap = {cap: [] for cap in CAPITULOS}
             sem_cap = []
             for nome_aba in abas:
@@ -13617,6 +10941,7 @@ def _run_streamlit_app() -> None:
                                df.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"{escolha}.csv", mime="text/csv", key="dl_aba_nativa")
 
+            # Gráfico nativo automático quando fizer sentido
             if _px is not None and not df.empty:
                 num_cols = [c for c in df.columns if _pd.api.types.is_numeric_dtype(df[c])]
                 cat_cols = [c for c in df.columns if not _pd.api.types.is_numeric_dtype(df[c])]
@@ -13643,6 +10968,7 @@ def _run_streamlit_app() -> None:
                                "(precisa de categoria + numérica e até 60 linhas). "
                                "A tabela acima traz todos os dados; o dashboard HTML tem os gráficos dedicados.")
 
+            # ---- MAPA dedicado: se a análise tiver coordenadas (lat/lon) --------
             def _acha_col(cols, chaves):
                 for c in cols:
                     cu = str(c).upper()
@@ -13668,6 +10994,7 @@ def _run_streamlit_app() -> None:
                 except Exception as e:  # noqa
                     st.caption(f"Não foi possível gerar o mapa: {e}")
 
+            # ---- HISTOGRAMA dedicado: para distribuições (ex.: distância) -------
             if _px is not None and not df.empty:
                 num_todas = [c for c in df.columns if _pd.api.types.is_numeric_dtype(df[c]) and df[c].nunique() > 8]
                 if num_todas:
@@ -13687,6 +11014,7 @@ def _run_streamlit_app() -> None:
                         except Exception as e:  # noqa
                             st.caption(f"Não foi possível gerar o histograma: {e}")
 
+            # ---- v9: GALERIA de gráficos de TODO o capítulo -------------------
             if _px is not None:
                 st.divider()
                 st.subheader(f"📈 Galeria de gráficos — {capitulo}")
@@ -13695,16 +11023,20 @@ def _run_streamlit_app() -> None:
                 mostrar_gal = st.checkbox("Gerar a galeria de gráficos deste capítulo", value=False, key="galeria")
                 if mostrar_gal:
                     def _fig_auto(_df, _titulo):
+                        """Escolhe automaticamente o melhor gráfico para uma tabela; None se não der."""
                         try:
                             _num = [c for c in _df.columns if _pd.api.types.is_numeric_dtype(_df[c])]
                             _cat = [c for c in _df.columns if not _pd.api.types.is_numeric_dtype(_df[c])]
                             if not _num:
                                 return None
+                            # série longa e única numérica -> histograma
                             if _df[_num[0]].nunique() > 12 and (not _cat or len(_df) > 60):
                                 return _px.histogram(_df, x=_num[0], nbins=30, title=_titulo)
+                            # categoria + numérica e poucas linhas -> barras
                             if _cat and 1 <= len(_df) <= 40:
                                 _d = _df.sort_values(_num[0], ascending=False).head(25)
                                 return _px.bar(_d, x=_cat[0], y=_num[0], title=_titulo, text_auto=True)
+                            # muitas linhas com categoria -> top 20 barras
                             if _cat and len(_df) > 40:
                                 _d = _df.sort_values(_num[0], ascending=False).head(20)
                                 return _px.bar(_d, x=_cat[0], y=_num[0], title=_titulo + " (top 20)", text_auto=True)
@@ -13732,11 +11064,163 @@ def _run_streamlit_app() -> None:
                     else:
                         st.info("Nenhuma análise deste capítulo tem formato adequado para gráfico automático. "
                                 "As tabelas completas seguem disponíveis acima e no Excel.")
+
     # ======================= (FGV × INEP) COMPARATIVO DE DISTÂNCIAS ==========
     with tab_fgv:
         st.subheader("Comparativo de distâncias: FGV × INEP")
         st.caption("As distâncias do INEP são calculadas fora dos layouts. Anexe a planilha do INEP na barra lateral "
                    "(com CO_INSCRICAO e a distância) para cruzar com a distância da FGV (NU_DISTANCIA) e ver as diferenças.")
+
+        # --- v20: Faixas de distância (padrão dos relatórios da Comissão) -----
+        # Reproduz DINAMICAMENTE a tabela de faixas presente em todos os relatórios
+        # (<1, 1–3, 3–5, 5–10, 10–20, 20–30, >30 km), calculada dos dados carregados.
+        if arquivo is not None:
+            try:
+                import io as _io4
+                import pandas as _pd4
+                import numpy as _np4
+                _fgv_d = None
+                _xg = _excelfile_fast(_io4.BytesIO(arquivo.getvalue()))
+                for _sh in _xg.sheet_names:
+                    _dd = _read_excel_fast(_io4.BytesIO(arquivo.getvalue()), sheet_name=_sh)
+                    _kd = next((c for c in _dd.columns if str(c).upper() in ("NU_DISTANCIA", "DISTANCIA")), None)
+                    if _kd is not None:
+                        _fgv_d = _dist_km(_dd[_kd]).dropna()
+                        _dd_full = _dd.loc[_fgv_d.index].copy()
+                        _dd_full["DISTANCIA_KM"] = _fgv_d.round(2)
+                        _mun_col = next((c for c in _dd.columns if str(c).upper() in
+                                         ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                        _mun_series = _dd[_mun_col] if _mun_col is not None else None
+                        break
+                if _fgv_d is not None and len(_fgv_d):
+                    st.markdown("#### 📏 Faixas de distância (FGV) — padrão dos relatórios")
+                    st.caption("Calculado dinamicamente a partir da coluna NU_DISTANCIA dos dados carregados. "
+                               "Se você trocar de UF/arquivo, os números mudam automaticamente.")
+                    _bins = [-0.001, 1, 3, 5, 10, 20, 30, float("inf")]
+                    _labels = ["< 1 km", "1 – 3 km", "3 – 5 km", "5 – 10 km", "10 – 20 km", "20 – 30 km", "> 30 km"]
+                    _cats = _pd4.cut(_fgv_d, bins=_bins, labels=_labels)
+                    _tab_f = _cats.value_counts().reindex(_labels).fillna(0).astype(int).reset_index()
+                    _tab_f.columns = ["Faixa de distância", "Participantes"]
+                    _tot = int(_tab_f["Participantes"].sum())
+                    _tab_f["%"] = (_tab_f["Participantes"] / _tot * 100).round(1) if _tot else 0.0
+                    _c1, _c2, _c3, _c4 = st.columns(4)
+                    _c1.metric("Participantes", f"{_tot:,}".replace(",", "."))
+                    _c2.metric("Distância média", f"{_fgv_d.mean():.2f} km")
+                    _c3.metric("Casos > 20 km", f"{int((_fgv_d > 20).sum()):,}".replace(",", "."))
+                    _c4.metric("Casos > 30 km", f"{int((_fgv_d > 30).sum()):,}".replace(",", "."))
+                    _cta, _ctb = st.columns([3, 2])
+                    with _cta:
+                        st.dataframe(_tab_f, use_container_width=True, hide_index=True)
+                        st.download_button("⬇️ Baixar faixas (CSV)", _tab_f.to_csv(index=False).encode("utf-8-sig"),
+                                           file_name="faixas_distancia_fgv.csv", mime="text/csv", key="dl_faixas")
+                    with _ctb:
+                        if _px is not None:
+                            _figf = _px.bar(_tab_f, x="Faixa de distância", y="Participantes", text_auto=True)
+                            _figf.update_layout(xaxis_title="", showlegend=False, margin=dict(t=10))
+                            st.plotly_chart(_figf, use_container_width=True)
+                    # Casos de atenção (15–20) e críticos (>20) por município — como nos relatórios
+                    if _mun_series is not None:
+                        _dfm = _pd4.DataFrame({"dist": _fgv_d.values, "mun": _mun_series.reindex(_fgv_d.index).values})
+                        _aten = _dfm[(_dfm["dist"] >= 15) & (_dfm["dist"] <= 20)]
+                        _crit = _dfm[_dfm["dist"] > 20]
+                        _ca, _cc = st.columns(2)
+                        with _ca:
+                            st.markdown(f"**Casos de atenção (15–20 km): {len(_aten)}**")
+                            if not _aten.empty:
+                                _ra = _aten.groupby("mun")["dist"].agg(["count", "mean"]).round(2)
+                                _ra.columns = ["Participantes", "Distância média"]
+                                st.dataframe(_ra.sort_values("Participantes", ascending=False).head(15),
+                                             use_container_width=True, height=220)
+                        with _cc:
+                            st.markdown(f"**Casos críticos (> 20 km): {len(_crit)}**")
+                            if not _crit.empty:
+                                _rc = _crit.groupby("mun")["dist"].agg(["count", "mean"]).round(2)
+                                _rc.columns = ["Participantes", "Distância média"]
+                                st.dataframe(_rc.sort_values("Participantes", ascending=False).head(15),
+                                             use_container_width=True, height=220)
+
+                    # ---- v21: DRILL-DOWN individual dos casos (quem são) ----------
+                    st.markdown("##### 🔎 Ver casos individuais")
+                    st.caption("Regra: distância geodésica (NU_DISTANCIA) acima do limite contratual de 20 km = crítico; "
+                               "entre 15 e 20 km = atenção. Cada linha é um participante que compõe o indicador.")
+                    _op = st.radio("Quais casos investigar?",
+                                   ["🔴 Críticos (> 20 km)", "🟠 Atenção (15–20 km)", "Todos com distância"],
+                                   horizontal=True, key="drill_op")
+                    if "Críticos" in _op:
+                        _sel = _dd_full[_dd_full["DISTANCIA_KM"] > 20]
+                    elif "Atenção" in _op:
+                        _sel = _dd_full[(_dd_full["DISTANCIA_KM"] >= 15) & (_dd_full["DISTANCIA_KM"] <= 20)]
+                    else:
+                        _sel = _dd_full
+                    # colunas relevantes para auditoria (as que existirem)
+                    _cols_pref = [c for c in ["CO_INSCRICAO", "NU_CPF", "SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA",
+                                              "NO_MUNICIPIO_PROVA", "CO_MUNICIPIO_PROVA", "CO_LOCAL", "NO_LOCAL_PROVA",
+                                              "CO_BLOCO", "ID_SALA", "TP_ENSALAMENTO", "ID_KIT_PROVA", "DISTANCIA_KM"]
+                                  if c in _sel.columns]
+                    _det = _sel[_cols_pref] if _cols_pref else _sel
+                    # filtro por município (só os presentes na seleção)
+                    if _mun_col is not None and _mun_col in _dd_full.columns and not _sel.empty:
+                        _muns_disp = ["(todos)"] + sorted(_sel[_mun_col].dropna().astype(str).unique().tolist())
+                        _mf = st.selectbox("Filtrar por município:", _muns_disp, key="drill_mun")
+                        if _mf != "(todos)":
+                            _det = _det[_sel[_mun_col].astype(str) == _mf]
+                    _busca = st.text_input("Buscar (qualquer campo):", "", key="drill_busca")
+                    if _busca:
+                        _mask = _det.apply(lambda r: _busca.lower() in " ".join(map(str, r.values)).lower(), axis=1)
+                        _det = _det[_mask]
+                    _det = _det.sort_values("DISTANCIA_KM", ascending=False) if "DISTANCIA_KM" in _det.columns else _det
+                    st.markdown(f"**{len(_det):,} caso(s)** de **{len(_dd_full):,}** participantes "
+                                f"(**{len(_det) / len(_dd_full) * 100:.2f}%**)".replace(",", "."))
+                    st.dataframe(_det, use_container_width=True, height=340)
+                    st.download_button("⬇️ Exportar estes casos (CSV) — respeita os filtros",
+                                       _det.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name="casos_distancia.csv", mime="text/csv", key="dl_drill")
+
+                    # ---- v23: mais auditorias EXATAS calculáveis do N02 -----------
+                    st.markdown("##### 🎒 Participantes sem kit (ID_KIT_PROVA vazio)")
+                    _kitcol = next((c for c in _dd_full.columns if str(c).upper() == "ID_KIT_PROVA"), None)
+                    if _kitcol is not None:
+                        _sem_kit = _dd_full[_dd_full[_kitcol].isna() |
+                                            (_dd_full[_kitcol].astype(str).str.strip().isin(["", "nan", "None"]))]
+                        _pct_k = len(_sem_kit) / len(_dd_full) * 100 if len(_dd_full) else 0
+                        st.markdown(f"**Regra:** todo ensalado deve ter `ID_KIT_PROVA` (deve espelhar o N91). "
+                                    f"**{len(_sem_kit):,}** de **{len(_dd_full):,}** sem kit "
+                                    f"(**{_pct_k:.1f}%**).".replace(",", "."))
+                        if len(_sem_kit):
+                            _colsk = [c for c in ["CO_INSCRICAO", "SG_UF_PROVA", "NO_MUNICIPIO_PROVA",
+                                                  "CO_LOCAL", "ID_SALA", "TP_ENSALAMENTO", "ID_KIT_PROVA"]
+                                      if c in _sem_kit.columns]
+                            st.dataframe(_sem_kit[_colsk] if _colsk else _sem_kit,
+                                         use_container_width=True, height=240)
+                            st.download_button("⬇️ Exportar participantes sem kit (CSV)",
+                                               (_sem_kit[_colsk] if _colsk else _sem_kit).to_csv(index=False).encode("utf-8-sig"),
+                                               file_name="participantes_sem_kit.csv", mime="text/csv", key="dl_semkit")
+                            if _pct_k > 99:
+                                st.info("Praticamente todos sem kit — coerente com os relatórios: o `ID_KIT_PROVA` do "
+                                        "N02 ainda não foi preenchido (deve espelhar o N91 já validado).")
+
+                    # Ocupação por sala (participantes por sala) — direto do N02
+                    _salacol = next((c for c in _dd_full.columns if str(c).upper() == "ID_SALA"), None)
+                    _loccol = next((c for c in _dd_full.columns if str(c).upper() == "CO_LOCAL"), None)
+                    if _salacol is not None:
+                        st.markdown("##### 🪑 Ocupação por sala (participantes por sala) — N02")
+                        _gcols = [c for c in [_loccol, _salacol] if c is not None]
+                        _ocup = _dd_full.groupby(_gcols).size().reset_index(name="Participantes")
+                        _media = _ocup["Participantes"].mean()
+                        _c1o, _c2o, _c3o = st.columns(3)
+                        _c1o.metric("Salas", f"{len(_ocup):,}".replace(",", "."))
+                        _c2o.metric("Média por sala", f"{_media:.1f}")
+                        _c3o.metric("Salas com > 40", f"{int((_ocup['Participantes'] > 40).sum()):,}".replace(",", "."))
+                        st.caption("Regra contratual de referência: ~40 participantes por sala. Ordenado por ocupação.")
+                        st.dataframe(_ocup.sort_values("Participantes", ascending=False),
+                                     use_container_width=True, height=260)
+                        st.download_button("⬇️ Exportar ocupação por sala (CSV)",
+                                           _ocup.to_csv(index=False).encode("utf-8-sig"),
+                                           file_name="ocupacao_por_sala.csv", mime="text/csv", key="dl_ocup")
+                    st.divider()
+            except Exception as _eff:  # noqa
+                st.caption(f"Não foi possível montar as faixas de distância: {_eff}")
+
         _inep_bytes = st.session_state.get("bi_inep_bytes")
         if not _inep_bytes:
             st.info("Nenhuma planilha de distâncias do INEP anexada ainda. Use o campo « 🛰️ (Opcional) Planilha com as "
@@ -13889,40 +11373,6 @@ def _run_streamlit_app() -> None:
             resumo = ac.get("resumo_executivo")
             achados = ac.get("achados") or meta.get("achados") or meta.get("findings")
 
-            # v34: cobertura analítica adaptativa — mesma fonte (bundle) do Excel e do HTML.
-            dispon = meta.get("disponibilidade_analitica", {}) if isinstance(meta, dict) else {}
-            if isinstance(dispon, dict) and dispon:
-                st.subheader("Cobertura analítica (adaptativa)")
-                disp_analises = dispon.get("analises") or []
-                disp_presentes = [str(k) for k in (dispon.get("layouts_presentes") or []) if str(k) != 'BASE_PLANA']
-                if disp_presentes or disp_analises:
-                    cA, cB, cC = st.columns(3)
-                    cA.metric("Layouts em análise", len(disp_presentes))
-                    cB.metric("Análises disponíveis", f"{sum(1 for a in disp_analises if a.get('status') == 'disponivel')}/{len(disp_analises)}")
-                    cC.metric("Análises executáveis", sum(1 for a in disp_analises if a.get("executavel")))
-                for narr_txt in (dispon.get("narrativa") or []):
-                    st.info(str(narr_txt))
-                if disp_analises:
-                    df_disp = _pd.DataFrame([{
-                        "Análise": a.get("titulo", ""), "Categoria": a.get("categoria", ""),
-                        "Layouts": ", ".join(a.get("layouts", [])) or a.get("base", "BASE"),
-                        "Status": a.get("status", ""), "Motivo": a.get("motivo", ""),
-                    } for a in disp_analises])
-                    st.markdown(f"##### Matriz de cobertura ({len(df_disp)})")
-                    st.dataframe(df_disp, use_container_width=True, height=320)
-                    st.download_button("⬇️ Baixar matriz de cobertura (CSV)",
-                                       df_disp.to_csv(index=False).encode("utf-8-sig"),
-                                       file_name="matriz_cobertura.csv", mime="text/csv", key="dl_matriz")
-                cruz = dispon.get("cruzamentos_possiveis") or []
-                if cruz:
-                    st.markdown("##### Cruzamentos possíveis entre layouts")
-                    st.dataframe(_pd.DataFrame(cruz), use_container_width=True, height=240)
-                ufs = dispon.get("resumo_uf") or []
-                if ufs:
-                    st.markdown("##### Resumo por UF (base plana)")
-                    st.dataframe(_pd.DataFrame(ufs), use_container_width=True, height=240)
-                st.markdown("---")
-
             if resumo:
                 st.subheader("Resumo executivo da auditoria")
                 st.info(str(resumo))
@@ -13958,20 +11408,73 @@ def _run_streamlit_app() -> None:
                                    file_name="achados_auditoria.csv", mime="text/csv", key="dl_ach")
 
                 # Detalhe expandível (interpretação + recomendação)
-                st.markdown("##### Detalhe dos achados")
+                st.markdown("##### Detalhe dos achados — com evidências")
+                st.caption("Cada achado traz a regra (interpretação), o diagnóstico e — quando o motor gerou uma "
+                           "tabela de registros correspondente — o botão para ver as evidências.")
                 emoji = {"CRÍTICO": "🔴", "ATENÇÃO": "🟡"}
-                for _, row in df_view.iterrows():
+
+                # mapeia palavras-chave do achado -> abas de evidência (dos 117 registros)
+                def _abas_evidencia(_titulo, _categoria):
+                    _txt = (str(_titulo) + " " + str(_categoria)).lower()
+                    _mapa = {
+                        "distanc": ["distancia", "deslocament", "geo", "critico"],
+                        "desloc": ["distancia", "deslocament", "critico"],
+                        "forasteir": ["forasteir", "migrac", "residente"],
+                        "capacidad": ["capacidade", "ocupac", "superlot", "folga", "sala"],
+                        "sala": ["sala", "capacidade", "ocupac"],
+                        "superlot": ["superlot", "capacidade", "sala"],
+                        "local": ["local", "sala_extra", "municipio"],
+                        "kit": ["kit", "reconcilia", "n91"],
+                        "atendiment": ["atendiment", "n91", "laudo", "recurso"],
+                        "laudo": ["laudo", "atendiment", "n91"],
+                        "municipio": ["municipio", "divergenc", "prova"],
+                        "ensalament": ["ensalament", "alocac", "sala", "bloco"],
+                        "bloco": ["bloco", "local", "n52"],
+                        "inscrit": ["inscrit", "perfil", "n90"],
+                        "duplic": ["duplic", "inconsist", "anomalia"],
+                        "anomalia": ["anomalia", "outlier", "critico"],
+                        "orfao": ["orfao", "divergenc", "cruzament"],
+                    }
+                    _kws = set()
+                    for _gatilho, _lista in _mapa.items():
+                        if _gatilho in _txt:
+                            _kws.update(_lista)
+                    if not _kws:
+                        return []
+                    return [n for n in abas if any(k in str(n).lower() for k in _kws)][:6]
+
+                for _idx_a, (_, row) in enumerate(df_view.iterrows()):
                     sev = str(row.get("severidade", "")).upper()
                     titulo = str(row.get("titulo", row.get("chave", "Achado")))
                     with st.expander(f"{emoji.get(sev, '🟢')} {titulo}  ·  {sev}"):
                         if "valor" in row:
                             st.markdown(f"**Valor:** {row['valor']}  ·  **Categoria:** {row.get('categoria', '—')}")
                         if row.get("interpretacao"):
-                            st.markdown(f"**Interpretação:** {row['interpretacao']}")
+                            st.markdown(f"**Regra / interpretação:** {row['interpretacao']}")
                         if row.get("recomendacao"):
                             st.markdown(f"**Recomendação:** {row['recomendacao']}")
                         if isinstance(row.get("metricas"), dict) and row["metricas"]:
                             st.caption("Métricas: " + ", ".join(f"{k}={v}" for k, v in row["metricas"].items()))
+                        # Evidências: abas de registros relacionadas
+                        _evid = _abas_evidencia(titulo, row.get("categoria", ""))
+                        if _evid:
+                            st.markdown("**🔎 Evidências (registros gerados pelo motor):**")
+                            _aba_ev = st.selectbox("Ver tabela de registros:", _evid,
+                                                   key=f"ev_sel_{_idx_a}")
+                            _dfe = abas.get(_aba_ev)
+                            if _dfe is not None and not _dfe.empty:
+                                _bev = st.text_input("Buscar nos registros:", "", key=f"ev_busca_{_idx_a}")
+                                if _bev:
+                                    _dfe = _dfe[_dfe.apply(
+                                        lambda r: _bev.lower() in " ".join(map(str, r.values)).lower(), axis=1)]
+                                st.dataframe(_dfe, use_container_width=True, height=260)
+                                st.download_button("⬇️ Exportar evidências (CSV)",
+                                                   _dfe.to_csv(index=False).encode("utf-8-sig"),
+                                                   file_name=f"evidencias_{_aba_ev}.csv", mime="text/csv",
+                                                   key=f"ev_dl_{_idx_a}")
+                        else:
+                            st.caption("Sem tabela de registros diretamente vinculável a este achado. "
+                                       "Consulte a aba « 📊 Análises » (capítulo relacionado) para os dados de base.")
             else:
                 st.caption("Sem lista de achados estruturada nos metadados.")
 
@@ -13984,37 +11487,6 @@ def _run_streamlit_app() -> None:
                     st.download_button("⬇️ Baixar indicadores (CSV)",
                                        dfk.to_csv(index=False).encode("utf-8-sig"),
                                        file_name="indicadores_auditoria.csv", mime="text/csv", key="dl_kpis_all")
-
-            # v34: engenharia reversa dos relatórios (LOTE RO / LOTE 3) — mesma fonte do HTML/Excel.
-            rev_meta = meta.get("engenharia_reversa_relatorios", {}) if isinstance(meta, dict) else {}
-            if isinstance(rev_meta, dict) and rev_meta:
-                st.subheader("🔄 Engenharia reversa dos relatórios (LOTE RO / LOTE 3)")
-                if rev_meta.get("resumo_executivo"):
-                    st.info(str(rev_meta.get("resumo_executivo")))
-                modulos_rev = rev_meta.get("modulos") or []
-                if modulos_rev:
-                    st.markdown(f"##### Módulos da engenharia reversa ({len(modulos_rev)})")
-                    emoji_rev = {"Conforme": "🟢", "Atenção": "🟠", "Crítico": "🔴", "Não avaliável": "⚪"}
-                    for m_rev in modulos_rev:
-                        cl_rev = str(m_rev.get("classificacao", ""))
-                        with st.expander(f"{emoji_rev.get(cl_rev, '⚪')} [{cl_rev}] {m_rev.get('titulo', '')}"):
-                            if m_rev.get("narrativa"):
-                                st.markdown(m_rev["narrativa"])
-                            if m_rev.get("regra"):
-                                st.caption(f"Regra: {m_rev['regra']}")
-                            if m_rev.get("motivo"):
-                                st.caption(f"Motivo (não avaliável): {m_rev['motivo']}")
-                            if m_rev.get("evidencias"):
-                                st.caption("Evidências: " + "; ".join(str(e) for e in m_rev["evidencias"]))
-                rev_m1 = rev_meta.get("matriz_relatorio_aplicacao") or []
-                if rev_m1:
-                    st.markdown(f"##### Matriz Relatório × Aplicação ({len(rev_m1)})")
-                    st.dataframe(_pd.DataFrame(rev_m1), use_container_width=True, height=260)
-                rev_m2 = rev_meta.get("matriz_analise_dados") or []
-                if rev_m2:
-                    st.markdown(f"##### Matriz Análise × Dados Necessários ({len(rev_m2)})")
-                    st.dataframe(_pd.DataFrame(rev_m2), use_container_width=True, height=260)
-                st.markdown("---")
 
             with st.expander("Metadados completos (JSON)"):
                 st.json(meta)
@@ -14039,5 +11511,4 @@ if __name__ == "__main__":
     else:
         _args = _parse_args()
         AnalyticsPipeline(input_override=_args.input, demo=_args.demo, output_override=_args.output,
-                          layouts_override=_args.layouts, offline=_args.offline, mapa_path=_args.mapa,
-                          relatorios_dir=_args.relatorios).execute()
+                          layouts_override=_args.layouts, offline=_args.offline, mapa_path=_args.mapa).execute()
