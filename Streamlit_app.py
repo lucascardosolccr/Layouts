@@ -13001,86 +13001,123 @@ def _run_streamlit_app() -> None:
         except Exception as e:  # noqa
             st.warning(f"Não foi possível ler a planilha para a visão nativa: {e}")
 
-    tab_vg, tab_nat, tab_fgv, tab_dash, tab_meta = st.tabs(
-        ["🏠 Visão Geral", "📊 Análises (nativo, interativo)", "🛰️ FGV × INEP",
-         "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
-
-    # Carrega metadados da auditoria (KPIs, achados, resumo) uma vez
-    # v34: também carrega a disponibilidade analítica adaptativa (mesma fonte do HTML/Excel).
-    _meta_ac = {}
-    _meta_dispon = {}
+    # ======================= META + HELPERS ==================================
+    _meta_bruto = {}
     if json_path.exists():
         try:
             _meta_bruto = _json.loads(json_path.read_text(encoding="utf-8"))
-            _meta_ac = _meta_bruto.get("auditoria_cruzamento", {}) if isinstance(_meta_bruto, dict) else {}
-            _meta_dispon = _meta_bruto.get("disponibilidade_analitica", {}) if isinstance(_meta_bruto, dict) else {}
         except Exception:
-            _meta_ac = {}
+            _meta_bruto = {}
+    _meta_ac = _meta_bruto.get("auditoria_cruzamento", {}) if isinstance(_meta_bruto, dict) else {}
+    _meta_dispon = _meta_bruto.get("disponibilidade_analitica", {}) if isinstance(_meta_bruto, dict) else {}
+    kp = _meta_ac.get("kpis") or {}
+    achados = _meta_ac.get("achados") or []
+    resumo = _meta_ac.get("resumo_executivo")
+
+    def _fmt_int(v):
+        try:
+            return f"{int(float(v)):,}".replace(",", ".")
+        except Exception:
+            return str(v)
+
+    def _fmt_dec(v, casas=2):
+        try:
+            return f"{float(v):,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except Exception:
+            return str(v)
+
+    def _achar_col(cols, chaves):
+        for c in cols:
+            cu = str(c).upper()
+            if any(k in cu for k in chaves):
+                return c
+        return None
+
+    def _achar_abas(prefixos):
+        pref = [p.lower() for p in prefixos]
+        return [n for n in abas if any(p in str(n).lower() for p in pref)]
+
+    def _aba_maior(prefixos):
+        for n in _achar_abas(prefixos):
+            df = abas[n]
+            if df is not None and not df.empty:
+                return n, df
+        return None, None
+
+    def _kp(chaves):
+        for c in chaves:
+            if c in kp:
+                return kp[c]
+        for c in chaves:
+            for kk in kp:
+                if str(c).lower() in str(kk).lower():
+                    return kp[kk]
+        return None
+
+    tab_vg, tab_part, tab_ens, tab_loc, tab_al, tab_exp, tab_fgv, tab_dash, tab_meta = st.tabs([
+        "🏠 Visão Geral", "👥 Participantes", "🪑 Ensino", "📍 Localização",
+        "🎯 Alunos & Atendimentos", "🔬 Explorador", "🛰️ FGV × INEP",
+        "🖥️ Dashboard HTML completo", "🧾 Achados & Metadados"])
 
     # ======================= (0) VISÃO GERAL (dashboard executivo) ===========
     with tab_vg:
-        st.caption("Resumo executivo, dados carregados e principais alertas — só com o que os layouts enviados permitem calcular.")
-        kp = _meta_ac.get("kpis") or {}
-        achados_vg = _meta_ac.get("achados") or []
-        resumo_vg = _meta_ac.get("resumo_executivo")
+        st.subheader("Resumo executivo")
+        st.caption("Visão geral de tudo que foi carregado e analisado — sempre a partir dos layouts efetivamente enviados.")
 
         # --- Dados carregados: layouts detectados (adaptativo) ---
-        st.subheader("Dados carregados")
-        # v34: a contagem usa o bundle de disponibilidade (fonte única), com fallback para os KPIs da auditoria.
+        st.markdown("##### Dados carregados")
         _dispon_resumo = _meta_dispon.get("resumo_por_layout", {}) if isinstance(_meta_dispon, dict) else {}
         _presentes_avail = [str(k) for k in (_meta_dispon.get("layouts_presentes", []) or []) if str(k) != 'BASE_PLANA']
-        layouts_det = []
+        _linhas_det = []
         for lay in ["N90", "N02", "N91", "N52", "N50", "N60"]:
-            chave = f"total_registros_{lay.lower()}"
             qt = None
+            chave = f"total_registros_{lay.lower()}"
             if chave in kp:
                 qt = kp[chave]
-            elif _dispon_resumo and lay in _dispon_resumo and _dispon_resumo[lay].get("presente"):
-                qt = _dispon_resumo[lay].get("linhas", 0)
+            elif _dispon_resumo and lay in _dispon_resumo:
+                qt = (_dispon_resumo[lay] or {}).get("linhas", 0)
             if qt is not None and (qt or lay in _presentes_avail):
-                layouts_det.append((lay, qt))
-        if layouts_det:
-            cols_l = st.columns(len(layouts_det))
-            for c, (lay, qt) in zip(cols_l, layouts_det):
-                try:
-                    c.metric(lay, f"{int(qt):,}".replace(",", "."), help=f"Registros no layout {lay}.")
-                except Exception:
-                    c.metric(lay, str(qt))
-            st.caption(f"{len(layouts_det)} layout(s) em análise · {len(abas)} análises geradas. "
+                _linhas_det.append({"Layout": lay, "Registros": _fmt_int(qt)})
+        if _linhas_det:
+            cols_l = st.columns(len(_linhas_det))
+            for c, row in zip(cols_l, _linhas_det):
+                c.metric(row["Layout"], row["Registros"])
+            st.caption(f"{len(_linhas_det)} layout(s) em análise · {len(abas)} análises geradas. "
                        "As análises que dependem de layouts ausentes não são exibidas (adaptativo).")
         else:
             st.info("Layouts detectados aparecerão aqui após a execução.")
 
         # --- Principais indicadores (só os que existem) ---
-        st.subheader("Principais indicadores")
         _rotulos = [
             ("total_inscritos", "Inscritos"), ("total_ensalados", "Ensalados"),
-            ("total_nao_ensalados", "Não ensalados"), ("pct_ensalamento", "Taxa ensalamento (%)"),
+            ("qtd_sem_ensalamento", "Não ensalados"), ("pct_ensalamento", "Taxa ensalamento (%)"),
             ("tg_locais", "Locais"), ("tg_salas", "Salas"),
-            ("distancia_media_km", "Distância média (km)"), ("total_forasteiros", "Forasteiros"),
-            ("tg_capacidade_total", "Capacidade instalada"), ("kit_tipos_so_n91", "Kits só no N91"),
-            ("validacoes_divergentes", "Validações divergentes"), ("total_indicadores_consolidados", "Totais consolidados"),
+            ("distancia_media_km", "Distância média (km)"), ("qtd_forasteiros", "Forasteiros"),
+            ("tg_capacidade_total", "Capacidade instalada"), ("kits_gap", "Kits em falta"),
+            ("validacoes_divergentes", "Validações divergentes"),
         ]
         presentes = [(k, r) for k, r in _rotulos if k in kp]
         if presentes:
+            st.markdown("##### Principais indicadores")
             for i in range(0, len(presentes), 4):
                 for c, (k, r) in zip(st.columns(4), presentes[i:i + 4]):
-                    c.metric(r, str(kp[k]))
-        else:
-            st.caption("Indicadores aparecerão conforme os layouts disponíveis.")
+                    try:
+                        c.metric(r, _fmt_dec(kp[k], 1) if isinstance(kp[k], float) else _fmt_int(kp[k]))
+                    except Exception:
+                        c.metric(r, str(kp[k]))
         with st.expander(f"Ver todos os indicadores calculados ({len(kp)})"):
             if kp:
                 st.dataframe(_pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()]),
                              use_container_width=True, height=300)
 
         # --- Principais alertas (achados críticos/atenção) ---
-        if isinstance(achados_vg, list) and achados_vg:
-            df_a = _pd.DataFrame(achados_vg)
+        if isinstance(achados, list) and achados:
+            df_a = _pd.DataFrame(achados)
             if "severidade" in df_a.columns:
                 sevu = df_a["severidade"].astype(str).str.upper()
                 crit = df_a[sevu == "CRÍTICO"]
                 aten = df_a[sevu == "ATENÇÃO"]
-                st.subheader("Principais alertas")
+                st.markdown("##### Principais alertas")
                 cA, cB, cC = st.columns(3)
                 cA.metric("🔴 Críticos", len(crit))
                 cB.metric("🟡 Atenção", len(aten))
@@ -13091,70 +13128,58 @@ def _run_streamlit_app() -> None:
                     st.markdown(f"- **{titulo}** — {str(row.get('recomendacao', row.get('interpretacao', '')))[:160]}")
                 st.caption("Veja todos na aba « 🧾 Achados & Metadados ».")
 
-        # --- Narrativa analítica automática (seções 26 e 42) ---
-        st.subheader("📝 Narrativa analítica")
-        st.caption("Texto gerado a partir dos números efetivamente calculados — auditável, sem justificativas inventadas.")
-
-        def _fmt(v, casas=0):
-            try:
-                if casas:
-                    return f"{float(v):,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                return f"{int(float(v)):,}".replace(",", ".")
-            except Exception:
-                return str(v)
-
+        # --- Narrativa analítica automática ---
+        st.markdown("##### 📝 Narrativa analítica")
         _frases = []
         _ins = kp.get("total_inscritos")
         _ens = kp.get("total_ensalados")
         _pct = kp.get("pct_ensalamento")
         if _ins is not None and _ens is not None:
-            _fr = f"Foram analisados **{_fmt(_ins)}** inscritos, dos quais **{_fmt(_ens)}** foram ensalados"
+            _fr = f"Foram analisados **{_fmt_int(_ins)}** inscritos, dos quais **{_fmt_int(_ens)}** foram ensalados"
             if _pct is not None:
-                _fr += f", correspondendo a **{_fmt(_pct, 1)}%** do universo"
+                _fr += f", correspondendo a **{_fmt_dec(_pct, 1)}%** do universo"
             _frases.append(_fr + ".")
             try:
                 _nao = int(float(_ins)) - int(float(_ens))
                 if _nao > 0:
-                    _frases.append(f"Há **{_fmt(_nao)}** inscrito(s) ainda **sem ensalamento**, que exigem atenção.")
+                    _frases.append(f"Há **{_fmt_int(_nao)}** inscrito(s) ainda **sem ensalamento**, que exigem atenção.")
             except Exception:
                 pass
-        _for = kp.get("total_forasteiros")
+        _for = kp.get("qtd_forasteiros")
         if _for is not None:
-            _fr = f"Foram identificados **{_fmt(_for)}** forasteiros (participantes cuja UF de residência difere da UF de prova)"
+            _fr = f"Foram identificados **{_fmt_int(_for)}** forasteiros (participantes cuja UF de residência difere da UF de prova)"
             if _ins:
                 try:
-                    _fr += f", equivalentes a **{_fmt(int(float(_for)) / int(float(_ins)) * 100, 1)}%** dos inscritos"
+                    _fr += f", equivalentes a **{_fmt_dec(int(float(_for)) / int(float(_ins)) * 100, 1)}%** dos inscritos"
                 except Exception:
                     pass
             _frases.append(_fr + ".")
         _dm = kp.get("distancia_media_km")
-        _crit = kp.get("distancia_criticos") or kp.get("locais_criticos_distancia")
+        _crit = kp.get("qtd_dist_criticos") or kp.get("distancia_casos_criticos")
         if _dm is not None:
-            _fr = f"A distância média de deslocamento foi de **{_fmt(_dm, 2)} km**"
-            _frases.append(_fr + ".")
+            _frases.append(f"A distância média de deslocamento foi de **{_fmt_dec(_dm, 2)} km**.")
         if _crit is not None:
-            _frases.append(f"Foram identificados **{_fmt(_crit)}** caso(s) crítico(s) de deslocamento (acima do limite contratual de 20 km).")
-        _sup = kp.get("locais_superlotados") or kp.get("salas_superlotadas")
+            _frases.append(f"Foram identificados **{_fmt_int(_crit)}** caso(s) crítico(s) de deslocamento (acima do limite contratual de 20 km).")
+        _sup = kp.get("locais_superlotados") or kp.get("qtd_locais_superlotados") or kp.get("qtd_salas_superlotadas")
         _cap = kp.get("tg_capacidade_total")
         if _sup is not None:
-            _fr = f"A análise de capacidade identificou **{_fmt(_sup)}** ocorrência(s) de superlotação"
+            _fr = f"A análise de capacidade identificou **{_fmt_int(_sup)}** ocorrência(s) de superlotação"
             if _cap is not None:
-                _fr += f", ainda que a capacidade total instalada seja de **{_fmt(_cap)}** assentos"
+                _fr += f", ainda que a capacidade total instalada seja de **{_fmt_int(_cap)}** assentos"
             _frases.append(_fr + ".")
         _ssf = kp.get("locais_sem_sala_extra")
         if _ssf is not None:
-            _frases.append(f"Foram identificados **{_fmt(_ssf)}** local(is) **sem sala extra** de contingência.")
+            _frases.append(f"Foram identificados **{_fmt_int(_ssf)}** local(is) **sem sala extra** de contingência.")
         _divk = kp.get("kit_tipos_so_n91")
         if _divk is not None and int(float(_divk)) > 0:
-            _frases.append(f"Na reconciliação de kits, **{_fmt(_divk)}** tipo(s) constam no N91 mas ainda não no N02 "
+            _frases.append(f"Na reconciliação de kits, **{_fmt_int(_divk)}** tipo(s) constam no N91 mas ainda não no N02 "
                            "(o ID_KIT_PROVA do N02 deveria espelhar o N91 já validado).")
         _vd = kp.get("validacoes_divergentes")
         if _vd is not None:
             if int(float(_vd)) == 0:
                 _frases.append("Todas as verificações automáticas de consistência (KPIs × tabelas × layouts) **conferem**.")
             else:
-                _frases.append(f"**{_fmt(_vd)}** verificação(ões) de consistência apresentaram **divergência** e requerem investigação.")
-
+                _frases.append(f"**{_fmt_int(_vd)}** verificação(ões) de consistência apresentaram **divergência** e requerem investigação.")
         if _frases:
             st.markdown("\n\n".join(f"- {f}" for f in _frases))
         else:
@@ -13162,19 +13187,18 @@ def _run_streamlit_app() -> None:
                     "necessários (N90, N02, N91…) foram enviados.")
 
         # --- Resumo executivo ---
-        if resumo_vg:
-            st.subheader("Resumo executivo")
-            st.info(str(resumo_vg))
+        if resumo:
+            st.markdown("##### Resumo executivo da auditoria")
+            st.info(str(resumo))
 
-        # --- Painel técnico / observabilidade (item 13) ---
+        # --- Painel técnico / observabilidade ---
         with st.expander("🔧 Painel técnico e qualidade dos dados"):
-            _tempo = st.session_state.get("bi_tempo")
             _c1, _c2, _c3, _c4 = st.columns(4)
             _c1.metric("Motor (versão)", str(APP_VERSION))
             _c2.metric("Camada Streamlit", f"v{STREAMLIT_APP_VERSION}")
-            _c3.metric("Tempo de processamento", f"{_tempo}s" if _tempo is not None else "—")
+            _c3.metric("Tempo de processamento", f"{st.session_state.get('bi_tempo')}s"
+                       if st.session_state.get("bi_tempo") is not None else "—")
             _c4.metric("Análises geradas", len(abas))
-            # tamanhos dos artefatos
             def _kb(p):
                 try:
                     return f"{p.stat().st_size // 1024} KB"
@@ -13182,7 +13206,6 @@ def _run_streamlit_app() -> None:
                     return "—"
             st.caption(f"Dashboard: {_kb(html_path)} · Planilha: {_kb(xlsx_path)} · "
                        f"Base tratada: {_kb(csv_path)} · Metadados: {_kb(json_path)}")
-            # Qualidade dos dados: colunas totalmente vazias por análise
             _vazias = []
             for _n, _d in abas.items():
                 if _d is None or _d.empty:
@@ -13199,12 +13222,331 @@ def _run_streamlit_app() -> None:
             if st.session_state.get("bi_uf_info"):
                 st.caption("Recorte ativo: " + st.session_state["bi_uf_info"])
 
-    # ======================= (A) VISÃO NATIVA ===============================
-    with tab_nat:
+    # ======================= (1) PARTICIPANTES ================================
+    with tab_part:
+        st.subheader("👥 Perfil dos participantes")
+        st.caption("Demografia e situação dos inscritos, montada a partir da base tratada (ou do layout N90).")
+
+        @st.cache_data(show_spinner=False)
+        def _ler_base(_bytes):
+            import io as _ioB
+            for _enc in ("utf-8-sig", "latin-1"):
+                try:
+                    return _pd.read_csv(_ioB.BytesIO(_bytes), encoding=_enc)
+                except Exception:
+                    continue
+            return _pd.DataFrame()
+
+        _base = _pd.DataFrame()
+        if csv_path.exists():
+            try:
+                _base = _ler_base(csv_path.read_bytes())
+            except Exception as _eb:  # noqa
+                st.caption(f"Base tratada indisponível: {_eb}")
+
+        def _acha_base(*chaves):
+            for c in _base.columns:
+                cu = str(c).upper()
+                if any(k in cu for k in chaves):
+                    return c
+            return None
+
+        if _base is None or _base.empty:
+            _n_base, _base = _aba_maior(["inscrit", "perfil", "n90"])
+            if _base is None or _base.empty:
+                st.info("Nenhuma base de participantes disponível para esta visualização.")
+            else:
+                st.caption(f"Fonte: aba « {_n_base} ».")
+
+        if _base is not None and not _base.empty:
+            _col_sexo = _acha_base("SEXO", "GENERO", "GÊNERO")
+            _col_uf = _acha_base("SG_UF", "_UF")
+            _col_mun = _acha_base("NO_MUNICIPIO", "MUNICIPIO")
+            _col_sit = _acha_base("SITUACAO", "SITUAÇÃO", "TP_SITUACAO")
+            _col_idade = _acha_base("IDADE", "NU_IDADE")
+            _col_insc = _acha_base("CO_INSCRICAO", "INSCRICAO")
+
+            _c1, _c2, _c3, _c4 = st.columns(4)
+            _c1.metric("Total de inscritos", _fmt_int(len(_base)))
+            if _col_sexo is not None:
+                try:
+                    _c2.metric("Sexo (distintos)", _fmt_int(_base[_col_sexo].nunique(dropna=True)))
+                except Exception:
+                    _c2.metric("Sexo (distintos)", "—")
+            if _col_uf is not None:
+                try:
+                    _c3.metric("UFs", _fmt_int(_base[_col_uf].nunique(dropna=True)))
+                except Exception:
+                    _c3.metric("UFs", "—")
+            if _col_mun is not None:
+                try:
+                    _c4.metric("Municípios", _fmt_int(_base[_col_mun].nunique(dropna=True)))
+                except Exception:
+                    _c4.metric("Municípios", "—")
+
+            if _px is not None:
+                _graf = st.selectbox("Distribuição por:", ["Sexo", "UF", "Situação", "Faixa etária", "Município (top 15)"],
+                                     key="graf_part")
+                try:
+                    _col_alvo = None
+                    _tit = ""
+                    if _graf == "Sexo" and _col_sexo:
+                        _col_alvo, _tit = _col_sexo, "Participantes por sexo"
+                    elif _graf == "UF" and _col_uf:
+                        _col_alvo, _tit = _col_uf, "Participantes por UF"
+                    elif _graf == "Situação" and _col_sit:
+                        _col_alvo, _tit = _col_sit, "Participantes por situação"
+                    elif _graf == "Faixa etária" and _col_idade:
+                        _tmp = _base[[_col_idade]].copy()
+                        _tmp[_col_idade] = _pd.to_numeric(_tmp[_col_idade], errors="coerce")
+                        _bins = [0, 17, 20, 24, 29, 34, 39, 44, 49, 59, 200]
+                        _lab = ["≤17", "18-20", "21-24", "25-29", "30-34", "35-39", "40-44", "45-49", "50-59", "≥60"]
+                        _tmp["fx"] = _pd.cut(_tmp[_col_idade], bins=_bins, labels=_lab, right=False)
+                        _dplot = _tmp["fx"].value_counts().reindex(_lab).dropna().reset_index()
+                        _dplot.columns = ["Faixa etária", "Participantes"]
+                        _fig = _px.bar(_dplot, x="Faixa etária", y="Participantes", text_auto=True,
+                                       title="Participantes por faixa etária")
+                        _fig.update_layout(xaxis_title="", margin=dict(t=40))
+                        st.plotly_chart(_fig, use_container_width=True)
+                        _col_alvo = None
+                    elif _graf == "Município (top 15)" and _col_mun:
+                        _dplot = _base[_col_mun].value_counts().head(15).reset_index()
+                        _dplot.columns = ["Município", "Participantes"]
+                        _fig = _px.bar(_dplot, x="Participantes", y="Município", orientation="h",
+                                       text_auto=True, title="Top 15 municípios")
+                        _fig.update_layout(yaxis_title="", margin=dict(t=40))
+                        st.plotly_chart(_fig, use_container_width=True)
+                        _col_alvo = None
+                    if _col_alvo is not None:
+                        _dplot = _base[_col_alvo].astype(str).value_counts().head(20).reset_index()
+                        _dplot.columns = [_tit, "Participantes"]
+                        _fig = _px.bar(_dplot, x=_tit, y="Participantes", text_auto=True, title=_tit)
+                        _fig.update_layout(xaxis_title="", margin=dict(t=40))
+                        st.plotly_chart(_fig, use_container_width=True)
+                except Exception as _eg:  # noqa
+                    st.caption(f"Não foi possível gerar o gráfico: {_eg}")
+
+            st.markdown("##### Dados")
+            with st.expander("Ver base de participantes"):
+                st.dataframe(_base, use_container_width=True, height=360)
+            st.download_button("⬇️ Baixar base (CSV)",
+                               _base.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="participantes.csv", mime="text/csv", key="dl_part")
+
+    # ======================= (2) ENSINO (ENSALAMENTO & CAPACIDADE) ============
+    with tab_ens:
+        st.subheader("🪑 Ensalamento & capacidade")
+        st.caption("Ensino: distribuição do tipo de ensalamento (N02), salas por local (N50) e capacidade instalada (N52).")
+
+        _kp1, _kp2, _kp3, _kp4 = st.columns(4)
+        _kp1.metric("Ensalados", _fmt_int(_kp(["total_ensalados"])) if _kp(["total_ensalados"]) is not None else "—")
+        _kp2.metric("Não ensalados", _fmt_int(_kp(["qtd_sem_ensalamento"])) if _kp(["qtd_sem_ensalamento"]) is not None else "—")
+        _kp3.metric("Locais", _fmt_int(_kp(["tg_locais"])) if _kp(["tg_locais"]) is not None else "—")
+        _kp4.metric("Salas", _fmt_int(_kp(["tg_salas"])) if _kp(["tg_salas"]) is not None else "—")
+
+        # --- Distribuição por tipo de ensalamento (N02) ---
+        _n_tp, _df_tp = _aba_maior(["ensalamento", "tp_ensalamento", "tipo_ensalamento", "ensalad"])
+        if _df_tp is not None and not _df_tp.empty:
+            st.markdown("##### Distribuição do tipo de ensalamento")
+            _catc = _achar_col(_df_tp.columns, ["DESCRICAO", "TIPO", "TP_", "NOME", "CATEGORIA", "ENSALAMENTO"])
+            _numc = _achar_col(_df_tp.columns, ["QT", "TOTAL", "COUNT", "NUM", "PARTICIPANTE", "ALUNO", "VALOR"])
+            if _catc and _numc:
+                _dplot = _df_tp[[_catc, _numc]].copy()
+                _dplot.columns = ["Tipo de ensalamento", "Participantes"]
+                _dplot = _dplot[_dplot["Participantes"].notna()]
+                try:
+                    _dplot["Participantes"] = _pd.to_numeric(_dplot["Participantes"], errors="coerce")
+                except Exception:
+                    pass
+                _dplot = _dplot.dropna().sort_values("Participantes", ascending=False)
+                if _px is not None and not _dplot.empty:
+                    _fig = _px.bar(_dplot.head(20), x="Tipo de ensalamento", y="Participantes",
+                                   text_auto=True, title="Participantes por tipo de ensalamento")
+                    _fig.update_layout(xaxis_title="", margin=dict(t=40))
+                    st.plotly_chart(_fig, use_container_width=True)
+                with st.expander("Tabela de ensalamento"):
+                    st.dataframe(_df_tp, use_container_width=True, height=300)
+            else:
+                with st.expander(f"Tabela de ensalamento — {_n_tp}"):
+                    st.dataframe(_df_tp, use_container_width=True, height=300)
+        else:
+            st.info("Nenhuma análise de ensalamento disponível (o N02 não foi identificado).")
+
+        # --- Capacidade instalada (N52) e salas (N50) ---
+        _n_cap, _df_cap = _aba_maior(["capacidade", "sala", "ocupac", "folga", "superlot"])
+        if _df_cap is not None and not _df_cap.empty:
+            st.markdown("##### Capacidade e ocupação de salas")
+            if _px is not None:
+                _numc2 = [c for c in _df_cap.columns if _pd.api.types.is_numeric_dtype(_df_cap[c])]
+                _catc2 = [c for c in _df_cap.columns if not _pd.api.types.is_numeric_dtype(_df_cap[c])]
+                if _numc2 and _catc2 and len(_df_cap) <= 60:
+                    _cc1, _cc2 = st.columns(2)
+                    _ex = _cc1.selectbox("Categoria (eixo X):", _catc2, key="cx_cap")
+                    _ey = _cc2.selectbox("Valor (eixo Y):", _numc2, key="cy_cap")
+                    try:
+                        _dplot = _df_cap.sort_values(_ey, ascending=False).head(25)
+                        _fig = _px.bar(_dplot, x=_ex, y=_ey, text_auto=True,
+                                       title="Capacidade/ocupação de salas")
+                        _fig.update_layout(xaxis_title="", margin=dict(t=40))
+                        st.plotly_chart(_fig, use_container_width=True)
+                    except Exception as _eg2:  # noqa
+                        st.caption(f"Não foi possível gerar o gráfico: {_eg2}")
+            with st.expander(f"Tabela — {_n_cap}"):
+                st.dataframe(_df_cap, use_container_width=True, height=320)
+        else:
+            st.info("Nenhuma análise de capacidade disponível (N50/N52 não identificados).")
+
+        # --- Alerta de superlotação / sala extra ---
+        _sup = _kp(["locais_superlotados", "qtd_locais_superlotados", "qtd_salas_superlotadas"])
+        _ssf = _kp(["locais_sem_sala_extra"])
+        if _sup is not None and int(float(_sup)) > 0:
+            st.warning(f"⚠️ **{_fmt_int(_sup)}** ocorrência(s) de superlotação identificada(s) na análise de capacidade.")
+        if _ssf is not None and int(float(_ssf)) > 0:
+            st.warning(f"⚠️ **{_fmt_int(_ssf)}** local(is) **sem sala extra** de contingência.")
+
+    # ======================= (3) LOCALIZAÇÃO ==================================
+    with tab_loc:
+        st.subheader("📍 Localização, distância & deslocamento")
+        st.caption("Distância de deslocamento (N02/NU_DISTANCIA), forasteiros e geolocalização dos locais (N52).")
+
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _dm = _kp(["distancia_media_km"])
+        _c1.metric("Distância média (km)", _fmt_dec(_dm, 2) if _dm is not None else "—")
+        _c2.metric("Forasteiros", _fmt_int(_kp(["qtd_forasteiros"])) if _kp(["qtd_forasteiros"]) is not None else "—")
+        _crit = _kp(["qtd_dist_criticos", "distancia_casos_criticos"])
+        _c3.metric("Críticos >20 km", _fmt_int(_crit) if _crit is not None else "—")
+        _c4.metric("Locais", _fmt_int(_kp(["tg_locais"])) if _kp(["tg_locais"]) is not None else "—")
+
+        # --- Histograma de distância ---
+        _n_dist, _df_dist = _aba_maior(["distancia", "deslocament", "migrac"])
+        if _df_dist is not None and not _df_dist.empty:
+            _numc = [c for c in _df_dist.columns if _pd.api.types.is_numeric_dtype(_df_dist[c])]
+            _km_col = _achar_col(_df_dist.columns, ["KM", "DISTANCIA", "DISTÂNCIA"])
+            if _km_col is None and _numc:
+                _km_col = _numc[0]
+            if _km_col is not None:
+                st.markdown("##### Distribuição das distâncias")
+                if _px is not None:
+                    try:
+                        _serie = _pd.to_numeric(_df_dist[_km_col], errors="coerce").dropna()
+                        if not _serie.empty:
+                            _fig = _px.histogram(x=_serie, nbins=30,
+                                                 title="Histograma de distâncias (km)",
+                                                 labels={"x": "km"})
+                            _fig.update_layout(margin=dict(t=40), yaxis_title="Frequência")
+                            st.plotly_chart(_fig, use_container_width=True)
+                            _m1, _m2, _m3, _m4 = st.columns(4)
+                            _m1.metric("Mínimo", f"{_serie.min():.2f}")
+                            _m2.metric("Média", f"{_serie.mean():.2f}")
+                            _m3.metric("Mediana", f"{_serie.median():.2f}")
+                            _m4.metric("Máximo", f"{_serie.max():.2f}")
+                    except Exception as _egd:  # noqa
+                        st.caption(f"Não foi possível gerar o histograma: {_egd}")
+                with st.expander(f"Tabela — {_n_dist}"):
+                    st.dataframe(_df_dist, use_container_width=True, height=300)
+
+        # --- Mapa dos locais (N52) ---
+        _n_geo, _df_geo = _aba_maior(["local", "geo", "coordenad", "mapa", "municipio", "predio", "escola"])
+        if _df_geo is not None and not _df_geo.empty:
+            st.markdown("##### 🗺️ Mapa dos locais")
+            _col_lat = _achar_col(_df_geo.columns, ["LATITUDE", "_LAT", "NU_LAT"])
+            _col_lon = _achar_col(_df_geo.columns, ["LONGITUDE", "_LON", "_LNG", "NU_LON"])
+            if _col_lat and _col_lon:
+                try:
+                    _mp = _df_geo[[_col_lat, _col_lon]].copy()
+                    _mp.columns = ["lat", "lon"]
+                    _mp["lat"] = _pd.to_numeric(_mp["lat"], errors="coerce")
+                    _mp["lon"] = _pd.to_numeric(_mp["lon"], errors="coerce")
+                    _mp = _mp.dropna()
+                    _mp = _mp[(_mp["lat"].between(-90, 90)) & (_mp["lon"].between(-180, 180))]
+                    if not _mp.empty:
+                        st.map(_mp, size=30)
+                        st.caption(f"{len(_mp):,} ponto(s) com coordenadas válidas.".replace(",", "."))
+                    else:
+                        st.caption("Colunas de coordenadas encontradas, mas sem valores válidos para plotar.")
+                except Exception as _egm:  # noqa
+                    st.caption(f"Não foi possível gerar o mapa: {_egm}")
+            with st.expander(f"Tabela — {_n_geo}"):
+                st.dataframe(_df_geo, use_container_width=True, height=300)
+
+    # ======================= (4) ALUNOS & ATENDIMENTOS ========================
+    with tab_al:
+        st.subheader("🎯 Alunos & atendimentos especiais")
+        st.caption("Atendimentos especiais (N91), acessibilidade dos locais (N60) e kits de prova.")
+
+        _c1, _c2, _c3 = st.columns(3)
+        _c1.metric("Participantes c/ atendimento", _fmt_int(_kp(["qtd_participantes_com_atendimento"]))
+                   if _kp(["qtd_participantes_com_atendimento"]) is not None else "—")
+        _c2.metric("Itens de atendimento (N91)", _fmt_int(_kp(["total_itens_atendimento_n91", "n91_itens_total"]))
+                   if _kp(["total_itens_atendimento_n91", "n91_itens_total"]) is not None else "—")
+        _c3.metric("Kits divergentes", _fmt_int(_kp(["kits_gap", "qtd_kit_divergente"]))
+                   if _kp(["kits_gap", "qtd_kit_divergente"]) is not None else "—")
+
+        _n_n91, _df_n91 = _aba_maior(["atendiment", "recurso", "laudo", "necessidade", "cid", "n91"])
+        if _df_n91 is not None and not _df_n91.empty:
+            st.markdown("##### Atendimentos especiais")
+            _catc = _achar_col(_df_n91.columns, ["DESCRICAO", "TIPO", "ATENDIMENTO", "RECURSO", "NOME", "KIT", "ID_ITEM"])
+            _numc = _achar_col(_df_n91.columns, ["QT", "TOTAL", "COUNT", "NUM", "ALUNO", "PARTICIPANTE", "VALOR"])
+            if _catc and _numc:
+                _dplot = _df_n91[[_catc, _numc]].copy()
+                _dplot.columns = ["Atendimento", "Participantes"]
+                try:
+                    _dplot["Participantes"] = _pd.to_numeric(_dplot["Participantes"], errors="coerce")
+                except Exception:
+                    pass
+                _dplot = _dplot.dropna().sort_values("Participantes", ascending=False)
+                if _px is not None and not _dplot.empty:
+                    _fig = _px.bar(_dplot.head(20), x="Atendimento", y="Participantes",
+                                   text_auto=True, title="Participantes por atendimento especial")
+                    _fig.update_layout(xaxis_title="", margin=dict(t=40))
+                    st.plotly_chart(_fig, use_container_width=True)
+            with st.expander(f"Tabela — {_n_n91}"):
+                st.dataframe(_df_n91, use_container_width=True, height=300)
+        else:
+            st.info("Nenhuma análise de atendimentos especiais disponível (o N91 não foi identificado).")
+
+        # --- Kits de prova (N91 × N02) ---
+        _n_kit, _df_kit = _aba_maior(["kit", "reconcilia", "material", "envelope"])
+        if _df_kit is not None and not _df_kit.empty:
+            st.markdown("##### Kits de prova")
+            with st.expander(f"Tabela — {_n_kit}"):
+                st.dataframe(_df_kit, use_container_width=True, height=300)
+
+        # --- Acessibilidade (N60) ---
+        _n_acc, _df_acc = _aba_maior(["acessibilidade", "n60"])
+        if _df_acc is not None and not _df_acc.empty:
+            st.markdown("##### Acessibilidade dos locais (N60)")
+            _catc = _achar_col(_df_acc.columns, ["DESCRICAO", "TIPO", "ACESSIBILIDADE", "NOME", "ITEM"])
+            _numc = _achar_col(_df_acc.columns, ["QT", "TOTAL", "COUNT", "NUM", "LOCAL", "VALOR"])
+            if _catc and _numc:
+                _dplot = _df_acc[[_catc, _numc]].copy()
+                _dplot.columns = ["Acessibilidade", "Quantidade"]
+                try:
+                    _dplot["Quantidade"] = _pd.to_numeric(_dplot["Quantidade"], errors="coerce")
+                except Exception:
+                    pass
+                _dplot = _dplot.dropna().sort_values("Quantidade", ascending=False)
+                if _px is not None and not _dplot.empty:
+                    _fig = _px.bar(_dplot.head(20), x="Acessibilidade", y="Quantidade",
+                                   text_auto=True, title="Acessibilidade por tipo")
+                    _fig.update_layout(xaxis_title="", margin=dict(t=40))
+                    st.plotly_chart(_fig, use_container_width=True)
+            with st.expander(f"Tabela — {_n_acc}"):
+                st.dataframe(_df_acc, use_container_width=True, height=300)
+        else:
+            st.info("Nenhuma análise de acessibilidade disponível (o N60 não foi identificado).")
+
+        # --- Reconciliação de kits (alerta) ---
+        _divk = _kp(["kits_gap", "qtd_kit_divergente", "kit_tipos_so_n91"])
+        if _divk is not None and int(float(_divk)) > 0:
+            st.warning(f"⚠️ **{_fmt_int(_divk)}** divergência(s) de kit identificada(s) (N91 × N02) — "
+                       "verifique a reconciliação de kits de prova.")
+
+    # ======================= (5) EXPLORADOR (navegação por capítulos) ========
+    with tab_exp:
         if not abas:
             st.info("A visão nativa usa as abas da planilha gerada. Rode a análise para populá-la.")
         else:
-            # KPIs a partir da aba que realmente tem colunas MÉTRICA + VALOR
             def _achar_tab_kpis(mapa):
                 for _n, _df in mapa.items():
                     _cm = next((c for c in _df.columns if "MÉTRICA" in str(c).upper() or "METRICA" in str(c).upper()), None)
@@ -13223,7 +13565,6 @@ def _run_streamlit_app() -> None:
                         c.metric(met[:42], val[:20])
                 st.divider()
 
-            # ---- Navegação por CAPÍTULOS temáticos (Rodada 3/4) ----------------
             CAPITULOS = {
                 "🏠 Visão Geral & Totais": ["capa", "guia", "painel", "totais", "total", "visual", "resumo", "metadad", "consolidad", "sumario"],
                 "👥 Inscritos & Perfil": ["inscrit", "perfil", "genero", "sexo", "idade", "faixa_etaria", "demografia"],
@@ -13242,7 +13583,6 @@ def _run_streamlit_app() -> None:
                 n = str(nome_aba).lower()
                 return [cap for cap, kws in CAPITULOS.items() if any(k in n for k in kws)]
 
-            # índice: capítulo -> abas
             idx_cap = {cap: [] for cap in CAPITULOS}
             sem_cap = []
             for nome_aba in abas:
@@ -13277,7 +13617,6 @@ def _run_streamlit_app() -> None:
                                df.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"{escolha}.csv", mime="text/csv", key="dl_aba_nativa")
 
-            # Gráfico nativo automático quando fizer sentido
             if _px is not None and not df.empty:
                 num_cols = [c for c in df.columns if _pd.api.types.is_numeric_dtype(df[c])]
                 cat_cols = [c for c in df.columns if not _pd.api.types.is_numeric_dtype(df[c])]
@@ -13304,7 +13643,6 @@ def _run_streamlit_app() -> None:
                                "(precisa de categoria + numérica e até 60 linhas). "
                                "A tabela acima traz todos os dados; o dashboard HTML tem os gráficos dedicados.")
 
-            # ---- MAPA dedicado: se a análise tiver coordenadas (lat/lon) --------
             def _acha_col(cols, chaves):
                 for c in cols:
                     cu = str(c).upper()
@@ -13330,7 +13668,6 @@ def _run_streamlit_app() -> None:
                 except Exception as e:  # noqa
                     st.caption(f"Não foi possível gerar o mapa: {e}")
 
-            # ---- HISTOGRAMA dedicado: para distribuições (ex.: distância) -------
             if _px is not None and not df.empty:
                 num_todas = [c for c in df.columns if _pd.api.types.is_numeric_dtype(df[c]) and df[c].nunique() > 8]
                 if num_todas:
@@ -13350,7 +13687,6 @@ def _run_streamlit_app() -> None:
                         except Exception as e:  # noqa
                             st.caption(f"Não foi possível gerar o histograma: {e}")
 
-            # ---- v9: GALERIA de gráficos de TODO o capítulo -------------------
             if _px is not None:
                 st.divider()
                 st.subheader(f"📈 Galeria de gráficos — {capitulo}")
@@ -13359,20 +13695,16 @@ def _run_streamlit_app() -> None:
                 mostrar_gal = st.checkbox("Gerar a galeria de gráficos deste capítulo", value=False, key="galeria")
                 if mostrar_gal:
                     def _fig_auto(_df, _titulo):
-                        """Escolhe automaticamente o melhor gráfico para uma tabela; None se não der."""
                         try:
                             _num = [c for c in _df.columns if _pd.api.types.is_numeric_dtype(_df[c])]
                             _cat = [c for c in _df.columns if not _pd.api.types.is_numeric_dtype(_df[c])]
                             if not _num:
                                 return None
-                            # série longa e única numérica -> histograma
                             if _df[_num[0]].nunique() > 12 and (not _cat or len(_df) > 60):
                                 return _px.histogram(_df, x=_num[0], nbins=30, title=_titulo)
-                            # categoria + numérica e poucas linhas -> barras
                             if _cat and 1 <= len(_df) <= 40:
                                 _d = _df.sort_values(_num[0], ascending=False).head(25)
                                 return _px.bar(_d, x=_cat[0], y=_num[0], title=_titulo, text_auto=True)
-                            # muitas linhas com categoria -> top 20 barras
                             if _cat and len(_df) > 40:
                                 _d = _df.sort_values(_num[0], ascending=False).head(20)
                                 return _px.bar(_d, x=_cat[0], y=_num[0], title=_titulo + " (top 20)", text_auto=True)
@@ -13400,7 +13732,6 @@ def _run_streamlit_app() -> None:
                     else:
                         st.info("Nenhuma análise deste capítulo tem formato adequado para gráfico automático. "
                                 "As tabelas completas seguem disponíveis acima e no Excel.")
-
     # ======================= (FGV × INEP) COMPARATIVO DE DISTÂNCIAS ==========
     with tab_fgv:
         st.subheader("Comparativo de distâncias: FGV × INEP")
