@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "39"
+STREAMLIT_APP_VERSION = "52"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -10428,10 +10428,11 @@ def _run_streamlit_app() -> None:
         offline = st.checkbox("Gerar dashboard em modo offline", value=False,
                               help="HTML com bibliotecas locais (./libs). A pré-visualização embutida precisa de internet.")
         gerar_pesados = st.checkbox(
-            "Gerar dashboard HTML + gráficos avulsos", value=True,
-            help="O HTML de ~16 MB é o passo que mais consome memória. Se você vir o erro « Oh no » ao rodar "
-                 "(típico de ambientes com pouca RAM, como o Streamlit Cloud), DESMARQUE esta opção: a análise "
-                 "nativa (KPIs, tabelas, gráficos, achados) continua completa; só o dashboard HTML deixa de ser gerado.")
+            "Gerar dashboard HTML pesado do motor (~16 MB)", value=False,
+            help="DESMARCADO por padrão: o dashboard HTML de ~16 MB do motor consome muita memória e pode causar "
+                 "« Oh no » em ambientes com pouca RAM (ex.: Streamlit Cloud). Você NÃO precisa dele — a análise "
+                 "nativa é completa, e o relatório exportável « Central de Casos em HTML » (leve, ~90 KB, responsivo) "
+                 "cobre KPIs, faixas, ocupação, rankings, hierarquia, FGV×INEP e casos. Marque só se tiver bastante RAM.")
         st.markdown("**Filtro global (opcional)**")
         # v13 — multiselect de UF populado a partir do próprio arquivo (adaptativo).
         _uf_opcoes = []
@@ -10972,7 +10973,8 @@ def _run_streamlit_app() -> None:
                         import html as _html
                         _esc_h = lambda x: _html.escape(str(x))
                         _blocos = []
-                        for _s, _a, _r, _e, _df in _casos:
+                        _first_crit_done = False
+                        for _ic0, (_s, _a, _r, _e, _df) in enumerate(_casos):
                             _cor = "#c0392b" if "Crítico" in _s else ("#e67e22" if "Atenção" in _s else "#27ae60")
                             _qtd = len(_df)
                             _pct = f" · {_qtd / _N * 100:.2f}% de {_N:,}".replace(",", ".") if _e == "Participante" and _N else ""
@@ -10980,19 +10982,79 @@ def _run_streamlit_app() -> None:
                                                   "CO_BLOCO", "ID_SALA", "TP_ENSALAMENTO", "ID_KIT_PROVA",
                                                   "DISTANCIA_KM", "Participantes"] if c in _df.columns]
                             _dfh = (_df[_colsh] if _colsh else _df).head(500)
+                            # v48: mini-resumo estatístico do subconjunto (topo do caso)
+                            _resumo_caso = ""
+                            if "DISTANCIA_KM" in _df.columns:
+                                _dc2 = _pdc.to_numeric(_df["DISTANCIA_KM"], errors="coerce").dropna()
+                                if len(_dc2):
+                                    _resumo_caso = (f"<div class='case-resumo'>📊 <b>Distância do subconjunto:</b> "
+                                                    f"média {_dc2.mean():.2f} km · mediana {_dc2.median():.2f} · "
+                                                    f"mín {_dc2.min():.2f} · máx {_dc2.max():.2f} km</div>")
+                            elif "Participantes" in _df.columns:
+                                _pc2 = _pdc.to_numeric(_df["Participantes"], errors="coerce").dropna()
+                                if len(_pc2):
+                                    _resumo_caso = (f"<div class='case-resumo'>📊 <b>Ocupação do subconjunto:</b> "
+                                                    f"média {_pc2.mean():.1f} · mín {int(_pc2.min())} · "
+                                                    f"máx {int(_pc2.max())} participantes/sala · {len(_df)} salas</div>")
+                            # v49: totais por UF e por município do subconjunto
+                            _mun_line = ""
+                            _ufcol_c = next((c for c in _df.columns if str(c).upper() in ("SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA")), None)
+                            _muncol_c = next((c for c in _df.columns if str(c).upper() in ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                            if _ufcol_c is not None:
+                                _uc = _df[_ufcol_c].astype(str).value_counts().head(6)
+                                if len(_uc):
+                                    _mun_line += ("<div class='case-mun'>🗺️ <b>Por UF:</b> "
+                                                  + " · ".join(f"{_esc_h(k)}: {v}" for k, v in _uc.items()) + "</div>")
+                            if _muncol_c is not None:
+                                _mc = _df[_muncol_c].astype(str).value_counts().head(8)
+                                if len(_mc):
+                                    _mun_line += ("<div class='case-mun'>🏘️ <b>Por município (top 8):</b> "
+                                                  + " · ".join(f"{_esc_h(k)}: {v}" for k, v in _mc.items()) + "</div>")
+                            # v49: âncora do primeiro caso crítico
+                            _anchor = ""
+                            if ("Crítico" in _s) and not _first_crit_done:
+                                _anchor = '<a id="first-crit"></a>'
+                                _first_crit_done = True
                             _thead = "".join(f"<th>{_esc_h(c)}</th>" for c in _dfh.columns)
+                            _didx = list(_dfh.columns).index("DISTANCIA_KM") if "DISTANCIA_KM" in _dfh.columns else None
                             _rows = ""
-                            for _, _row in _dfh.iterrows():
-                                _rows += "<tr>" + "".join(f"<td>{_esc_h(v)}</td>" for v in _row.values) + "</tr>"
+                            for _i2, (_, _row) in enumerate(_dfh.iterrows()):
+                                _vals = list(_row.values)
+                                _classes = []
+                                if _didx is not None:
+                                    try:
+                                        _dv = float(_vals[_didx])
+                                        if _dv > 20:
+                                            _classes.append("row-crit")
+                                        elif _dv >= 15:
+                                            _classes.append("row-aten")
+                                    except Exception:
+                                        pass
+                                if _i2 >= 100:
+                                    _classes.append("pg-hide")   # linhas além da 100 ocultas até "mostrar todos"
+                                _clsattr = f' class="{" ".join(_classes)}"' if _classes else ""
+                                _rows += f"<tr{_clsattr}>" + "".join(f"<td>{_esc_h(v)}</td>" for v in _vals) + "</tr>"
                             _nota = "" if _qtd <= 500 else f"<p class='nota'>Mostrando os primeiros 500 de {_qtd:,} registros.</p>".replace(",", ".")
-                            _blocos.append(f"""
+                            _open = "open" if _qtd <= 60 else ""  # casos pequenos já abertos; grandes recolhidos
+                            _blocos.append(f"""{_anchor}
                             <section>
                               <h2 style="border-left:5px solid {_cor}">{_esc_h(_s)} · {_esc_h(_a)}</h2>
                               <p class="meta"><b>Entidade:</b> {_esc_h(_e)} &nbsp;|&nbsp; <b>Quantidade:</b> {_qtd:,}{_pct}</p>
                               <p class="regra"><b>Regra (POR QUE):</b> {_esc_h(_r)}</p>
+                              {_resumo_caso}
+                              {_mun_line}
                               {_nota}
-                              <table><thead><tr>{_thead}</tr></thead><tbody>{_rows}</tbody></table>
+                              <details class="casos-det" {_open}>
+                                <summary>🔎 Ver / filtrar os {_qtd:,} registros</summary>
+                                <input class="case-filter" onkeyup="filterCase(this)" type="search"
+                                       placeholder="🔎 Filtrar estes casos (município, local, sala, inscrição…)">
+                                <span class="case-count"></span>
+                                <button class="case-csv" onclick="downloadVisible(this)">⬇️ CSV (visão atual)</button>
+                                <table><thead><tr>{_thead}</tr></thead><tbody>{_rows}</tbody></table>
+                              </details>
                             </section>""".replace("{_qtd:,}", f"{_qtd:,}".replace(",", ".")))
+                        _jump_btn = ('<a class="jump-crit" href="#first-crit">⏬ Ir ao primeiro caso crítico</a>'
+                                     if _first_crit_done else "")
                         _resumo_rows = "".join(
                             f"<tr><td>{_esc_h(r['Severidade'])}</td><td>{_esc_h(r['Análise'])}</td>"
                             f"<td>{_esc_h(r['Entidade'])}</td><td style='text-align:right'>{r['Quantidade']}</td>"
@@ -11030,8 +11092,60 @@ def _run_streamlit_app() -> None:
                             _ncr = int((_ddh > 20).sum())
                             _cds.append(_card_h("Críticos > 20 km", _fh(_ncr), f"{_ncr / _N * 100:.2f}% dos participantes." if _N else "",
                                                 "N02", "#c0392b" if _ncr else "#27ae60"))
-                        _cards_html = ('<div style="display:flex;flex-wrap:wrap;gap:12px;margin:16px 0">'
+                        _cards_html = ('<div class="kpi-grid">'
                                        + "".join(_cds) + "</div>")
+
+                        # v50: barra de filtro global (UF/município) com escopo escolhível
+                        _gf_ufc = next((c for c in _base.columns if str(c).upper() in ("SG_UF_PROVA", "SG_UF_MUNICIPIO_PROVA")), None)
+                        _gf_munc = next((c for c in _base.columns if str(c).upper() in ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                        _gf_ufs = sorted(_base[_gf_ufc].dropna().astype(str).unique().tolist())[:60] if _gf_ufc else []
+                        _gf_muns = (sorted(set(_base[_gf_munc].map(lambda x: _limpa_nome(x) if isinstance(x, str) else x)
+                                              .dropna().astype(str).tolist()))[:600] if _gf_munc else [])
+                        _gf_bar = ""
+                        if _gf_ufs or _gf_muns:
+                            _uf_dl = "".join(f"<option value='{_esc_h(u)}'>" for u in _gf_ufs)
+                            _mun_dl = "".join(f"<option value='{_esc_h(mu)}'>" for mu in _gf_muns)
+                            _gf_bar = f"""
+                            <div class="gfilter">
+                              <span class="gf-t">🔎 Filtro global</span>
+                              <input id="gf-uf" list="gf-uf-list" placeholder="UF (ex.: MT)">
+                              <datalist id="gf-uf-list">{_uf_dl}</datalist>
+                              <input id="gf-mun" list="gf-mun-list" placeholder="Município">
+                              <datalist id="gf-mun-list">{_mun_dl}</datalist>
+                              <select id="gf-scope" title="Onde aplicar o filtro">
+                                <option value="all">Todas as seções</option>
+                                <option value="casos">Somente casos críticos/atenção</option>
+                                <option value="selected">Somente seções marcadas ☑</option>
+                              </select>
+                              <button class="gf-apply" onclick="applyGlobalFilter()">Aplicar</button>
+                              <button class="gf-clear" onclick="clearAllFilters()">Limpar tudo</button>
+                              <button class="gf-toggle" onclick="toggleAllSections()" title="Marcar/desmarcar todas as seções para o filtro">☑/☐ todas as seções</button>
+                              <button class="gf-export" onclick="exportAllVisible()" title="Exporta todas as tabelas visíveis (respeita filtros) num único CSV">⬇️ Exportar relatório filtrado (CSV)</button>
+                              <span id="gf-info" class="gf-info"></span>
+                            </div>"""
+
+                        # v50: rodapé com metodologia e limitações
+                        _footer = f"""
+                        <footer class="rodape">
+                          <h2 style="border-left:5px solid #16a085">📎 Metodologia e limitações</h2>
+                          <p class="meta"><b>Fonte dos dados:</b> microdados de ensalamento/locais de prova (layout N02
+                          e demais layouts efetivamente carregados). Universo desta análise: {_N:,} participantes.</p>
+                          <p class="meta"><b>Distâncias:</b> calculadas a partir de <code>NU_DISTANCIA</code> (fonte FGV),
+                          com detecção automática de unidade (km/metros). Faixas conforme os relatórios da Comissão
+                          (&lt;1, 1–3, 3–5, 5–10, 10–20, 20–30, &gt;30 km).</p>
+                          <p class="meta"><b>Regras de classificação:</b> 🔴 crítico = distância &gt; 20 km;
+                          🟠 atenção = 15–20 km; ocupação de referência ≈ 40 participantes/sala; kit ausente =
+                          <code>ID_KIT_PROVA</code> vazio (deve espelhar o N91).</p>
+                          <p class="meta"><b>Adaptação aos layouts:</b> só são apresentadas análises calculáveis a partir
+                          dos layouts carregados. Análises que exigem cruzamento (capacidade N50/N52, kits N91,
+                          divergência N90×N02) aparecem apenas quando esses layouts estão presentes.</p>
+                          <p class="nota"><b>Limitações:</b> este relatório reproduz a lógica das análises sobre os dados
+                          carregados; não substitui o modelo de otimização/geocodificação da Comissão (Sala Planejada,
+                          censo escolar, CEP, confiança de localização), que depende de fontes externas. Os números
+                          mudam automaticamente conforme o arquivo carregado.</p>
+                          <p class="nota">Gerado por Plataforma BI INEP/PND · Motor v{APP_VERSION} · camada
+                          v{STREAMLIT_APP_VERSION} · {_dt.now().strftime('%d/%m/%Y %H:%M')}.</p>
+                        </footer>""".replace("{_N:,}", f"{_N:,}".replace(",", "."))
 
                         if _dist is not None:
                             _dd2 = _dist.dropna()
@@ -11161,31 +11275,268 @@ def _run_streamlit_app() -> None:
                         except Exception:
                             pass
 
-                        return f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+                        _html_full = f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
                         <meta name="viewport" content="width=device-width, initial-scale=1">
                         <title>Central de Casos — Auditoria PND</title><style>
-                        body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#1a2733;
-                               max-width:1200px; margin:24px auto; padding:0 16px; line-height:1.5; }}
-                        h1 {{ color:#1f4e79; }} h2 {{ color:#1f4e79; padding-left:10px; margin-top:34px; }}
-                        table {{ border-collapse:collapse; width:100%; font-size:13px; margin:10px 0 20px; }}
-                        th,td {{ border:1px solid #e3e8ef; padding:6px 8px; text-align:left; }}
-                        th {{ background:#1f4e79; color:#fff; position:sticky; top:0; }}
+                        :root {{ --pri:#1f4e79; --acc:#2e86c1; --crit:#c0392b; --aten:#e67e22; --ok:#27ae60;
+                                 --bd:#e3e8ef; --muted:#8a94a3; --card:#ffffff; --text:#1a2733; }}
+                        * {{ box-sizing:border-box; }}
+                        body {{ font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:var(--text);
+                               background:#f4f7fb; margin:0; line-height:1.55; font-size:15px; }}
+                        .wrap {{ max-width:1240px; margin:0 auto; padding:26px 20px 64px; }}
+                        h1 {{ color:var(--pri); font-size:26px; margin:0 0 6px; letter-spacing:-.3px; }}
+                        h2 {{ color:var(--pri); font-size:20px; padding-left:12px; margin:0 0 12px;
+                              border-left:5px solid var(--acc); }}
+                        section {{ background:var(--card); border:1px solid var(--bd); border-radius:14px;
+                                   padding:18px 20px; margin:22px 0; box-shadow:0 1px 3px rgba(16,42,67,.05); }}
+                        .cab {{ background:linear-gradient(135deg,#eef4fb,#f7fafe); border:1px solid #d5e3f2;
+                                border-radius:14px; padding:18px 22px; margin-bottom:6px; font-size:14px; }}
+                        .kpi-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(205px,1fr));
+                                     gap:14px; margin:18px 0; }}
+                        .tbl-wrap {{ overflow-x:auto; -webkit-overflow-scrolling:touch; border:1px solid var(--bd);
+                                     border-radius:10px; margin:12px 0 6px; }}
+                        table {{ border-collapse:collapse; width:100%; font-size:13px; min-width:520px; }}
+                        th,td {{ border-bottom:1px solid var(--bd); padding:8px 11px; text-align:left; }}
+                        td {{ white-space:normal; }} th {{ white-space:nowrap; }}
+                        th {{ background:var(--pri); color:#fff; position:sticky; top:0; font-weight:600; }}
+                        th[data-sort=asc]::after {{ content:' ▲'; font-size:10px; }}
+                        th[data-sort=desc]::after {{ content:' ▼'; font-size:10px; }}
                         tr:nth-child(even) td {{ background:#f7f9fc; }}
-                        .meta,.regra,.nota {{ font-size:14px; }} .nota {{ color:#8a94a3; font-style:italic; }}
-                        .cab {{ background:#eef4fb; border:1px solid #d5e3f2; border-radius:10px; padding:14px 18px; }}
-                        </style></head><body>
+                        .meta,.regra,.nota {{ font-size:14px; margin:5px 0; }}
+                        .nota {{ color:var(--muted); font-style:italic; }}
+                        details {{ margin:6px 0; }} summary {{ cursor:pointer; padding:5px 0; }}
+                        .toc {{ position:sticky; top:0; z-index:20; background:rgba(255,255,255,.96);
+                                backdrop-filter:blur(6px); border:1px solid var(--bd); border-radius:12px;
+                                padding:10px 14px; margin:14px 0; display:flex; flex-wrap:wrap; gap:6px 14px;
+                                align-items:center; box-shadow:0 2px 8px rgba(16,42,67,.06); }}
+                        .toc .toc-t {{ font-weight:800; color:var(--pri); margin-right:6px; }}
+                        .toc a {{ color:var(--acc); text-decoration:none; font-size:13px; font-weight:600;
+                                  white-space:nowrap; padding:3px 8px; border-radius:6px; }}
+                        .toc a:hover {{ background:#eef4fb; text-decoration:underline; }}
+                        section {{ scroll-margin-top:70px; }}
+                        .casos-det > summary {{ font-weight:700; color:var(--pri); font-size:15px; padding:8px 0; }}
+                        .case-filter {{ width:100%; max-width:440px; padding:8px 12px; border:1px solid var(--bd);
+                                        border-radius:8px; margin:8px 0; font-size:14px; }}
+                        .case-count {{ font-size:13px; color:var(--muted); margin-left:8px; }}
+                        .case-csv {{ background:var(--acc); color:#fff; border:none; border-radius:7px; padding:6px 12px;
+                                     font-size:13px; font-weight:600; cursor:pointer; margin-left:10px; }}
+                        .case-csv:hover {{ background:var(--pri); }}
+                        tr.row-crit td {{ background:#fdecea !important; }}
+                        tr.row-aten td {{ background:#fef4e8 !important; }}
+                        .case-resumo {{ background:#eef4fb; border-left:4px solid var(--acc); border-radius:8px;
+                                        padding:8px 12px; margin:8px 0; font-size:14px; }}
+                        tr.pg-hide {{ display:none; }}
+                        tr.pg-hide.pg-show {{ display:table-row; }}
+                        .pg-btn {{ background:#fff; border:1px solid var(--acc); color:var(--acc); border-radius:7px;
+                                   padding:6px 12px; font-size:13px; font-weight:600; cursor:pointer; margin:10px 0; }}
+                        .pg-btn:hover {{ background:#eef4fb; }}
+                        .case-mun {{ font-size:13px; color:#42546b; margin:4px 0 2px; }}
+                        .gfilter {{ background:#f0f6fc; border:1px solid #d5e3f2; border-radius:12px; padding:12px 16px;
+                                    margin:14px 0; display:flex; flex-wrap:wrap; gap:8px 10px; align-items:center; }}
+                        .gfilter .gf-t {{ font-weight:800; color:var(--pri); margin-right:6px; }}
+                        .gfilter input, .gfilter select {{ padding:7px 10px; border:1px solid #cbd5e1;
+                                        border-radius:8px; font-size:13px; font-family:inherit; }}
+                        .gf-apply {{ background:var(--pri); color:#fff; border:none; border-radius:8px; padding:7px 14px;
+                                     font-weight:600; cursor:pointer; }}
+                        .gf-clear {{ background:#fff; border:1px solid #cbd5e1; border-radius:8px; padding:7px 14px;
+                                     font-weight:600; cursor:pointer; }}
+                        .gf-info {{ font-size:13px; color:#42546b; }}
+                        .sec-toggle {{ font-size:12px; font-weight:500; color:#8a94a3; margin-left:12px;
+                                       cursor:pointer; user-select:none; }}
+                        .sec-toggle input {{ margin-right:3px; vertical-align:middle; }}
+                        @media print {{ .sec-toggle {{ display:none; }} }}
+                        .rodape {{ margin-top:36px; }}
+                        .rodape code {{ background:#eef2f7; padding:1px 5px; border-radius:4px; font-size:12px; }}
+                        @media print {{ .gfilter {{ display:none; }} }}
+                        @media print {{ .pg-btn {{ display:none; }} }}
+                        @media print {{ .case-csv {{ display:none; }} }}
+                        @media print {{ .casos-det > *:not(summary) {{ display:block !important; }}
+                                        .case-filter {{ display:none; }} }}
+                        @media (max-width:640px) {{
+                            .wrap {{ padding:16px 12px; }} body {{ font-size:14px; }}
+                            h1 {{ font-size:22px; }} h2 {{ font-size:18px; }} section {{ padding:14px 15px; }}
+                            .kpi-grid {{ grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }}
+                        }}
+                        @media print {{
+                            body {{ background:#fff; }} .wrap {{ max-width:none; padding:0; }}
+                            section {{ box-shadow:none; break-inside:avoid; border:1px solid #ccc; }}
+                            .kpi-grid {{ grid-template-columns:repeat(3,1fr); }}
+                            th {{ position:static; }} .tbl-wrap {{ overflow:visible; }} table {{ min-width:0; }} .toc {{ display:none; }}
+                            h1,h2 {{ break-after:avoid; }}
+                        }}
+                        </style></head><body><div class="wrap">
                         <h1>🚨 Central de Casos — Auditoria de Layouts PND</h1>
                         <div class="cab"><b>Universo analisado:</b> {_N:,} participantes &nbsp;|&nbsp;
                         <b>Gerado em:</b> {_dt.now().strftime('%d/%m/%Y %H:%M')} &nbsp;|&nbsp;
                         <b>Motor v{APP_VERSION} · camada v{STREAMLIT_APP_VERSION}</b><br>
                         Cada seção responde: O QUE (quantidade), POR QUE (regra) e QUEM (registros).</div>
+                        {_jump_btn}
+                        {_gf_bar}
                         {_cards_html}
-                        <h2 style="border-left:5px solid #2e86c1">Resumo consolidado</h2>
+                        <section><h2>Resumo consolidado</h2>
                         <table><thead><tr><th>Severidade</th><th>Análise</th><th>Entidade</th>
-                        <th>Quantidade</th><th>%</th></tr></thead><tbody>{_resumo_rows}</tbody></table>
+                        <th>Quantidade</th><th>%</th></tr></thead><tbody>{_resumo_rows}</tbody></table></section>
                         {_extra}
                         {''.join(_blocos)}
-                        </body></html>""".replace("{_N:,}", f"{_N:,}".replace(",", "."))
+                        {_footer}
+                        <script>
+                        function filterCase(inp){{
+                          var q=inp.value.toLowerCase();
+                          var det=inp.closest('details'); if(!det) return;
+                          var tbl=det.querySelector('table'); if(!tbl) return;
+                          var cnt=det.querySelector('.case-count'); var vis=0, tot=0;
+                          tbl.querySelectorAll('tbody tr').forEach(function(tr){{
+                            tot++; var ok=tr.textContent.toLowerCase().indexOf(q)>-1;
+                            tr.style.display= ok ? '' : 'none'; if(ok) vis++;
+                          }});
+                          if(cnt) cnt.textContent = q ? (vis+' de '+tot+' registros') : '';
+                        }}
+                        function makeSortable(t){{
+                          if(t.dataset.sortable) return; t.dataset.sortable='1';
+                          var ths=t.querySelectorAll('thead th');
+                          ths.forEach(function(th,idx){{
+                            th.style.cursor='pointer'; th.title='Clique para ordenar';
+                            th.addEventListener('click', function(){{
+                              var tb=t.querySelector('tbody'); if(!tb) return;
+                              var rows=Array.prototype.slice.call(tb.querySelectorAll('tr'));
+                              var asc = th.getAttribute('data-sort')!=='asc';
+                              ths.forEach(function(h){{ h.removeAttribute('data-sort'); }});
+                              th.setAttribute('data-sort', asc?'asc':'desc');
+                              rows.sort(function(a,b){{
+                                var x=(a.cells[idx]?a.cells[idx].textContent:'').trim();
+                                var y=(b.cells[idx]?b.cells[idx].textContent:'').trim();
+                                var nx=parseFloat(x.replace(/\\./g,'').replace(',','.'));
+                                var ny=parseFloat(y.replace(/\\./g,'').replace(',','.'));
+                                if(!isNaN(nx)&&!isNaN(ny)) return asc?nx-ny:ny-nx;
+                                return asc? x.localeCompare(y,'pt') : y.localeCompare(x,'pt');
+                              }});
+                              rows.forEach(function(r){{ tb.appendChild(r); }});
+                            }});
+                          }});
+                        }}
+                        document.addEventListener('DOMContentLoaded', function(){{
+                          document.querySelectorAll('table').forEach(makeSortable);
+                          // v51: caixa por seção (para o escopo "somente seções marcadas")
+                          document.querySelectorAll('section').forEach(function(sec){{
+                            if(!sec.querySelector('table')) return;
+                            var h=sec.querySelector('h2'); if(!h) return;
+                            var lbl=document.createElement('label'); lbl.className='sec-toggle';
+                            var cb=document.createElement('input'); cb.type='checkbox'; cb.className='sec-check'; cb.checked=true;
+                            lbl.appendChild(cb); lbl.appendChild(document.createTextNode(' incluir no filtro global'));
+                            h.appendChild(lbl);
+                          }});
+                          document.querySelectorAll('.casos-det').forEach(function(det){{
+                            var hidden=det.querySelectorAll('tbody tr.pg-hide');
+                            if(hidden.length>0){{
+                              var tot=det.querySelectorAll('tbody tr').length;
+                              var btn=document.createElement('button');
+                              btn.className='pg-btn'; btn.type='button';
+                              btn.textContent='▼ Mostrar todos os '+tot+' registros (exibindo 100)';
+                              btn.addEventListener('click', function(){{
+                                var showing=btn.getAttribute('data-open')==='1';
+                                det.querySelectorAll('tbody tr.pg-hide').forEach(function(tr){{
+                                  tr.classList.toggle('pg-show', !showing);
+                                }});
+                                btn.setAttribute('data-open', showing?'0':'1');
+                                btn.textContent = showing ? ('▼ Mostrar todos os '+tot+' registros (exibindo 100)')
+                                                          : ('▲ Exibir apenas 100 (de '+tot+')');
+                              }});
+                              det.appendChild(btn);
+                            }}
+                          }});
+                        }});
+                        function downloadVisible(btn){{
+                          var det=btn.closest('details'); if(!det) return;
+                          var t=det.querySelector('table'); if(!t) return;
+                          var lines=[]; var head=[];
+                          t.querySelectorAll('thead th').forEach(function(th){{
+                            head.push('"'+th.textContent.trim().replace(/"/g,'""')+'"');
+                          }});
+                          lines.push(head.join(','));
+                          t.querySelectorAll('tbody tr').forEach(function(tr){{
+                            if(tr.style.display==='none') return;
+                            var row=[]; tr.querySelectorAll('td').forEach(function(td){{
+                              row.push('"'+td.textContent.trim().replace(/"/g,'""')+'"');
+                            }});
+                            lines.push(row.join(','));
+                          }});
+                          var blob=new Blob(['\\ufeff'+lines.join('\\n')],{{type:'text/csv;charset=utf-8'}});
+                          var a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+                          a.download='visao_atual.csv'; document.body.appendChild(a); a.click(); a.remove();
+                        }}
+                        function _gfTables(scope){{
+                          if(scope==='casos') return document.querySelectorAll('.casos-det table');
+                          if(scope==='selected'){{
+                            var out=[];
+                            document.querySelectorAll('section').forEach(function(sec){{
+                              var cb=sec.querySelector('.sec-check');
+                              if(cb && cb.checked) sec.querySelectorAll('table').forEach(function(t){{ out.push(t); }});
+                            }});
+                            return out;
+                          }}
+                          return document.querySelectorAll('section table');
+                        }}
+                        function applyGlobalFilter(){{
+                          var uf=(document.getElementById('gf-uf').value||'').toLowerCase().trim();
+                          var mun=(document.getElementById('gf-mun').value||'').toLowerCase().trim();
+                          var scope=document.getElementById('gf-scope').value;
+                          var tabs=_gfTables(scope); var totVis=0;
+                          tabs.forEach(function(t){{
+                            t.querySelectorAll('tbody tr').forEach(function(tr){{
+                              var tx=tr.textContent.toLowerCase();
+                              var ok=(!uf || tx.indexOf(uf)>-1) && (!mun || tx.indexOf(mun)>-1);
+                              tr.style.display = ok ? '' : 'none'; if(ok) totVis++;
+                            }});
+                          }});
+                          document.querySelectorAll('tr.pg-hide').forEach(function(tr){{
+                            if(tr.style.display!=='none') tr.classList.add('pg-show');
+                          }});
+                          var info=document.getElementById('gf-info');
+                          if(info) info.textContent = (uf||mun) ? (totVis+' linhas visíveis em '+tabs.length+' tabela(s)') : '';
+                        }}
+                        function clearAllFilters(){{
+                          var u=document.getElementById('gf-uf'); if(u) u.value='';
+                          var mn=document.getElementById('gf-mun'); if(mn) mn.value='';
+                          document.querySelectorAll('.case-filter').forEach(function(inp){{ inp.value=''; }});
+                          document.querySelectorAll('.case-count').forEach(function(c){{ c.textContent=''; }});
+                          document.querySelectorAll('section table tbody tr').forEach(function(tr){{ tr.style.display=''; }});
+                          document.querySelectorAll('tr.pg-hide').forEach(function(tr){{ tr.classList.remove('pg-show'); }});
+                          var info=document.getElementById('gf-info'); if(info) info.textContent='';
+                        }}
+                        function toggleAllSections(){{
+                          var boxes=document.querySelectorAll('.sec-check'); if(!boxes.length) return;
+                          var anyOff=Array.prototype.some.call(boxes, function(b){{ return !b.checked; }});
+                          boxes.forEach(function(b){{ b.checked = anyOff; }});  // se alguma desmarcada -> marca todas; senão desmarca todas
+                        }}
+                        window.addEventListener('beforeprint', function(){{
+                          document.querySelectorAll('details').forEach(function(d){{ d.open=true; }});
+                          // v52: respeita filtro na impressão — reexibe só as linhas paginadas NÃO filtradas
+                          document.querySelectorAll('tr.pg-hide').forEach(function(tr){{
+                            if(tr.style.display!=='none') tr.classList.add('pg-show');
+                          }});
+                        }});
+                        </script>
+                        </div></body></html>""".replace("{_N:,}", f"{_N:,}".replace(",", "."))
+                        # Responsividade das tabelas: envolve cada <table> num contêiner com scroll horizontal
+                        _html_full = _html_full.replace("<table", '<div class="tbl-wrap"><table').replace("</table>", "</table></div>")
+                        # v41: sumário/menu com âncoras — atribui id a cada <section> e monta o índice navegável
+                        import re as _re2
+                        _sec_titulos = []
+
+                        def _add_id(_m):
+                            _idx = len(_sec_titulos)
+                            _tm = _re2.search(r"<h2[^>]*>(.*?)</h2>", _m.group(0), _re2.S)
+                            _tt = _re2.sub(r"<[^>]+>", "", _tm.group(1)).strip() if _tm else f"Seção {_idx + 1}"
+                            _sec_titulos.append(_tt)
+                            return _m.group(0).replace("<section", f'<section id="sec-{_idx}"', 1)
+
+                        _html_full = _re2.sub(r"<section.*?</section>", _add_id, _html_full, flags=_re2.S)
+                        if _sec_titulos:
+                            _nav = ('<nav class="toc"><span class="toc-t">📑 Sumário</span>'
+                                    + "".join(f'<a href="#sec-{_i}">{_t}</a>' for _i, _t in enumerate(_sec_titulos))
+                                    + "</nav>")
+                            _html_full = _html_full.replace('<div class="kpi-grid">', _nav + '<div class="kpi-grid">', 1)
+                        return _html_full
 
                     st.download_button(
                         "⬇️ Baixar Central de Casos em HTML (relatório exportável)",
@@ -11202,15 +11553,210 @@ def _run_streamlit_app() -> None:
                                        help="Combina o dashboard completo do motor e este relatório de casos num único "
                                             "arquivo .html. Lê o dashboard de ~13 MB — pode consumir memória; use sob demanda."):
                             try:
+                                import re as _reu
+                                from datetime import datetime as _dtu
                                 _dash_html = html_path.read_text(encoding="utf-8", errors="ignore")
                                 _casos_html = _gera_html_casos()
-                                # extrai só o corpo do relatório de casos para injetar
                                 _ini = _casos_html.find("<body>")
                                 _fim = _casos_html.rfind("</body>")
                                 _corpo_casos = _casos_html[_ini + 6:_fim] if (_ini != -1 and _fim != -1) else _casos_html
-                                _sep = ('<hr style="margin:40px 0;border:none;border-top:3px solid #1f4e79">'
-                                        '<div style="max-width:1200px;margin:0 auto;padding:0 16px">'
-                                        + _corpo_casos + '</div>')
+
+                                # v42: CSS global de responsividade/impressão aplicado ao documento INTEIRO
+                                _head_inject = """
+                                <meta name="viewport" content="width=device-width, initial-scale=1">
+                                <style id="unif-resp">
+                                img,svg,canvas,iframe,.plotly-graph-div,.js-plotly-plot,video{max-width:100%!important;height:auto}
+                                table{max-width:100%}
+                                html{scroll-behavior:smooth}
+                                body{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+                                .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;
+                                          border:1px solid #e3e8ef;border-radius:8px;margin:6px 0}
+                                .plotly-graph-div,.js-plotly-plot{width:100%!important}
+                                #unif-backtop{position:fixed;right:18px;bottom:18px;z-index:99999;background:#1f4e79;
+                                    color:#fff;border:none;border-radius:50%;width:48px;height:48px;font-size:22px;
+                                    cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,.28);opacity:0;pointer-events:none;
+                                    transition:opacity .3s;display:flex;align-items:center;justify-content:center}
+                                #unif-backtop.show{opacity:.92;pointer-events:auto}
+                                #unif-backtop:hover{background:#2e86c1}
+                                @media print{#unif-backtop{display:none}}
+                                .unif-tblfilter{width:100%;max-width:420px;padding:7px 11px;border:1px solid #cbd5e1;
+                                    border-radius:8px;margin:12px 0 2px;font-size:13px;font-family:inherit}
+                                .unif-tblcount{font-size:12px;color:#8a94a3;margin:0 0 0 6px}
+                                th[data-sort=asc]::after{content:' ▲';font-size:10px}
+                                th[data-sort=desc]::after{content:' ▼';font-size:10px}
+                                /* v49: CSS dos casos aplicado também no unificado (o corpo injetado depende dele) */
+                                .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:14px;margin:16px 0}
+                                .toc{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.96);border:1px solid #e3e8ef;
+                                     border-radius:12px;padding:10px 14px;margin:14px 0;display:flex;flex-wrap:wrap;
+                                     gap:6px 14px;align-items:center}
+                                .toc .toc-t{font-weight:800;color:#1f4e79;margin-right:6px}
+                                .toc a{color:#2e86c1;text-decoration:none;font-size:13px;font-weight:600;white-space:nowrap;
+                                       padding:3px 8px;border-radius:6px}
+                                .toc a:hover{background:#eef4fb}
+                                .casos-det>summary{font-weight:700;color:#1f4e79;font-size:15px;padding:8px 0;cursor:pointer}
+                                .case-filter{width:100%;max-width:440px;padding:8px 12px;border:1px solid #e3e8ef;
+                                             border-radius:8px;margin:8px 0;font-size:14px}
+                                .case-count{font-size:13px;color:#8a94a3;margin-left:8px}
+                                .case-csv{background:#2e86c1;color:#fff;border:none;border-radius:7px;padding:6px 12px;
+                                          font-size:13px;font-weight:600;cursor:pointer;margin-left:10px}
+                                .case-csv:hover{background:#1f4e79}
+                                .case-resumo{background:#eef4fb;border-left:4px solid #2e86c1;border-radius:8px;
+                                             padding:8px 12px;margin:8px 0;font-size:14px}
+                                tr.row-crit td{background:#fdecea!important}
+                                tr.row-aten td{background:#fef4e8!important}
+                                tr.pg-hide{display:none}
+                                tr.pg-hide.pg-show{display:table-row}
+                                .pg-btn{background:#fff;border:1px solid #2e86c1;color:#2e86c1;border-radius:7px;
+                                        padding:6px 12px;font-size:13px;font-weight:600;cursor:pointer;margin:10px 0}
+                                .pg-btn:hover{background:#eef4fb}
+                                .jump-crit{display:inline-block;background:#c0392b;color:#fff;text-decoration:none;
+                                           border-radius:8px;padding:8px 16px;font-weight:700;font-size:14px;margin:10px 0}
+                                .jump-crit:hover{background:#a5281b}
+                                .case-mun{font-size:13px;color:#42546b;margin:4px 0 2px}
+                                .gfilter{background:#f0f6fc;border:1px solid #d5e3f2;border-radius:12px;padding:12px 16px;
+                                         margin:14px 0;display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center}
+                                .gfilter .gf-t{font-weight:800;color:#1f4e79;margin-right:6px}
+                                .gfilter input,.gfilter select{padding:7px 10px;border:1px solid #cbd5e1;border-radius:8px;
+                                         font-size:13px;font-family:inherit}
+                                .gf-apply{background:#1f4e79;color:#fff;border:none;border-radius:8px;padding:7px 14px;
+                                          font-weight:600;cursor:pointer}
+                                .gf-clear{background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:7px 14px;
+                                          font-weight:600;cursor:pointer}
+                                .gf-info{font-size:13px;color:#42546b}
+                                .sec-toggle{font-size:12px;font-weight:500;color:#8a94a3;margin-left:12px;cursor:pointer;user-select:none}
+                                .sec-toggle input{margin-right:3px;vertical-align:middle}
+                                @media print{.sec-toggle{display:none}}
+                                .rodape{margin-top:36px}
+                                .rodape code{background:#eef2f7;padding:1px 5px;border-radius:4px;font-size:12px}
+                                @media print{.case-csv,.pg-btn,.case-filter,.jump-crit{display:none}}
+                                @media print{.unif-tblfilter,.unif-tblcount{display:none}}
+                                .unif-top{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:1240px;
+                                          margin:0 auto;padding:20px 18px 0}
+                                .unif-capa{background:linear-gradient(135deg,#1f4e79,#2e86c1);color:#fff;border-radius:14px;
+                                           padding:22px 26px;margin-bottom:14px;box-shadow:0 2px 10px rgba(16,42,67,.12)}
+                                .unif-capa h1{color:#fff!important;margin:0 0 6px;font-size:24px}
+                                .unif-capa p{margin:0;opacity:.93;font-size:14px}
+                                .unif-nav{position:sticky;top:0;z-index:99999;background:rgba(255,255,255,.97);
+                                          -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);border:1px solid #e3e8ef;
+                                          border-radius:12px;padding:10px 14px;margin-bottom:16px;display:flex;flex-wrap:wrap;
+                                          gap:8px 16px;align-items:center;box-shadow:0 2px 8px rgba(16,42,67,.08)}
+                                .unif-nav>span{font-weight:800;color:#1f4e79}
+                                .unif-nav a{color:#2e86c1;text-decoration:none;font-weight:600;font-size:13px;
+                                            padding:4px 10px;border-radius:6px;white-space:nowrap}
+                                .unif-nav a:hover{background:#eef4fb;text-decoration:underline}
+                                [id^="topo-"],#central-casos{scroll-margin-top:72px}
+                                @media(max-width:640px){.unif-capa{padding:16px}.unif-capa h1{font-size:20px}
+                                                        .unif-top{padding:14px 12px 0}}
+                                @media print{.unif-nav{display:none}.unif-capa{-webkit-print-color-adjust:exact;
+                                             print-color-adjust:exact}}
+                                </style>"""
+                                if "</head>" in _dash_html:
+                                    _dash_html = _dash_html.replace("</head>", _head_inject + "</head>", 1)
+                                else:
+                                    _dash_html = _head_inject + _dash_html
+
+                                # Capa + sumário/menu com âncoras para o documento inteiro
+                                _capa_nav = f"""
+                                <div class="unif-top">
+                                <div class="unif-capa"><h1>🚨 Relatório Analítico Integrado — Auditoria de Layouts PND</h1>
+                                <p>Universo: {_N:,} participantes · Gerado em {_dtu.now().strftime('%d/%m/%Y %H:%M')} ·
+                                Motor v{APP_VERSION} · camada v{STREAMLIT_APP_VERSION}</p></div>
+                                <nav class="unif-nav"><span>📑 Sumário</span>
+                                <a href="#topo-dashboard">📊 Dashboard analítico do motor</a>
+                                <a href="#central-casos">🚨 Central de Casos &amp; auditoria de registros</a></nav></div>
+                                <div id="topo-dashboard"></div>""".replace("{_N:,}", f"{_N:,}".replace(",", "."))
+                                if _reu.search(r"<body[^>]*>", _dash_html):
+                                    _dash_html = _reu.sub(r"(<body[^>]*>)", lambda _m: _m.group(1) + _capa_nav,
+                                                          _dash_html, count=1)
+                                else:
+                                    _dash_html = _capa_nav + _dash_html
+
+                                # Injeta a Central de Casos (com âncora) antes de </body>
+                                _js_ux = r"""
+                                <button id="unif-backtop" title="Voltar ao topo" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑</button>
+                                <script>
+                                (function(){
+                                  function enhanceTables(){
+                                    document.querySelectorAll('table').forEach(function(t){
+                                      if(t.dataset.enh) return; t.dataset.enh='1';
+                                      if(t.parentNode && t.parentNode.classList && t.parentNode.classList.contains('tbl-wrap')){
+                                        // já envolvida; segue para o filtro
+                                      } else {
+                                        var w=document.createElement('div'); w.className='tbl-wrap';
+                                        t.parentNode.insertBefore(w,t); w.appendChild(t);
+                                      }
+                                      var wrap=t.closest('.tbl-wrap');
+                                      var rows=t.querySelectorAll('tbody tr');
+                                      // ordenação por coluna (clicar no cabeçalho)
+                                      var ths=t.querySelectorAll('thead th');
+                                      ths.forEach(function(th,idx){
+                                        th.style.cursor='pointer'; th.title='Clique para ordenar';
+                                        th.addEventListener('click', function(){
+                                          var tb=t.querySelector('tbody'); if(!tb) return;
+                                          var rr=Array.prototype.slice.call(tb.querySelectorAll('tr'));
+                                          var asc=th.getAttribute('data-sort')!=='asc';
+                                          ths.forEach(function(h){ h.removeAttribute('data-sort'); });
+                                          th.setAttribute('data-sort', asc?'asc':'desc');
+                                          rr.sort(function(a,b){
+                                            var x=(a.cells[idx]?a.cells[idx].textContent:'').trim();
+                                            var y=(b.cells[idx]?b.cells[idx].textContent:'').trim();
+                                            var nx=parseFloat(x.replace(/\./g,'').replace(',','.'));
+                                            var ny=parseFloat(y.replace(/\./g,'').replace(',','.'));
+                                            if(!isNaN(nx)&&!isNaN(ny)) return asc?nx-ny:ny-nx;
+                                            return asc? x.localeCompare(y,'pt') : y.localeCompare(x,'pt');
+                                          });
+                                          rr.forEach(function(r){ tb.appendChild(r); });
+                                        });
+                                      });
+                                      if(rows.length>6 && wrap){
+                                        var inp=document.createElement('input');
+                                        inp.className='unif-tblfilter'; inp.type='search';
+                                        inp.setAttribute('placeholder','🔎 Filtrar esta tabela ('+rows.length+' linhas)');
+                                        inp.addEventListener('keyup', function(){
+                                          var q=this.value.toLowerCase(), vis=0;
+                                          rows.forEach(function(tr){
+                                            var ok=tr.textContent.toLowerCase().indexOf(q)>-1;
+                                            tr.style.display= ok ? '' : 'none'; if(ok) vis++;
+                                          });
+                                          var c=inp.nextSibling;
+                                          if(c && c.className==='unif-tblcount') c.textContent = q ? (vis+'/'+rows.length) : '';
+                                        });
+                                        var cnt=document.createElement('span'); cnt.className='unif-tblcount';
+                                        wrap.parentNode.insertBefore(cnt, wrap);
+                                        wrap.parentNode.insertBefore(inp, cnt);
+                                      }
+                                    });
+                                  }
+                                  function resizePlotly(){
+                                    if(window.Plotly && Plotly.Plots){
+                                      document.querySelectorAll('.plotly-graph-div').forEach(function(g){
+                                        try{ Plotly.Plots.resize(g); }catch(e){}
+                                      });
+                                    }
+                                  }
+                                  function onReady(){
+                                    try{ enhanceTables(); }catch(e){}
+                                    setTimeout(resizePlotly, 300);
+                                    var bt=document.getElementById('unif-backtop');
+                                    window.addEventListener('scroll', function(){
+                                      if(bt){ if(window.scrollY>400) bt.classList.add('show'); else bt.classList.remove('show'); }
+                                    });
+                                  }
+                                  window.addEventListener('beforeprint', function(){
+                                    // v52: respeita filtros na impressão — só reexibe linhas paginadas
+                                    // (pg-hide) que NÃO foram filtradas; linhas ocultas por filtro permanecem ocultas.
+                                    document.querySelectorAll('tr.pg-hide').forEach(function(tr){
+                                      if(tr.style.display!=='none') tr.classList.add('pg-show');
+                                    });
+                                  });
+                                  var _rt; window.addEventListener('resize', function(){ clearTimeout(_rt); _rt=setTimeout(resizePlotly,200); });
+                                  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', onReady);
+                                  else onReady();
+                                })();
+                                </script>"""
+                                _sep = ('<hr id="central-casos" style="margin:44px 0;border:none;border-top:3px solid #1f4e79">'
+                                        '<div style="max-width:1240px;margin:0 auto;padding:0 18px">'
+                                        + _corpo_casos + '</div>' + _js_ux)
                                 if "</body>" in _dash_html:
                                     _unif = _dash_html.replace("</body>", _sep + "</body>", 1)
                                 else:
@@ -11220,7 +11766,8 @@ def _run_streamlit_app() -> None:
                                     _unif.encode("utf-8"),
                                     file_name="dashboard_e_central_de_casos_PND.html", mime="text/html",
                                     key="dl_unif")
-                                st.caption(f"Arquivo unificado pronto (~{len(_unif.encode('utf-8')) // (1024 * 1024)} MB).")
+                                st.caption(f"Arquivo unificado pronto (~{len(_unif.encode('utf-8')) // (1024 * 1024)} MB) "
+                                           "— com capa, sumário navegável, responsividade e estilos de impressão.")
                             except Exception as _eu:  # noqa
                                 st.warning(f"Não foi possível gerar o HTML unificado: {_eu}")
                     else:
