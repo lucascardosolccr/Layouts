@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "52"
+STREAMLIT_APP_VERSION = "62"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -11015,6 +11015,25 @@ def _run_streamlit_app() -> None:
                             if ("Crítico" in _s) and not _first_crit_done:
                                 _anchor = '<a id="first-crit"></a>'
                                 _first_crit_done = True
+                            # v55: trilha de auditoria (origem → regra → resultado → classificação)
+                            _origem = "N02"
+                            _al = _a.lower()
+                            if "distância" in _al or "deslocament" in _al:
+                                _origem, _regra_curta = "N02 · NU_DISTANCIA", (">20 km" if "crític" in _al else "15–20 km")
+                            elif "kit" in _al:
+                                _origem, _regra_curta = "N02 · ID_KIT_PROVA", "campo vazio"
+                            elif "sala" in _al or "ocupa" in _al:
+                                _origem, _regra_curta = "N02 · ID_SALA", ">40/sala"
+                            else:
+                                _regra_curta = "regra da análise"
+                            _sev_lbl = ("🔴 CRÍTICO" if "Crítico" in _s else ("🟠 ATENÇÃO" if "Atenção" in _s else "🟢 CONFORME"))
+                            _sev_cls = ("tr-crit" if "Crítico" in _s else ("tr-aten" if "Atenção" in _s else "tr-ok"))
+                            _trilha = (f'<div class="trilha"><span class="tr-t">🔗 Trilha de auditoria:</span>'
+                                       f'<span class="tr-step">📄 {_esc_h(_origem)}</span><span class="tr-arrow">→</span>'
+                                       f'<span class="tr-step">📐 {_esc_h(_regra_curta)}</span><span class="tr-arrow">→</span>'
+                                       f'<span class="tr-step">🔢 {_qtd:,} {"participantes" if _e == "Participante" else "salas"}</span>'
+                                       f'<span class="tr-arrow">→</span><span class="tr-step {_sev_cls}">{_sev_lbl}</span></div>'
+                                       ).replace("{_qtd:,}", f"{_qtd:,}".replace(",", "."))
                             _thead = "".join(f"<th>{_esc_h(c)}</th>" for c in _dfh.columns)
                             _didx = list(_dfh.columns).index("DISTANCIA_KM") if "DISTANCIA_KM" in _dfh.columns else None
                             _rows = ""
@@ -11041,6 +11060,7 @@ def _run_streamlit_app() -> None:
                               <h2 style="border-left:5px solid {_cor}">{_esc_h(_s)} · {_esc_h(_a)}</h2>
                               <p class="meta"><b>Entidade:</b> {_esc_h(_e)} &nbsp;|&nbsp; <b>Quantidade:</b> {_qtd:,}{_pct}</p>
                               <p class="regra"><b>Regra (POR QUE):</b> {_esc_h(_r)}</p>
+                              {_trilha}
                               {_resumo_caso}
                               {_mun_line}
                               {_nota}
@@ -11055,6 +11075,37 @@ def _run_streamlit_app() -> None:
                             </section>""".replace("{_qtd:,}", f"{_qtd:,}".replace(",", ".")))
                         _jump_btn = ('<a class="jump-crit" href="#first-crit">⏬ Ir ao primeiro caso crítico</a>'
                                      if _first_crit_done else "")
+                        # v60: resumo executivo automático (números-chave, dinâmico)
+                        _fmt_r = lambda v: f"{int(v):,}".replace(",", ".")
+                        _crit_it = [(_a2, len(_df2), _e2) for _s2, _a2, _r2, _e2, _df2 in _casos if "Crítico" in _s2 and len(_df2)]
+                        _aten_it = [(_a2, len(_df2), _e2) for _s2, _a2, _r2, _e2, _df2 in _casos if "Atenção" in _s2 and len(_df2)]
+                        _re_txt = f"Foram analisados <b>{_fmt_r(_N)} participantes</b>. "
+                        if _crit_it:
+                            _re_txt += "🔴 <b>Achados críticos:</b> " + "; ".join(
+                                f"{_esc_h(_a2)} — <b>{_fmt_r(_n2)}</b>" + (f" ({_n2 / _N * 100:.1f}%)" if _e2 == "Participante" and _N else "")
+                                for _a2, _n2, _e2 in _crit_it) + ". "
+                        if _aten_it:
+                            _re_txt += "🟠 <b>Pontos de atenção:</b> " + "; ".join(
+                                f"{_esc_h(_a2)} — <b>{_fmt_r(_n2)}</b>" for _a2, _n2, _e2 in _aten_it) + ". "
+                        if _dist is not None:
+                            _dre = _dist.dropna()
+                            if len(_dre):
+                                _re_txt += f"📏 Distância média de <b>{_dre.mean():.2f} km</b> (máx {_dre.max():.2f} km). "
+                        if not _crit_it and not _aten_it:
+                            _re_txt += "Nenhum achado crítico ou de atenção nas análises calculáveis com os layouts carregados. "
+                        # v61: 3 municípios mais críticos (a partir dos deslocamentos > 20 km)
+                        _crit_dist = [_df2 for _s2, _a2, _r2, _e2, _df2 in _casos
+                                      if "Crítico" in _s2 and ("distância" in _a2.lower() or "deslocament" in _a2.lower()) and len(_df2)]
+                        if _crit_dist:
+                            _ccd = _pdc.concat(_crit_dist, ignore_index=True)
+                            _mcol2 = next((c for c in _ccd.columns if str(c).upper() in ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                            if _mcol2 is not None:
+                                _top3 = (_ccd[_mcol2].map(lambda x: _limpa_nome(x) if isinstance(x, str) else x)
+                                         .value_counts().head(3))
+                                if len(_top3):
+                                    _re_txt += ("🏘️ <b>Municípios com mais deslocamentos críticos:</b> "
+                                                + "; ".join(f"{_esc_h(str(_k))} (<b>{_fmt_r(_v)}</b>)" for _k, _v in _top3.items()) + ". ")
+                        _resumo_exec = f'<div class="resumo-exec"><div class="re-t">📌 Resumo executivo</div><p>{_re_txt}</p></div>'
                         _resumo_rows = "".join(
                             f"<tr><td>{_esc_h(r['Severidade'])}</td><td>{_esc_h(r['Análise'])}</td>"
                             f"<td>{_esc_h(r['Entidade'])}</td><td style='text-align:right'>{r['Quantidade']}</td>"
@@ -11158,6 +11209,11 @@ def _run_streamlit_app() -> None:
                                 f"<td style='text-align:right'>{_v / _tt * 100:.1f}%</td></tr>"
                                 for _k, _v in _fx.items())
                             _extra += f"""<section><h2 style="border-left:5px solid #2e86c1">📏 Faixas de distância (FGV)</h2>
+                            <div class="interp"><b>📖 Como interpretar:</b> este quadro distribui os participantes por
+                            faixa de distância entre a residência e o local de prova (campo NU_DISTANCIA, fonte FGV).
+                            Valores <b>acima de 20 km</b> ultrapassam o limite contratual para residentes em municípios
+                            sede e devem ser analisados individualmente; concentrações nas faixas altas sinalizam
+                            possíveis problemas de alocação.</div>
                             <p class="meta"><b>Distância média:</b> {_dd2.mean():.2f} km &nbsp;|&nbsp;
                             <b>&gt; 20 km:</b> {int((_dd2 > 20).sum())} &nbsp;|&nbsp; <b>&gt; 30 km:</b> {int((_dd2 > 30).sum())}</p>
                             <table><thead><tr><th>Faixa</th><th>Participantes</th><th>%</th></tr></thead>
@@ -11170,6 +11226,10 @@ def _run_streamlit_app() -> None:
                             _oc_rows = "".join("<tr>" + "".join(f"<td>{_esc_h(v)}</td>" for v in r.values) + "</tr>"
                                                for _, r in _top.iterrows())
                             _extra += f"""<section><h2 style="border-left:5px solid #e67e22">🪑 Ocupação por sala</h2>
+                            <div class="interp"><b>📖 Como interpretar:</b> mostra quantos participantes foram alocados
+                            em cada sala (agrupando por local e sala). A referência contratual é de aproximadamente
+                            <b>40 participantes por sala</b>; salas acima disso podem indicar superlotação e merecem
+                            verificação da capacidade física declarada.</div>
                             <p class="meta"><b>Salas:</b> {len(_oc2):,} &nbsp;|&nbsp; <b>Média/sala:</b> {_oc2['Participantes'].mean():.1f}
                             &nbsp;|&nbsp; <b>Salas &gt; 40:</b> {int((_oc2['Participantes'] > 40).sum())} (referência ~40/sala)</p>
                             <p class="nota">Top 50 salas mais ocupadas.</p>
@@ -11304,6 +11364,9 @@ def _run_streamlit_app() -> None:
                         tr:nth-child(even) td {{ background:#f7f9fc; }}
                         .meta,.regra,.nota {{ font-size:14px; margin:5px 0; }}
                         .nota {{ color:var(--muted); font-style:italic; }}
+                        .interp {{ background:#f3f8ff; border:1px solid #d5e6fb; border-left:4px solid #4a90d9;
+                                   border-radius:8px; padding:10px 14px; margin:10px 0; font-size:13.5px; line-height:1.55;
+                                   color:#31465c; }}
                         details {{ margin:6px 0; }} summary {{ cursor:pointer; padding:5px 0; }}
                         .toc {{ position:sticky; top:0; z-index:20; background:rgba(255,255,255,.96);
                                 backdrop-filter:blur(6px); border:1px solid var(--bd); border-radius:12px;
@@ -11323,8 +11386,28 @@ def _run_streamlit_app() -> None:
                         .case-csv:hover {{ background:var(--pri); }}
                         tr.row-crit td {{ background:#fdecea !important; }}
                         tr.row-aten td {{ background:#fef4e8 !important; }}
+                        tr.row-click {{ cursor:pointer; }}
+                        tr.row-click:hover td {{ background:#eaf2fb !important; }}
+                        .ficha {{ background:#fff; border:2px solid var(--acc); border-radius:12px; padding:14px 16px;
+                                  margin:12px 0; box-shadow:0 3px 12px rgba(16,42,67,.12); }}
+                        .ficha-top {{ display:flex; justify-content:space-between; align-items:center;
+                                      color:var(--pri); margin-bottom:8px; }}
+                        .ficha-x {{ background:#eef2f7; border:none; border-radius:6px; padding:4px 10px; cursor:pointer;
+                                    font-size:12px; font-weight:600; }}
+                        .ficha-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:8px 14px; }}
+                        .ficha-item {{ display:flex; flex-direction:column; border-bottom:1px solid #eef2f7; padding:4px 0; }}
+                        .ficha-k {{ font-size:11px; color:#8a94a3; text-transform:uppercase; font-weight:700; }}
+                        .ficha-v {{ font-size:14px; color:#1a2733; }}
+                        @media print {{ .ficha-x {{ display:none; }} }}
                         .case-resumo {{ background:#eef4fb; border-left:4px solid var(--acc); border-radius:8px;
                                         padding:8px 12px; margin:8px 0; font-size:14px; }}
+                        .trilha {{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:8px 0; font-size:13px; }}
+                        .trilha .tr-t {{ font-weight:700; color:var(--pri); margin-right:4px; }}
+                        .tr-step {{ background:#f0f4f9; border:1px solid #dde5ef; border-radius:6px; padding:3px 9px; }}
+                        .tr-arrow {{ color:#9fb0c3; font-weight:700; }}
+                        .tr-step.tr-crit {{ background:#fdecea; border-color:#f5c6cb; color:#a5281b; font-weight:700; }}
+                        .tr-step.tr-aten {{ background:#fef4e8; border-color:#f8d7a8; color:#a35a12; font-weight:700; }}
+                        .tr-step.tr-ok {{ background:#e6f4ea; border-color:#b7dfc3; color:#1e6b34; font-weight:700; }}
                         tr.pg-hide {{ display:none; }}
                         tr.pg-hide.pg-show {{ display:table-row; }}
                         .pg-btn {{ background:#fff; border:1px solid var(--acc); color:var(--acc); border-radius:7px;
@@ -11348,6 +11431,22 @@ def _run_streamlit_app() -> None:
                         .rodape {{ margin-top:36px; }}
                         .rodape code {{ background:#eef2f7; padding:1px 5px; border-radius:4px; font-size:12px; }}
                         @media print {{ .gfilter {{ display:none; }} }}
+                        .gf-export {{ background:#16a085; color:#fff; border:none; border-radius:8px; padding:7px 14px;
+                                      font-weight:600; cursor:pointer; }}
+                        .gf-export:hover {{ background:#12876f; }}
+                        .print-header {{ display:none; }}
+                        @page {{ margin:1.4cm; }}
+                        @page {{ @bottom-right {{ content:"Página " counter(page) " de " counter(pages); font-size:9px; color:#888; }} }}
+                        .resumo-exec {{ background:linear-gradient(135deg,#eef4fb,#f7fafe); border:1px solid #d5e3f2;
+                                        border-left:5px solid var(--pri); border-radius:12px; padding:14px 18px; margin:14px 0; }}
+                        .resumo-exec .re-t {{ font-weight:800; color:var(--pri); margin-bottom:4px; }}
+                        .resumo-exec p {{ margin:0; font-size:14px; line-height:1.6; color:#2a3a4d; }}
+                        @media print {{
+                          .print-header {{ display:block; position:fixed; top:0; left:0; right:0; font-size:10px;
+                                           color:#555; border-bottom:1px solid #ccc; padding:3px 0 4px; text-align:center;
+                                           background:#fff; }}
+                          .wrap {{ padding-top:22px; }}
+                        }}
                         @media print {{ .pg-btn {{ display:none; }} }}
                         @media print {{ .case-csv {{ display:none; }} }}
                         @media print {{ .casos-det > *:not(summary) {{ display:block !important; }}
@@ -11365,11 +11464,13 @@ def _run_streamlit_app() -> None:
                             h1,h2 {{ break-after:avoid; }}
                         }}
                         </style></head><body><div class="wrap">
+                        <div class="print-header">Central de Casos — Auditoria PND · {_N:,} participantes · {_dt.now().strftime('%d/%m/%Y')}</div>
                         <h1>🚨 Central de Casos — Auditoria de Layouts PND</h1>
                         <div class="cab"><b>Universo analisado:</b> {_N:,} participantes &nbsp;|&nbsp;
                         <b>Gerado em:</b> {_dt.now().strftime('%d/%m/%Y %H:%M')} &nbsp;|&nbsp;
                         <b>Motor v{APP_VERSION} · camada v{STREAMLIT_APP_VERSION}</b><br>
                         Cada seção responde: O QUE (quantidade), POR QUE (regra) e QUEM (registros).</div>
+                        {_resumo_exec}
                         {_jump_btn}
                         {_gf_bar}
                         {_cards_html}
@@ -11416,6 +11517,14 @@ def _run_streamlit_app() -> None:
                         }}
                         document.addEventListener('DOMContentLoaded', function(){{
                           document.querySelectorAll('table').forEach(makeSortable);
+                          // v54: clique numa linha de caso -> Ficha do caso (todos os campos daquele registro)
+                          document.querySelectorAll('.casos-det table tbody tr').forEach(function(tr){{
+                            tr.classList.add('row-click');
+                            tr.addEventListener('click', function(ev){{
+                              if(ev.target && ev.target.tagName==='A') return;
+                              showFicha(tr);
+                            }});
+                          }});
                           // v51: caixa por seção (para o escopo "somente seções marcadas")
                           document.querySelectorAll('section').forEach(function(sec){{
                             if(!sec.querySelector('table')) return;
@@ -11507,6 +11616,56 @@ def _run_streamlit_app() -> None:
                           var boxes=document.querySelectorAll('.sec-check'); if(!boxes.length) return;
                           var anyOff=Array.prototype.some.call(boxes, function(b){{ return !b.checked; }});
                           boxes.forEach(function(b){{ b.checked = anyOff; }});  // se alguma desmarcada -> marca todas; senão desmarca todas
+                        }}
+                        function showFicha(tr){{
+                          var t=tr.closest('table'); if(!t) return;
+                          var heads=[]; t.querySelectorAll('thead th').forEach(function(th){{
+                            heads.push((th.childNodes[0]?th.childNodes[0].textContent:th.textContent).trim());
+                          }});
+                          var cells=tr.querySelectorAll('td');
+                          var det=tr.closest('.casos-det'); if(!det) return;
+                          var old=det.querySelector('.ficha'); if(old) old.remove();
+                          var g='';
+                          heads.forEach(function(h,i){{
+                            var v=cells[i]?cells[i].textContent:'';
+                            g+='<div class="ficha-item"><span class="ficha-k">'+h+'</span><span class="ficha-v">'+v+'</span></div>';
+                          }});
+                          var div=document.createElement('div'); div.className='ficha';
+                          div.innerHTML='<div class="ficha-top"><b>🗂️ Ficha do caso</b>'
+                            +'<button class="ficha-x" onclick="this.closest(&quot;.ficha&quot;).remove()">✕ fechar</button></div>'
+                            +'<div class="ficha-grid">'+g+'</div>';
+                          det.appendChild(div);
+                          div.scrollIntoView({{behavior:'smooth', block:'nearest'}});
+                        }}
+                        function exportAllVisible(){{
+                          var lines=[];
+                          document.querySelectorAll('section').forEach(function(sec){{
+                            var h=sec.querySelector('h2');
+                            var name = h ? (h.childNodes[0] ? h.childNodes[0].textContent.trim() : 'Seção') : 'Seção';
+                            sec.querySelectorAll('table').forEach(function(t){{
+                              var vis=[];
+                              t.querySelectorAll('tbody tr').forEach(function(tr){{ if(tr.style.display!=='none') vis.push(tr); }});
+                              if(!vis.length) return;
+                              lines.push('=== '+name.replace(/"/g,'""')+' ===');
+                              var heads=[];
+                              t.querySelectorAll('thead th').forEach(function(th){{
+                                heads.push('"'+th.textContent.trim().replace(/"/g,'""')+'"');
+                              }});
+                              lines.push(heads.join(','));
+                              vis.forEach(function(tr){{
+                                var cells=[];
+                                tr.querySelectorAll('td').forEach(function(td){{
+                                  cells.push('"'+td.textContent.trim().replace(/"/g,'""')+'"');
+                                }});
+                                lines.push(cells.join(','));
+                              }});
+                              lines.push('');
+                            }});
+                          }});
+                          if(!lines.length){{ alert('Nada visível para exportar.'); return; }}
+                          var blob=new Blob(['\\ufeff'+lines.join('\\n')],{{type:'text/csv;charset=utf-8'}});
+                          var a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+                          a.download='relatorio_filtrado.csv'; document.body.appendChild(a); a.click(); a.remove();
                         }}
                         window.addEventListener('beforeprint', function(){{
                           document.querySelectorAll('details').forEach(function(d){{ d.open=true; }});
@@ -11602,8 +11761,92 @@ def _run_streamlit_app() -> None:
                                 .case-csv:hover{background:#1f4e79}
                                 .case-resumo{background:#eef4fb;border-left:4px solid #2e86c1;border-radius:8px;
                                              padding:8px 12px;margin:8px 0;font-size:14px}
+                                .trilha{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:8px 0;font-size:13px}
+                                .trilha .tr-t{font-weight:700;color:#1f4e79;margin-right:4px}
+                                .tr-step{background:#f0f4f9;border:1px solid #dde5ef;border-radius:6px;padding:3px 9px}
+                                .tr-arrow{color:#9fb0c3;font-weight:700}
+                                .tr-step.tr-crit{background:#fdecea;border-color:#f5c6cb;color:#a5281b;font-weight:700}
+                                .tr-step.tr-aten{background:#fef4e8;border-color:#f8d7a8;color:#a35a12;font-weight:700}
+                                .tr-step.tr-ok{background:#e6f4ea;border-color:#b7dfc3;color:#1e6b34;font-weight:700}
                                 tr.row-crit td{background:#fdecea!important}
                                 tr.row-aten td{background:#fef4e8!important}
+                                tr.row-click{cursor:pointer}
+                                tr.row-click:hover td{background:#eaf2fb!important}
+                                .ficha{background:#fff;border:2px solid #2e86c1;border-radius:12px;padding:14px 16px;
+                                       margin:12px 0;box-shadow:0 3px 12px rgba(16,42,67,.12)}
+                                .ficha-top{display:flex;justify-content:space-between;align-items:center;color:#1f4e79;margin-bottom:8px}
+                                .ficha-x{background:#eef2f7;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;font-weight:600}
+                                .ficha-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 14px}
+                                .ficha-item{display:flex;flex-direction:column;border-bottom:1px solid #eef2f7;padding:4px 0}
+                                .ficha-k{font-size:11px;color:#8a94a3;text-transform:uppercase;font-weight:700}
+                                .ficha-v{font-size:14px;color:#1a2733}
+                                @media print{.ficha-x{display:none}}
+                                /* v56: responsividade direcionada às classes reais do dashboard do motor */
+                                .card{margin-bottom:20px;overflow:hidden}
+                                .chart-container{min-width:0;overflow-x:auto;padding:8px}
+                                .chart-container .plotly-graph-div,.chart-container .js-plotly-plot,
+                                .card .plotly-graph-div,.card .js-plotly-plot{width:100%!important;min-width:0!important}
+                                .chart-grid,.kpi-grid{gap:18px!important}
+                                .table-wrapper-div{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+                                .mestre-filter{flex-wrap:wrap!important;gap:10px!important;align-items:center}
+                                .aula-box{margin:14px 0;line-height:1.55}
+                                .section-header{margin:26px 0 12px!important}
+                                @media (max-width:1100px){
+                                  .chart-grid{grid-template-columns:1fr!important}
+                                }
+                                @media (max-width:768px){
+                                  .card{padding:14px!important;margin-bottom:16px}
+                                  .kpi-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))!important}
+                                  .filter-item{width:100%!important}
+                                  .aula-box{font-size:14px}
+                                }
+                                @media (max-width:480px){
+                                  .kpi-grid{grid-template-columns:1fr 1fr!important}
+                                  .kpi-val{font-size:1.5em!important;word-break:break-word}
+                                  .kpi-lbl{font-size:.8em!important}
+                                }
+                                @media (min-width:1800px){
+                                  .unif-top,.wrap{max-width:1500px}
+                                }
+                                /* v57: espaçamento entre gráficos e suas instruções + ritmo vertical */
+                                *{box-sizing:border-box}
+                                pre,code{white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word}
+                                .chart-container{margin:18px 0!important;padding:14px!important}
+                                .card-title{margin-bottom:14px!important;line-height:1.4}
+                                .aula-box{margin:16px 0 20px!important;padding:12px 16px!important;border-radius:10px}
+                                .card-title + .aula-box{margin-top:10px!important}
+                                .aula-box + .chart-container,.chart-container + .aula-box,
+                                .aula-box + .chart-grid,.chart-grid + .aula-box{margin-top:22px!important}
+                                .card > .chart-container:first-child{margin-top:8px!important}
+                                .chart-grid{gap:24px!important;margin:16px 0!important}
+                                .card{padding:20px!important}
+                                .tooltip-text{max-width:min(320px,90vw)!important;white-space:normal!important}
+                                .kpi-box{padding:16px!important}
+                                .section-header{padding-bottom:8px!important;border-bottom:2px solid #eef2f7}
+                                @media (max-width:768px){
+                                  .chart-container{margin:14px 0!important;padding:10px!important}
+                                  .aula-box{margin:12px 0 16px!important}
+                                  .card{padding:14px!important}
+                                }
+                                /* v58: filtros do motor em coluna no mobile, tipografia fluida, salvaguardas */
+                                .mestre-filter input,.mestre-filter select,.filter-item input,.filter-item select{
+                                  max-width:100%;font-size:14px}
+                                .section-header{font-size:clamp(1.05rem,2.4vw,1.4rem)!important}
+                                .card-title{font-size:clamp(.95rem,2vw,1.15rem)!important;overflow-wrap:break-word}
+                                .kpi-val{font-size:clamp(1.3rem,3.6vw,2rem)!important}
+                                .card,.aula-box,.chart-container,.kpi-box{overflow-wrap:break-word;word-break:normal}
+                                .chart-container{min-height:200px}
+                                .tooltip-text{left:auto!important;right:0!important;transform:none!important}
+                                @media (max-width:600px){
+                                  .mestre-filter{flex-direction:column!important;align-items:stretch!important}
+                                  .mestre-filter .filter-item{width:100%!important}
+                                  .mestre-filter input,.mestre-filter select{width:100%!important}
+                                  .section-header{word-break:break-word}
+                                }
+                                @media (max-width:400px){
+                                  .kpi-grid{grid-template-columns:1fr!important}
+                                  .chart-container{min-height:170px;padding:8px!important}
+                                }
                                 tr.pg-hide{display:none}
                                 tr.pg-hide.pg-show{display:table-row}
                                 .pg-btn{background:#fff;border:1px solid #2e86c1;color:#2e86c1;border-radius:7px;
@@ -11613,6 +11856,8 @@ def _run_streamlit_app() -> None:
                                            border-radius:8px;padding:8px 16px;font-weight:700;font-size:14px;margin:10px 0}
                                 .jump-crit:hover{background:#a5281b}
                                 .case-mun{font-size:13px;color:#42546b;margin:4px 0 2px}
+                                .interp{background:#f3f8ff;border:1px solid #d5e6fb;border-left:4px solid #4a90d9;
+                                        border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13.5px;line-height:1.55;color:#31465c}
                                 .gfilter{background:#f0f6fc;border:1px solid #d5e3f2;border-radius:12px;padding:12px 16px;
                                          margin:14px 0;display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center}
                                 .gfilter .gf-t{font-weight:800;color:#1f4e79;margin-right:6px}
@@ -11625,6 +11870,18 @@ def _run_streamlit_app() -> None:
                                 .gf-info{font-size:13px;color:#42546b}
                                 .sec-toggle{font-size:12px;font-weight:500;color:#8a94a3;margin-left:12px;cursor:pointer;user-select:none}
                                 .sec-toggle input{margin-right:3px;vertical-align:middle}
+                                .gf-export{background:#16a085;color:#fff;border:none;border-radius:8px;padding:7px 14px;
+                                           font-weight:600;cursor:pointer}
+                                .gf-export:hover{background:#12876f}
+                                .print-header{display:none}
+                                @page{margin:1.4cm}
+                                @page{@bottom-right{content:"Página " counter(page) " de " counter(pages);font-size:9px;color:#888}}
+                                .resumo-exec{background:linear-gradient(135deg,#eef4fb,#f7fafe);border:1px solid #d5e3f2;
+                                             border-left:5px solid #1f4e79;border-radius:12px;padding:14px 18px;margin:14px 0}
+                                .resumo-exec .re-t{font-weight:800;color:#1f4e79;margin-bottom:4px}
+                                .resumo-exec p{margin:0;font-size:14px;line-height:1.6;color:#2a3a4d}
+                                @media print{.print-header{display:block;position:fixed;top:0;left:0;right:0;font-size:10px;
+                                             color:#555;border-bottom:1px solid #ccc;padding:3px 0 4px;text-align:center;background:#fff}}
                                 @media print{.sec-toggle{display:none}}
                                 .rodape{margin-top:36px}
                                 .rodape code{background:#eef2f7;padding:1px 5px;border-radius:4px;font-size:12px}
@@ -11644,6 +11901,17 @@ def _run_streamlit_app() -> None:
                                 .unif-nav a{color:#2e86c1;text-decoration:none;font-weight:600;font-size:13px;
                                             padding:4px 10px;border-radius:6px;white-space:nowrap}
                                 .unif-nav a:hover{background:#eef4fb;text-decoration:underline}
+                                .unif-index{margin:10px 0 16px;background:#fff;border:1px solid #e3e8ef;border-radius:12px;padding:10px 16px;box-shadow:0 1px 3px rgba(16,42,67,.05)}
+                                .unif-index>summary{font-weight:700;color:#1f4e79;cursor:pointer;font-size:14px}
+                                .unif-index-body{display:flex;flex-wrap:wrap;gap:12px 28px;margin-top:12px}
+                                .idx-col{min-width:220px;flex:1}
+                                .idx-col>b{color:#31465c;font-size:13px}
+                                .idx-col ol{margin:6px 0 0;padding-left:22px}
+                                .idx-col li{margin:2px 0}
+                                .idx-col a{color:#2e86c1;text-decoration:none;font-size:13px}
+                                .idx-col a:hover{text-decoration:underline}
+                                [id^="u-chart-"],[id^="u-table-"]{scroll-margin-top:72px}
+                                @media print{.unif-index{display:none}}
                                 [id^="topo-"],#central-casos{scroll-margin-top:72px}
                                 @media(max-width:640px){.unif-capa{padding:16px}.unif-capa h1{font-size:20px}
                                                         .unif-top{padding:14px 12px 0}}
@@ -11734,8 +12002,45 @@ def _run_streamlit_app() -> None:
                                       });
                                     }
                                   }
+                                  function _idxEsc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+                                  function _idxTitle(el){
+                                    var card = el.closest('.card') || el.parentNode;
+                                    var h = card ? card.querySelector('.card-title, .section-header, h2, h3, h4') : null;
+                                    if(h){ var t=(h.childNodes[0]?h.childNodes[0].textContent:h.textContent).trim(); if(t) return t.slice(0,90); }
+                                    return null;
+                                  }
+                                  function buildIndex(){
+                                    var charts=[], tables=[];
+                                    document.querySelectorAll('.chart-container').forEach(function(c,i){
+                                      if(!c.id) c.id='u-chart-'+i;
+                                      charts.push({id:c.id, t:_idxTitle(c)||('Gráfico '+(charts.length+1))});
+                                    });
+                                    document.querySelectorAll('section table, .card table').forEach(function(t,i){
+                                      if(t.querySelectorAll('tbody tr').length<2) return;
+                                      var w=t.closest('.tbl-wrap')||t.closest('.table-wrapper-div')||t.closest('.card')||t;
+                                      if(!w.id) w.id='u-table-'+i;
+                                      tables.push({id:w.id, t:_idxTitle(t)||('Tabela '+(tables.length+1))});
+                                    });
+                                    if(!charts.length && !tables.length) return;
+                                    var h='<details class="unif-index"><summary>📊 Índice de gráficos e tabelas ('
+                                      +charts.length+' gráficos, '+tables.length+' tabelas)</summary><div class="unif-index-body">';
+                                    if(charts.length){
+                                      h+='<div class="idx-col"><b>📈 Gráficos</b><ol>';
+                                      charts.forEach(function(c){ h+='<li><a href="#'+c.id+'">'+_idxEsc(c.t)+'</a></li>'; });
+                                      h+='</ol></div>';
+                                    }
+                                    if(tables.length){
+                                      h+='<div class="idx-col"><b>📋 Tabelas</b><ol>';
+                                      tables.forEach(function(c){ h+='<li><a href="#'+c.id+'">'+_idxEsc(c.t)+'</a></li>'; });
+                                      h+='</ol></div>';
+                                    }
+                                    h+='</div></details>';
+                                    var nav=document.querySelector('.unif-nav');
+                                    if(nav) nav.insertAdjacentHTML('afterend', h);
+                                  }
                                   function onReady(){
                                     try{ enhanceTables(); }catch(e){}
+                                    try{ buildIndex(); }catch(e){}
                                     setTimeout(resizePlotly, 300);
                                     var bt=document.getElementById('unif-backtop');
                                     window.addEventListener('scroll', function(){
