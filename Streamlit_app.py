@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "79"
+STREAMLIT_APP_VERSION = "80"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -12888,13 +12888,16 @@ def _run_streamlit_app() -> None:
         if arquivo is not None:
             try:
                 import io as _iok
-                _xb = _excelfile_fast(_iok.BytesIO(arquivo.getvalue()))
-                _bk = None
-                for _sh in _xb.sheet_names:
-                    _dk = _read_excel_fast(_iok.BytesIO(arquivo.getvalue()), sheet_name=_sh)
-                    if any(str(c).upper() == "CO_INSCRICAO" for c in _dk.columns):
-                        _bk = _dk
-                        break
+                # v80: leitura da base cacheada — não reparseia o Excel a cada rerun (economia de RAM/tempo)
+                @st.cache_data(show_spinner=False)
+                def _ler_base_cache(_bytes):
+                    _xbc = _excelfile_fast(_iok.BytesIO(_bytes))
+                    for _shc in _xbc.sheet_names:
+                        _dkc = _read_excel_fast(_iok.BytesIO(_bytes), sheet_name=_shc)
+                        if any(str(_c).upper() == "CO_INSCRICAO" for _c in _dkc.columns):
+                            return _dkc
+                    return None
+                _bk = _ler_base_cache(arquivo.getvalue())
                 if _bk is not None:
                     _Nk = len(_bk)
                     _fmt = lambda v: f"{int(v):,}".replace(",", ".")
