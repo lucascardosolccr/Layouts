@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "62"
+STREAMLIT_APP_VERSION = "79"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -274,6 +274,105 @@ def _limpa_colunas_nome(_df):
             except Exception:
                 pass
     return _df
+
+
+# =========================================================================
+# v70: MOTOR DE CAPACIDADES ANALÍTICAS (dirigido por catálogo, não if-chains).
+# Dado o DataFrame carregado, avalia cada análise do catálogo contra as COLUNAS
+# realmente presentes e preenchidas, determinando Disponível / Parcial / Indisponível
+# com o motivo. Escalável: para habilitar uma nova análise, basta adicionar uma
+# entrada ao catálogo — nenhuma lógica condicional precisa ser tocada.
+# =========================================================================
+# De qual layout cada coluna-chave provém (para explicar o que falta ao usuário).
+_LAYOUT_DE_COLUNA = {
+    "CO_INSCRICAO": "N02", "NO_INSCRITO": "N02", "NU_CPF": "N02", "ID_SALA": "N02",
+    "NU_DISTANCIA": "N02", "TP_ENSALAMENTO": "N02", "CO_LOCAL": "N02", "NO_LOCAL_PROVA": "N02",
+    "CO_BLOCO": "N02", "NO_MUNICIPIO_PROVA": "N02", "SG_UF_PROVA": "N02",
+    "IN_ATENDIMENTO_ESPECIFICO": "N02", "ID_KIT_PROVA": "N02 (espelha N91)",
+    "DT_NASCIMENTO": "N02/N90", "CO_CURSO": "N02/N90", "NO_GRUPO_CURSO": "N02/N90",
+    "QT_CAPACIDADE": "N50", "NU_CAPACIDADE": "N50", "CAPACIDADE": "N50/N52",
+    "QT_CAPACIDADE_FISICA": "N52", "NO_ESPACO_FISICO": "N52",
+    "CO_ATENDIMENTO": "N91", "TP_ATENDIMENTO": "N91", "IN_ATENDIMENTO_REALIZADO": "N91",
+    "CO_INSCRITO_N90": "N90", "TP_LAUDO": "N91", "CO_ITEM_ATENDIMENTO": "N91",
+}
+# Catálogo de capacidades: cada análise declara colunas necessárias e grupo.
+_CATALOGO_ANALISES = [
+    ("Quantitativo de inscritos", "Inscritos", ["CO_INSCRICAO"]),
+    ("Distribuição por UF", "Inscritos", ["SG_UF_PROVA"]),
+    ("Distribuição por município", "Inscritos", ["NO_MUNICIPIO_PROVA"]),
+    ("Faixa etária / perfil dos inscritos", "Inscritos", ["DT_NASCIMENTO", "CO_CURSO"]),
+    ("Ensalamento por sala", "Ensalamento", ["ID_SALA"]),
+    ("Ensalamento por local", "Ensalamento", ["CO_LOCAL"]),
+    ("Tipo de ensalamento (TP_ENSALAMENTO)", "Ensalamento", ["TP_ENSALAMENTO"]),
+    ("Participantes não ensalados", "Ensalamento", ["ID_SALA", "CO_INSCRICAO"]),
+    ("Ocupação real das salas", "Capacidade", ["CO_LOCAL", "ID_SALA"]),
+    ("Concentração por local de prova", "Capacidade", ["CO_LOCAL"]),
+    ("Capacidade planejada × real (N50)", "Capacidade", ["ID_SALA", "QT_CAPACIDADE"]),
+    ("Capacidade física do espaço (N52)", "Capacidade", ["ID_SALA", "QT_CAPACIDADE_FISICA"]),
+    ("Distância média / faixas", "Distância", ["NU_DISTANCIA"]),
+    ("Deslocamentos críticos (>20 km)", "Distância", ["NU_DISTANCIA"]),
+    ("Distância média por município", "Distância", ["NU_DISTANCIA", "NO_MUNICIPIO_PROVA"]),
+    ("Atendimento especializado (solicitado)", "Atendimento", ["IN_ATENDIMENTO_ESPECIFICO"]),
+    ("Atendimento registrado (N91 × N02)", "Atendimento", ["CO_INSCRICAO", "CO_ATENDIMENTO"]),
+    ("Atendimento solicitado sem registro", "Atendimento", ["IN_ATENDIMENTO_ESPECIFICO", "IN_ATENDIMENTO_REALIZADO"]),
+    ("Kit por participante", "Kits", ["ID_KIT_PROVA"]),
+    ("Reconciliação de kits (N02 × N91)", "Kits", ["ID_KIT_PROVA", "CO_ITEM_ATENDIMENTO"]),
+    ("Laudos / itens de atendimento (N91)", "Kits", ["TP_LAUDO"]),
+]
+
+
+# Assinatura de colunas por layout — permite detectar quais layouts foram carregados.
+_ASSINATURA_LAYOUT = {
+    "N02": ["CO_INSCRICAO", "ID_SALA", "TP_ENSALAMENTO"],
+    "N50": ["QT_CAPACIDADE", "NU_CAPACIDADE"],
+    "N52": ["QT_CAPACIDADE_FISICA", "NO_ESPACO_FISICO"],
+    "N60": ["CO_INSCRICAO_N60", "NU_SEQUENCIAL_N60"],
+    "N90": ["CO_INSCRITO_N90", "NU_INSCRITO_N90"],
+    "N91": ["CO_ATENDIMENTO", "TP_ATENDIMENTO", "CO_ITEM_ATENDIMENTO", "TP_LAUDO", "IN_ATENDIMENTO_REALIZADO"],
+}
+
+
+def _detectar_layouts(df):
+    """Detecta quais layouts estão presentes a partir das colunas (heurística por assinatura)."""
+    try:
+        _cols = {str(c).upper() for c in df.columns}
+    except Exception:
+        _cols = set()
+    return {_lay: any(_s in _cols for _s in _sig) for _lay, _sig in _ASSINATURA_LAYOUT.items()}
+
+
+def _avaliar_capacidades(df):
+    """Retorna lista de (nome, grupo, cols_necessarias, status, motivo) avaliando o catálogo
+    contra as colunas presentes/preenchidas do DataFrame. status ∈ {DISPONIVEL, PARCIAL, INDISPONIVEL}."""
+    try:
+        _presentes = {str(c).upper(): c for c in df.columns}
+    except Exception:
+        _presentes = {}
+    _res = []
+    for _nome, _grupo, _cols in _CATALOGO_ANALISES:
+        _faltantes, _vazias = [], []
+        for _c in _cols:
+            _cu = _c.upper()
+            if _cu not in _presentes:
+                _faltantes.append(_c)
+            else:
+                try:
+                    if df[_presentes[_cu]].dropna().empty:
+                        _vazias.append(_c)
+                except Exception:
+                    pass
+        if _faltantes:
+            _origs = sorted({_LAYOUT_DE_COLUNA.get(_c.upper(), "?") for _c in _faltantes})
+            _status = "INDISPONIVEL"
+            _motivo = f"requer {', '.join(_faltantes)} (origem: {', '.join(_origs)}) — layout não carregado"
+        elif _vazias:
+            _status = "PARCIAL"
+            _motivo = f"coluna(s) {', '.join(_vazias)} presente(s) mas sem dados preenchidos"
+        else:
+            _status = "DISPONIVEL"
+            _motivo = "colunas presentes e com dados"
+        _res.append((_nome, _grupo, _cols, _status, _motivo))
+    return _res
 
 
 def _dist_km(serie):
@@ -10339,6 +10438,35 @@ def _run_streamlit_app() -> None:
         import plotly.express as _px
     except Exception:
         _px = None
+    # v63: tema Plotly estilizado (design system) aplicado a TODOS os gráficos da app
+    try:
+        import plotly.io as _pio
+        import plotly.graph_objects as _pgo
+        _PND_SEQ = ["#1f4e79", "#2e86c1", "#27ae60", "#e67e22", "#c0392b",
+                    "#8e44ad", "#16a085", "#f39c12", "#2980b9", "#7f8c8d"]
+        _PND_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif"
+        _pio.templates["pnd"] = _pgo.layout.Template(layout=dict(
+            colorway=_PND_SEQ,
+            font=dict(family=_PND_FONT, size=13, color="#1a2733"),
+            title=dict(font=dict(family=_PND_FONT, size=17, color="#1f4e79"), x=0.01, xanchor="left"),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(gridcolor="#eef2f7", zerolinecolor="#e3e8ef", linecolor="#cbd5e1",
+                       tickfont=dict(size=12), title=dict(font=dict(size=13))),
+            yaxis=dict(gridcolor="#eef2f7", zerolinecolor="#e3e8ef", linecolor="#cbd5e1",
+                       tickfont=dict(size=12), title=dict(font=dict(size=13))),
+            margin=dict(t=64, l=64, r=28, b=54),
+            hoverlabel=dict(bgcolor="white", font_size=13, font_family=_PND_FONT, bordercolor="#cbd5e1"),
+            legend=dict(bgcolor="rgba(255,255,255,0.65)", bordercolor="#e3e8ef", borderwidth=1,
+                        font=dict(size=12)),
+            colorscale=dict(sequential=[[0, "#eef4fb"], [0.5, "#5b9bd5"], [1, "#1f4e79"]]),
+        ))
+        _pio.templates.default = "plotly_white+pnd"
+        if _px is not None:
+            _px.defaults.template = "plotly_white+pnd"
+            _px.defaults.color_discrete_sequence = _PND_SEQ
+            _px.defaults.height = 420
+    except Exception:
+        pass
 
     st.set_page_config(page_title="Plataforma BI INEP/PND",
                        page_icon="📊", layout="wide",
@@ -10867,6 +10995,24 @@ def _run_streamlit_app() -> None:
                         _casos.append(("🟠 Atenção", "Salas com ocupação elevada (> 40)",
                                        "Referência contratual de ~40 participantes por sala.",
                                        "Sala", _oc40))
+                        # v75: apontamentos de qualidade como casos investigáveis
+                        _oc1 = _oc[_oc["Participantes"] == 1]
+                        if len(_oc1):
+                            _casos.append(("🟠 Atenção", "Salas com um único participante",
+                                           "Sala (local + sala) com exatamente 1 participante — verificar se a configuração está correta.",
+                                           "Sala", _oc1))
+                    if _salac is not None:
+                        _nao_ens = _base[_base[_salac].isna()]
+                        if len(_nao_ens):
+                            _casos.append(("🔴 Crítico", "Participantes não ensalados (ID_SALA vazio)",
+                                           "Participante sem sala atribuída — não poderá realizar a prova no ensalamento previsto.",
+                                           "Participante", _nao_ens))
+                        if _locc is not None:
+                            _incons_df = _base[_base[_salac].notna() & _base[_locc].isna()]
+                            if len(_incons_df):
+                                _casos.append(("🔴 Crítico", "Ensalamento inconsistente (sala sem local)",
+                                               "Participante com ID_SALA preenchido mas CO_LOCAL vazio — inconsistência de alocação.",
+                                               "Participante", _incons_df))
 
                     # Painel consolidado
                     _resumo = _pdc.DataFrame([{
@@ -10972,6 +11118,48 @@ def _run_streamlit_app() -> None:
                     def _gera_html_casos():
                         import html as _html
                         _esc_h = lambda x: _html.escape(str(x))
+
+                        # v67: gráficos SVG inline (autossuficientes — sem JS/CDN, sempre renderizam)
+                        def _svg_vbar(pares, cor="#2e86c1", unidade=""):
+                            """Barras verticais a partir de [(rótulo, valor)]."""
+                            pares = [(str(k), float(v)) for k, v in pares]
+                            if not pares:
+                                return ""
+                            _maxv = max((v for _, v in pares), default=0) or 1
+                            _n = len(pares)
+                            _w, _h = 640, 300
+                            _pad_b, _pad_t, _pad_l = 60, 20, 46
+                            _bw = (_w - _pad_l - 20) / _n
+                            _bars = []
+                            _bars.append(f'<line x1="{_pad_l}" y1="{_h - _pad_b}" x2="{_w - 10}" y2="{_h - _pad_b}" stroke="#cbd5e1"/>')
+                            for _i, (_lab, _val) in enumerate(pares):
+                                _bh = (_h - _pad_b - _pad_t) * (_val / _maxv)
+                                _x = _pad_l + _i * _bw + 6
+                                _y = _h - _pad_b - _bh
+                                _bars.append(f'<rect x="{_x:.0f}" y="{_y:.0f}" width="{_bw - 12:.0f}" height="{_bh:.0f}" rx="3" fill="{cor}"><title>{_esc_h(_lab)}: {int(_val):,}</title></rect>'.replace(",", "."))
+                                _bars.append(f'<text x="{_x + (_bw - 12) / 2:.0f}" y="{_y - 5:.0f}" text-anchor="middle" font-size="11" font-weight="600" fill="#1a2733">{int(_val):,}</text>'.replace(",", "."))
+                                _bars.append(f'<text x="{_x + (_bw - 12) / 2:.0f}" y="{_h - _pad_b + 16:.0f}" text-anchor="middle" font-size="10" fill="#5b6b7f">{_esc_h(_lab)[:12]}</text>')
+                            return (f'<svg viewBox="0 0 {_w} {_h}" style="width:100%;height:auto;max-width:{_w}px" '
+                                    f'role="img" aria-label="gráfico de barras">{"".join(_bars)}</svg>')
+
+                        def _svg_hbar(pares, cor="#1f4e79", unidade=""):
+                            """Barras horizontais (bom para rótulos longos) a partir de [(rótulo, valor)]."""
+                            pares = [(str(k), float(v)) for k, v in pares]
+                            if not pares:
+                                return ""
+                            _maxv = max((v for _, v in pares), default=0) or 1
+                            _bh, _gap, _pad_l, _pad_r, _w = 26, 9, 190, 64, 660
+                            _h = len(pares) * (_bh + _gap) + 14
+                            _rows, _y = [], 8
+                            for _lab, _val in pares:
+                                _bwd = (_w - _pad_l - _pad_r) * (_val / _maxv)
+                                _rows.append(f'<text x="{_pad_l - 8}" y="{_y + _bh * 0.68:.0f}" text-anchor="end" font-size="12" fill="#42546b">{_esc_h(_lab)[:26]}</text>')
+                                _rows.append(f'<rect x="{_pad_l}" y="{_y}" width="{_bwd:.0f}" height="{_bh}" rx="3" fill="{cor}"><title>{_esc_h(_lab)}: {int(_val):,}</title></rect>'.replace(",", "."))
+                                _rows.append(f'<text x="{_pad_l + _bwd + 6:.0f}" y="{_y + _bh * 0.68:.0f}" font-size="12" font-weight="600" fill="#1a2733">{int(_val):,}{unidade}</text>'.replace(",", "."))
+                                _y += _bh + _gap
+                            return (f'<svg viewBox="0 0 {_w} {_h}" style="width:100%;height:auto;max-width:{_w}px" '
+                                    f'role="img" aria-label="gráfico de barras horizontais">{"".join(_rows)}</svg>')
+
                         _blocos = []
                         _first_crit_done = False
                         for _ic0, (_s, _a, _r, _e, _df) in enumerate(_casos):
@@ -11106,6 +11294,65 @@ def _run_streamlit_app() -> None:
                                     _re_txt += ("🏘️ <b>Municípios com mais deslocamentos críticos:</b> "
                                                 + "; ".join(f"{_esc_h(str(_k))} (<b>{_fmt_r(_v)}</b>)" for _k, _v in _top3.items()) + ". ")
                         _resumo_exec = f'<div class="resumo-exec"><div class="re-t">📌 Resumo executivo</div><p>{_re_txt}</p></div>'
+                        # v76: Painel de Análise e Auditoria (hero dashboard) — números-chave dinâmicos
+                        try:
+                            _cuh = {str(c).upper(): c for c in _base.columns}
+                            _ens = int(_base[_cuh["ID_SALA"]].notna().sum()) if "ID_SALA" in _cuh else None
+                            _nao_ens = (_N - _ens) if _ens is not None else None
+                            _nsal = None
+                            if "CO_LOCAL" in _cuh and "ID_SALA" in _cuh:
+                                _nsal = int(_base.groupby([_cuh["CO_LOCAL"], _cuh["ID_SALA"]]).ngroups)
+                            _med_sala = (_N / _nsal) if _nsal else None
+                            _n_crit = sum(len(_df2) for _s2, _a2, _r2, _e2, _df2 in _casos if "Crítico" in _s2 and _e2 == "Participante")
+                            _n_aten = sum(len(_df2) for _s2, _a2, _r2, _e2, _df2 in _casos if "Atenção" in _s2 and _e2 == "Participante")
+                            _hero_items = [("👥", "Participantes", f"{_N:,}".replace(",", "."), "#2e86c1", "")]
+                            if _ens is not None:
+                                _hero_items.append(("🪑", "Ensalados", f"{_ens:,}".replace(",", ".") + (f" ({_ens / _N * 100:.0f}%)" if _N else ""), "#27ae60", ""))
+                                _hero_items.append(("⚠️", "Não ensalados", f"{_nao_ens:,}".replace(",", "."), "#c0392b" if _nao_ens else "#27ae60", ""))
+                            if _nsal is not None:
+                                _hero_items.append(("🏫", "Salas", f"{_nsal:,}".replace(",", "."), "#8e44ad", ""))
+                            if _med_sala is not None:
+                                _hero_items.append(("📊", "Média por sala", f"{_med_sala:.1f}".replace(".", ","), "#16a085", ""))
+                            _href_crit = "#first-crit" if _first_crit_done else ""
+                            _hero_items.append(("🔴", "Casos críticos", f"{_n_crit:,}".replace(",", "."), "#c0392b", _href_crit))
+                            _hero_items.append(("🟠", "Casos de atenção", f"{_n_aten:,}".replace(",", "."), "#e67e22", _href_crit))
+
+                            def _hero_card(_ic, _lb, _vl, _cor, _href):
+                                _inner = (f'<div class="hs-ic">{_ic}</div><div class="hs-val" style="color:{_cor}">{_vl}</div>'
+                                          f'<div class="hs-lbl">{_lb}</div>')
+                                if _href:
+                                    return f'<a class="hero-stat hero-link" href="{_href}" title="Ir aos casos">{_inner}<div class="hs-go">ver ▸</div></a>'
+                                return f'<div class="hero-stat">{_inner}</div>'
+                            _hero_cards = "".join(_hero_card(*_it) for _it in _hero_items)
+                            # v78: selo de saúde da base no hero (resumo rápido de qualidade)
+                            _hcrit, _haten = 0, 0
+                            try:
+                                if "CO_INSCRICAO" in _cuh and int(_base[_cuh["CO_INSCRICAO"]].duplicated().sum()) > 0:
+                                    _hcrit += 1
+                                if _nao_ens:
+                                    _hcrit += 1
+                                if "CO_LOCAL" in _cuh and "ID_SALA" in _cuh and int((_base[_cuh["ID_SALA"]].notna() & _base[_cuh["CO_LOCAL"]].isna()).sum()) > 0:
+                                    _hcrit += 1
+                                if _dist is not None and int((_dist < 0).sum()) > 0:
+                                    _hcrit += 1
+                                if "ID_KIT_PROVA" in _cuh and int(_base[_cuh["ID_KIT_PROVA"]].isna().sum()) > 0:
+                                    _haten += 1
+                                if _nsal and "CO_LOCAL" in _cuh and "ID_SALA" in _cuh and int((_base.groupby([_cuh["CO_LOCAL"], _cuh["ID_SALA"]]).size() == 1).sum()) > 0:
+                                    _haten += 1
+                            except Exception:
+                                pass
+                            if _hcrit:
+                                _selo = f'<span class="hero-selo selo-crit">🔴 {_hcrit} ponto(s) crítico(s) de qualidade</span>'
+                            elif _haten:
+                                _selo = f'<span class="hero-selo selo-aten">🟠 {_haten} ponto(s) de atenção na base</span>'
+                            else:
+                                _selo = '<span class="hero-selo selo-ok">🟢 Base íntegra</span>'
+                            _hero = (f'<div class="hero"><div class="hero-title">📊 Painel de Análise e Auditoria</div>'
+                                     f'<div class="hero-sub">Auditoria de ensalamento e locais de prova · PND · '
+                                     f'{_dt.now().strftime("%d/%m/%Y")} &nbsp; {_selo}</div>'
+                                     f'<div class="hero-grid">{_hero_cards}</div></div>')
+                        except Exception:
+                            _hero = ""
                         _resumo_rows = "".join(
                             f"<tr><td>{_esc_h(r['Severidade'])}</td><td>{_esc_h(r['Análise'])}</td>"
                             f"<td>{_esc_h(r['Entidade'])}</td><td style='text-align:right'>{r['Quantidade']}</td>"
@@ -11216,8 +11463,27 @@ def _run_streamlit_app() -> None:
                             possíveis problemas de alocação.</div>
                             <p class="meta"><b>Distância média:</b> {_dd2.mean():.2f} km &nbsp;|&nbsp;
                             <b>&gt; 20 km:</b> {int((_dd2 > 20).sum())} &nbsp;|&nbsp; <b>&gt; 30 km:</b> {int((_dd2 > 30).sum())}</p>
+                            <div class="grafico"><div class="graf-titulo">Participantes por faixa de distância</div>
+                            {_svg_vbar([(_k, _v) for _k, _v in _fx.items()], cor="#2e86c1")}
+                            <div class="graf-leg">Cada barra é uma faixa de distância; o número no topo é a quantidade de participantes.</div></div>
                             <table><thead><tr><th>Faixa</th><th>Participantes</th><th>%</th></tr></thead>
                             <tbody>{_fx_rows}</tbody></table></section>"""
+                            # v67: gráfico dos municípios com mais deslocamentos críticos (>20 km)
+                            _muncol_f = next((c for c in _base.columns if str(c).upper() in ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                            if _muncol_f is not None:
+                                try:
+                                    _critmask = (_dist > 20)
+                                    _mc_f = (_base.loc[_critmask, _muncol_f].map(lambda x: _limpa_nome(x) if isinstance(x, str) else x)
+                                             .value_counts().head(10))
+                                    if len(_mc_f):
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🏘️ Municípios com mais deslocamentos críticos</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> ranking dos municípios de prova com maior número
+                                        de participantes deslocando-se <b>acima de 20 km</b>. Indica onde os problemas de alocação se concentram.</div>
+                                        <div class="grafico"><div class="graf-titulo">Top {len(_mc_f)} municípios por deslocamentos críticos (&gt; 20 km)</div>
+                                        {_svg_hbar([(_k, _v) for _k, _v in _mc_f.items()], cor="#c0392b")}
+                                        <div class="graf-leg">Cada barra é um município; o número é a quantidade de participantes com deslocamento acima de 20 km.</div></div></section>"""
+                                except Exception:
+                                    pass
                         if _salac is not None:
                             _gc2 = [c for c in [_locc, _salac] if c is not None]
                             _oc2 = _base.groupby(_gc2).size().reset_index(name="Participantes")
@@ -11234,6 +11500,116 @@ def _run_streamlit_app() -> None:
                             &nbsp;|&nbsp; <b>Salas &gt; 40:</b> {int((_oc2['Participantes'] > 40).sum())} (referência ~40/sala)</p>
                             <p class="nota">Top 50 salas mais ocupadas.</p>
                             <table><thead><tr>{_oc_head}</tr></thead><tbody>{_oc_rows}</tbody></table></section>""".replace("{len(_oc2):,}", f"{len(_oc2):,}".replace(",", "."))
+
+                        # v68: novas análises deriváveis só do N02 (atendimento, distância/município, concentração/local)
+                        try:
+                            # (a) Atendimento especializado — IN_ATENDIMENTO_ESPECIFICO
+                            _atc = next((c for c in _base.columns if str(c).upper() == "IN_ATENDIMENTO_ESPECIFICO"), None)
+                            if _atc is not None:
+                                _av = _pdc.to_numeric(_base[_atc], errors="coerce")
+                                _com = int((_av == 1).sum())
+                                _sem = int((_av == 0).sum())
+                                if (_com + _sem) > 0:
+                                    _pct_at = _com / (_com + _sem) * 100
+                                    _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">♿ Atendimento especializado</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> participantes que solicitaram atendimento
+                                    especializado (campo IN_ATENDIMENTO_ESPECIFICO do N02). O ideal é cruzar com o N91 para verificar
+                                    se o atendimento foi efetivamente registrado — o que requer aquele layout.</div>
+                                    <div class="grafico"><div class="graf-titulo">Participantes com x sem atendimento especializado</div>
+                                    {_svg_hbar([("Com atendimento", _com), ("Sem atendimento", _sem)], cor="#8e44ad")}
+                                    <div class="graf-leg">1 = solicitou atendimento especializado; 0 = não solicitou. {_com:,} de {_com + _sem:,} ({_pct_at:.1f}%) solicitaram.</div></div></section>""".replace("{_com:,}", f"{_com:,}".replace(",", ".")).replace("{_com + _sem:,}", f"{_com + _sem:,}".replace(",", "."))
+
+                            # (b) Distância média por município (top 12) — onde os alunos se deslocam mais em média
+                            _munc_d = next((c for c in _base.columns if str(c).upper() in ("NO_MUNICIPIO_PROVA", "NO_MUNICIPIO")), None)
+                            if _munc_d is not None and _dist is not None:
+                                _dmm = (_base.assign(_d=_dist).groupby(_munc_d)["_d"].mean()
+                                        .sort_values(ascending=False).head(12))
+                                _dmm = _dmm[_dmm > 0]
+                                if len(_dmm):
+                                    _extra += f"""<section><h2 style="border-left:5px solid #16a085">📍 Distância média por município</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> municípios de prova ordenados pela <b>distância média</b>
+                                    percorrida pelos participantes. Médias altas indicam municípios onde a alocação exige deslocamentos maiores
+                                    (complementa o ranking de casos críticos, que conta apenas os &gt; 20 km).</div>
+                                    <div class="grafico"><div class="graf-titulo">Top {len(_dmm)} municípios por distância média (km)</div>
+                                    {_svg_hbar([(_k, round(_v, 1)) for _k, _v in _dmm.items()], cor="#16a085", unidade=" km")}
+                                    <div class="graf-leg">Cada barra é a média de NU_DISTANCIA (km) dos participantes daquele município.</div></div></section>"""
+
+                            # (c) Concentração por local — locais com mais participantes
+                            _locn = next((c for c in _base.columns if str(c).upper() in ("NO_LOCAL_PROVA", "NO_LOCAL")), None)
+                            _locc2 = next((c for c in _base.columns if str(c).upper() == "CO_LOCAL"), None)
+                            _locref = _locn or _locc2
+                            if _locref is not None:
+                                _lc = _base[_locref].astype(str).map(lambda x: _limpa_nome(x) if isinstance(x, str) else x).value_counts().head(12)
+                                if len(_lc):
+                                    _extra += f"""<section><h2 style="border-left:5px solid #2e86c1">🏫 Concentração por local de prova</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> locais de prova com maior número de participantes.
+                                    Grandes concentrações exigem mais fiscais, salas e logística; ajudam a priorizar a verificação de capacidade.</div>
+                                    <div class="grafico"><div class="graf-titulo">Top {len(_lc)} locais por nº de participantes</div>
+                                    {_svg_hbar([(_k, _v) for _k, _v in _lc.items()], cor="#2e86c1")}
+                                    <div class="graf-leg">Cada barra é um local de prova; o número é a quantidade de participantes alocados.</div></div></section>"""
+                        except Exception:
+                            pass
+
+                        # v74: Qualidade e consistência dos dados — checagens de auditoria (só N02)
+                        try:
+                            _qc = []  # (verificação, resultado, severidade)  sev ∈ crit/aten/ok
+                            _colu = {str(c).upper(): c for c in _base.columns}
+
+                            def _cn(name):
+                                return _colu.get(name)
+                            _cinsc = _cn("CO_INSCRICAO")
+                            if _cinsc is not None:
+                                _dupn = int(_base[_cinsc].duplicated().sum())
+                                _qc.append(("Inscrições duplicadas (mesmo CO_INSCRICAO)", f"{_dupn:,}".replace(",", "."),
+                                            "crit" if _dupn > 0 else "ok"))
+                            _csala = _cn("ID_SALA")
+                            if _csala is not None:
+                                _nsala = int(_base[_csala].isna().sum())
+                                _pn = f" ({_nsala / _N * 100:.1f}%)" if _N else ""
+                                _qc.append(("Participantes sem ensalamento (ID_SALA vazio)", f"{_nsala:,}".replace(",", ".") + _pn,
+                                            "crit" if _nsala > 0 else "ok"))
+                            _cloc = _cn("CO_LOCAL")
+                            if _cloc is not None:
+                                _nloc = int(_base[_cloc].isna().sum())
+                                _qc.append(("Registros sem local de prova (CO_LOCAL vazio)", f"{_nloc:,}".replace(",", "."),
+                                            "aten" if _nloc > 0 else "ok"))
+                            if _cloc is not None and _csala is not None:
+                                _incons = int((_base[_csala].notna() & _base[_cloc].isna()).sum())
+                                _qc.append(("Ensalamento inconsistente (tem sala, sem local)", f"{_incons:,}".replace(",", "."),
+                                            "crit" if _incons > 0 else "ok"))
+                            if _dist is not None:
+                                _dneg = int((_dist < 0).sum())
+                                _dnan = int(_dist.isna().sum())
+                                _qc.append(("Distâncias negativas", f"{_dneg:,}".replace(",", "."), "crit" if _dneg > 0 else "ok"))
+                                _qc.append(("Distâncias ausentes (NU_DISTANCIA vazio)", f"{_dnan:,}".replace(",", "."),
+                                            "aten" if _dnan > 0 else "ok"))
+                            _ckit = _cn("ID_KIT_PROVA")
+                            if _ckit is not None:
+                                _kv = int(_base[_ckit].isna().sum())
+                                _pk = f" ({_kv / _N * 100:.1f}%)" if _N else ""
+                                _qc.append(("Kit de prova não preenchido (ID_KIT_PROVA vazio)", f"{_kv:,}".replace(",", ".") + _pk,
+                                            "aten" if _kv > 0 else "ok"))
+                            if _cloc is not None and _csala is not None:
+                                _occ = _base.groupby([_cloc, _csala]).size()
+                                _unit = int((_occ == 1).sum())
+                                _qc.append(("Salas com um único participante (verificar)", f"{_unit:,}".replace(",", "."),
+                                            "aten" if _unit > 0 else "ok"))
+                            if _qc:
+                                _sev_ic = {"crit": "🔴", "aten": "🟠", "ok": "🟢"}
+                                _n_prob = sum(1 for _, _, _s in _qc if _s != "ok")
+                                _qc_rows = "".join(
+                                    f"<tr class=\"{('row-crit' if _s == 'crit' else ('row-aten' if _s == 'aten' else ''))}\">"
+                                    f"<td>{_sev_ic[_s]} {_esc_h(_v)}</td><td style='text-align:right;font-weight:600'>{_r}</td></tr>"
+                                    for _v, _r, _s in _qc)
+                                _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🔍 Qualidade e consistência dos dados</h2>
+                                <div class="interp"><b>📖 O que é isto:</b> checagens automáticas de consistência sobre o N02 —
+                                sinalizam anomalias que merecem verificação antes de considerar a base pronta. 🔴 crítico,
+                                🟠 atenção, 🟢 sem problema. São diagnósticos objetivos, não julgamentos.</div>
+                                <p class="meta"><b>Verificações com apontamento:</b> {_n_prob} de {len(_qc)}.</p>
+                                <table><thead><tr><th>Verificação</th><th>Registros</th></tr></thead>
+                                <tbody>{_qc_rows}</tbody></table></section>"""
+                        except Exception:
+                            pass
 
                         # v36: explorador hierárquico no HTML — árvore navegável (details)
                         try:
@@ -11335,6 +11711,50 @@ def _run_streamlit_app() -> None:
                         except Exception:
                             pass
 
+                        # v70: MATRIZ DE COBERTURA ANALÍTICA (motor de capacidades dirigido por catálogo)
+                        _caps = _avaliar_capacidades(_base)
+                        _n_disp = sum(1 for _c in _caps if _c[3] == "DISPONIVEL")
+                        _n_parc = sum(1 for _c in _caps if _c[3] == "PARCIAL")
+                        _n_ind = sum(1 for _c in _caps if _c[3] == "INDISPONIVEL")
+                        # v72: badges de layouts detectados + frase de cobertura
+                        _lays = _detectar_layouts(_base)
+                        _n_lay = sum(1 for _v in _lays.values() if _v)
+                        _lay_badges = " ".join(
+                            (f'<span style="display:inline-block;background:#e6f4ea;color:#1e6b34;border:1px solid #b7dfc3;'
+                             f'border-radius:6px;padding:3px 10px;margin:2px;font-weight:700;font-size:13px">✅ {_lk}</span>'
+                             if _lv else
+                             f'<span style="display:inline-block;background:#f4f6f8;color:#8a94a3;border:1px solid #e3e8ef;'
+                             f'border-radius:6px;padding:3px 10px;margin:2px;font-size:13px">❌ {_lk}</span>')
+                            for _lk, _lv in _lays.items())
+                        _badge_map = {"DISPONIVEL": '<span style="color:#1e6b34;font-weight:700">✅ Disponível</span>',
+                                      "PARCIAL": '<span style="color:#a35a12;font-weight:700">⚠️ Parcial</span>',
+                                      "INDISPONIVEL": '<span style="color:#8a94a3;font-weight:700">❌ Indisponível</span>'}
+                        _cap_rows = ""
+                        for _nm, _gr, _cols, _st, _mot in sorted(_caps, key=lambda x: (x[1], x[3])):
+                            _cap_rows += (f"<tr><td>{_esc_h(_nm)}</td><td>{_esc_h(_gr)}</td>"
+                                          f"<td style='font-size:11px'>{_esc_h(', '.join(_cols))}</td>"
+                                          f"<td>{_badge_map.get(_st, _st)}</td><td style='font-size:12px'>{_esc_h(_mot)}</td></tr>")
+                        _n_casos = len(_blocos)
+                        _audit_sec = f"""<section><h2 style="border-left:5px solid #7f8c8d">🧭 Mapa de cobertura analítica</h2>
+                        <div class="interp"><b>📖 O que é isto:</b> a aplicação avalia automaticamente, a partir das
+                        <b>colunas realmente presentes e preenchidas</b>, quais análises são possíveis. Cada análise declara
+                        as colunas de que precisa; o motor determina se está <b>disponível</b>, <b>parcial</b> (coluna vazia)
+                        ou <b>indisponível</b> (layout/coluna ausente) — sem inventar nada e sem depender de combinações fixas.</div>
+                        <p class="meta"><b>Layouts detectados:</b><br>{_lay_badges}</p>
+                        <p class="meta" style="font-size:15px"><b>📊 Você carregou {_n_lay} layout(s) e habilitou {_n_disp} análises.</b>
+                        {_n_ind} análises dependem de layouts que não foram carregados.</p>
+                        <div class="kpi-grid">
+                          <div class="kpi-box" style="border-left:5px solid #27ae60"><div class="kpi-lbl">✅ ANÁLISES DISPONÍVEIS</div><div class="kpi-val">{_n_disp}</div></div>
+                          <div class="kpi-box" style="border-left:5px solid #e67e22"><div class="kpi-lbl">⚠️ PARCIAIS (coluna vazia)</div><div class="kpi-val">{_n_parc}</div></div>
+                          <div class="kpi-box" style="border-left:5px solid #8a94a3"><div class="kpi-lbl">❌ DEPENDEM DE LAYOUT AUSENTE</div><div class="kpi-val">{_n_ind}</div></div>
+                          <div class="kpi-box" style="border-left:5px solid #1f4e79"><div class="kpi-lbl">🔴 CASOS COM REGISTROS</div><div class="kpi-val">{_n_casos}</div></div>
+                        </div>
+                        <p class="meta">Você tem dados para <b>{_n_disp}</b> análises; <b>{_n_ind}</b> dependem de layouts que não foram
+                        carregados (ex.: N50/N52 capacidade, N90 inscritos, N91 kits/atendimento).</p>
+                        <details class="casos-det" open><summary>Ver matriz de capacidades analíticas ({len(_caps)} análises avaliadas)</summary>
+                        <table><thead><tr><th>Análise</th><th>Grupo</th><th>Colunas necessárias</th><th>Status</th><th>Motivo</th></tr></thead>
+                        <tbody>{_cap_rows}</tbody></table></details></section>"""
+
                         _html_full = f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
                         <meta name="viewport" content="width=device-width, initial-scale=1">
                         <title>Central de Casos — Auditoria PND</title><style>
@@ -11351,6 +11771,38 @@ def _run_streamlit_app() -> None:
                                    padding:18px 20px; margin:22px 0; box-shadow:0 1px 3px rgba(16,42,67,.05); }}
                         .cab {{ background:linear-gradient(135deg,#eef4fb,#f7fafe); border:1px solid #d5e3f2;
                                 border-radius:14px; padding:18px 22px; margin-bottom:6px; font-size:14px; }}
+                        .hero {{ background:linear-gradient(135deg,#1f4e79 0%,#2e86c1 100%); color:#fff; border-radius:16px;
+                                 padding:26px 28px; margin:8px 0 20px; box-shadow:0 4px 16px rgba(16,42,67,.15); }}
+                        .hero-title {{ font-size:clamp(1.3rem,3vw,1.8rem); font-weight:800; margin-bottom:4px; }}
+                        .hero-sub {{ opacity:.9; font-size:14px; margin-bottom:18px; }}
+                        .hero-selo {{ display:inline-block; border-radius:20px; padding:3px 12px; font-size:12px; font-weight:700;
+                                      margin-left:6px; vertical-align:middle; }}
+                        #casos-backtop {{ position:fixed; bottom:24px; right:24px; width:46px; height:46px; border-radius:50%;
+                                          background:#1f4e79; color:#fff; border:none; font-size:20px; cursor:pointer; opacity:0;
+                                          pointer-events:none; transition:opacity .25s, transform .15s; box-shadow:0 4px 12px rgba(0,0,0,.25);
+                                          z-index:999; }}
+                        #casos-backtop.show {{ opacity:.92; pointer-events:auto; }}
+                        #casos-backtop:hover {{ transform:translateY(-3px); opacity:1; }}
+                        @media print {{ #casos-backtop {{ display:none; }} }}
+                        .selo-ok {{ background:rgba(39,174,96,.22); color:#eafff0; border:1px solid rgba(255,255,255,.4); }}
+                        .selo-aten {{ background:rgba(230,126,34,.28); color:#fff2e6; border:1px solid rgba(255,255,255,.4); }}
+                        .selo-crit {{ background:rgba(192,57,43,.32); color:#ffeae7; border:1px solid rgba(255,255,255,.45); }}
+                        .hero-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(128px,1fr)); gap:14px; }}
+                        .hero-stat {{ background:rgba(255,255,255,.96); border-radius:12px; padding:14px 12px; text-align:center; }}
+                        .hs-ic {{ font-size:20px; margin-bottom:2px; }}
+                        .hs-val {{ font-size:clamp(1.3rem,3vw,1.7rem); font-weight:800; line-height:1.1; }}
+                        .hs-lbl {{ font-size:11px; color:#5b6b7f; font-weight:700; margin-top:4px; text-transform:uppercase;
+                                   letter-spacing:.3px; }}
+                        @media print {{ .hero {{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }} }}
+                        .hero-link {{ text-decoration:none; cursor:pointer; transition:transform .15s, box-shadow .15s;
+                                      display:block; }}
+                        .hero-link:hover {{ transform:translateY(-3px); box-shadow:0 6px 16px rgba(0,0,0,.22); }}
+                        .hs-go {{ font-size:10px; color:#2e86c1; font-weight:700; margin-top:4px; text-transform:uppercase;
+                                  letter-spacing:.4px; }}
+                        @keyframes fadeInUp {{ from {{ opacity:0; transform:translateY(8px); }} to {{ opacity:1; transform:none; }} }}
+                        .hero-stat, .kpi-box {{ animation:fadeInUp .45s ease both; }}
+                        @media (prefers-reduced-motion:reduce) {{ .hero-stat, .kpi-box {{ animation:none; }} }}
+                        @media print {{ .hero-stat, .kpi-box {{ animation:none; }} .hs-go {{ display:none; }} }}
                         .kpi-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(205px,1fr));
                                      gap:14px; margin:18px 0; }}
                         .tbl-wrap {{ overflow-x:auto; -webkit-overflow-scrolling:touch; border:1px solid var(--bd);
@@ -11367,6 +11819,11 @@ def _run_streamlit_app() -> None:
                         .interp {{ background:#f3f8ff; border:1px solid #d5e6fb; border-left:4px solid #4a90d9;
                                    border-radius:8px; padding:10px 14px; margin:10px 0; font-size:13.5px; line-height:1.55;
                                    color:#31465c; }}
+                        .grafico {{ background:#fff; border:1px solid #e3e8ef; border-radius:12px; padding:16px 18px;
+                                    margin:14px 0; box-shadow:0 1px 3px rgba(16,42,67,.05); }}
+                        .graf-titulo {{ font-weight:800; color:var(--pri); font-size:15px; margin-bottom:12px;
+                                        padding-bottom:8px; border-bottom:2px solid #eef2f7; }}
+                        .graf-leg {{ font-size:12px; color:var(--muted); margin-top:10px; font-style:italic; }}
                         details {{ margin:6px 0; }} summary {{ cursor:pointer; padding:5px 0; }}
                         .toc {{ position:sticky; top:0; z-index:20; background:rgba(255,255,255,.96);
                                 backdrop-filter:blur(6px); border:1px solid var(--bd); border-radius:12px;
@@ -11463,8 +11920,9 @@ def _run_streamlit_app() -> None:
                             th {{ position:static; }} .tbl-wrap {{ overflow:visible; }} table {{ min-width:0; }} .toc {{ display:none; }}
                             h1,h2 {{ break-after:avoid; }}
                         }}
-                        </style></head><body><div class="wrap">
+                        </style></head><body><div class="wrap"><a id="topo-casos"></a>
                         <div class="print-header">Central de Casos — Auditoria PND · {_N:,} participantes · {_dt.now().strftime('%d/%m/%Y')}</div>
+                        {_hero}
                         <h1>🚨 Central de Casos — Auditoria de Layouts PND</h1>
                         <div class="cab"><b>Universo analisado:</b> {_N:,} participantes &nbsp;|&nbsp;
                         <b>Gerado em:</b> {_dt.now().strftime('%d/%m/%Y %H:%M')} &nbsp;|&nbsp;
@@ -11479,6 +11937,7 @@ def _run_streamlit_app() -> None:
                         <th>Quantidade</th><th>%</th></tr></thead><tbody>{_resumo_rows}</tbody></table></section>
                         {_extra}
                         {''.join(_blocos)}
+                        {_audit_sec}
                         {_footer}
                         <script>
                         function filterCase(inp){{
@@ -11674,8 +12133,44 @@ def _run_streamlit_app() -> None:
                             if(tr.style.display!=='none') tr.classList.add('pg-show');
                           }});
                         }});
+                        // v79: botão flutuante "voltar ao topo"
+                        (function(){{
+                          var _bt=document.getElementById('casos-backtop');
+                          if(_bt){{
+                            window.addEventListener('scroll', function(){{
+                              if(window.scrollY>420) _bt.classList.add('show'); else _bt.classList.remove('show');
+                            }});
+                            _bt.addEventListener('click', function(){{ window.scrollTo({{top:0, behavior:'smooth'}}); }});
+                          }}
+                        }})();
                         </script>
+                        <button id="casos-backtop" title="Voltar ao topo" aria-label="Voltar ao topo">⬆</button>
                         </div></body></html>""".replace("{_N:,}", f"{_N:,}".replace(",", "."))
+                        # v73: seleção de análises — remove APENAS as seções selecionáveis não escolhidas.
+                        # Núcleo obrigatório (resumo executivo, KPIs, resumo consolidado, cobertura, casos, rodapé)
+                        # não tem marcador de grupo, então NUNCA é removido. Com "todos" selecionado, nada muda.
+                        try:
+                            import re as _refs
+                            _GRUPO_POR_KW = {
+                                "Faixas de distância": "Distância", "deslocamentos críticos</h2>": "Distância",
+                                "Distância média por município": "Distância",
+                                "Ocupação por sala": "Capacidade", "Concentração por local": "Capacidade",
+                                "Atendimento especializado": "Atendimento",
+                                "FGV × INEP": "Comparação", "Comparação de metodologias": "Comparação",
+                            }
+                            _sel_g = st.session_state.get("analises_sel", None)
+                            if _sel_g is not None:
+                                _sel_set = set(_sel_g)
+
+                                def _drop_sec(_mm):
+                                    _sec = _mm.group(0)
+                                    for _kw, _gr in _GRUPO_POR_KW.items():
+                                        if _kw in _sec and _gr not in _sel_set:
+                                            return ""
+                                    return _sec
+                                _html_full = _refs.sub(r"<section.*?</section>", _drop_sec, _html_full, flags=_refs.S)
+                        except Exception:
+                            pass
                         # Responsividade das tabelas: envolve cada <table> num contêiner com scroll horizontal
                         _html_full = _html_full.replace("<table", '<div class="tbl-wrap"><table').replace("</table>", "</table></div>")
                         # v41: sumário/menu com âncoras — atribui id a cada <section> e monta o índice navegável
@@ -11696,6 +12191,27 @@ def _run_streamlit_app() -> None:
                                     + "</nav>")
                             _html_full = _html_full.replace('<div class="kpi-grid">', _nav + '<div class="kpi-grid">', 1)
                         return _html_full
+
+                    # v73: seleção de análises (camada 2) — núcleo obrigatório sempre presente
+                    _GRUPOS_SELECIONAVEIS = ["Distância", "Capacidade", "Atendimento", "Comparação"]
+                    with st.expander("📊 Seleção de análises para o relatório (opcional)", expanded=False):
+                        st.caption("O relatório sempre inclui o **núcleo obrigatório** (resumo executivo, KPIs, achados "
+                                   "críticos e de atenção, mapa de cobertura, casos com registros e metodologia). Abaixo você "
+                                   "escolhe quais **análises complementares** entram — por padrão, todas. Isto é uma camada de "
+                                   "apresentação: nenhuma capacidade da aplicação é removida, apenas o que é exibido nesta geração.")
+                        _sel_default = st.session_state.get("analises_sel", _GRUPOS_SELECIONAVEIS)
+                        _sel_todas = st.checkbox("☑ Todas as análises (recomendado)",
+                                                 value=(set(_sel_default) == set(_GRUPOS_SELECIONAVEIS)), key="analises_todas")
+                        if _sel_todas:
+                            st.session_state["analises_sel"] = list(_GRUPOS_SELECIONAVEIS)
+                            st.caption("Todas as análises complementares serão incluídas.")
+                        else:
+                            _sel = st.multiselect("Análises complementares a incluir:", _GRUPOS_SELECIONAVEIS,
+                                                  default=_sel_default, key="analises_multi")
+                            st.session_state["analises_sel"] = _sel
+                            _fora = [g for g in _GRUPOS_SELECIONAVEIS if g not in _sel]
+                            if _fora:
+                                st.info(f"Não serão exibidas (mas a capacidade permanece): {', '.join(_fora)}.")
 
                     st.download_button(
                         "⬇️ Baixar Central de Casos em HTML (relatório exportável)",
@@ -11858,6 +12374,32 @@ def _run_streamlit_app() -> None:
                                 .case-mun{font-size:13px;color:#42546b;margin:4px 0 2px}
                                 .interp{background:#f3f8ff;border:1px solid #d5e6fb;border-left:4px solid #4a90d9;
                                         border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13.5px;line-height:1.55;color:#31465c}
+                                .grafico{background:#fff;border:1px solid #e3e8ef;border-radius:12px;padding:16px 18px;
+                                         margin:14px 0;box-shadow:0 1px 3px rgba(16,42,67,.05)}
+                                .graf-titulo{font-weight:800;color:#1f4e79;font-size:15px;margin-bottom:12px;
+                                             padding-bottom:8px;border-bottom:2px solid #eef2f7}
+                                .graf-leg{font-size:12px;color:#8a94a3;margin-top:10px;font-style:italic}
+                                .hero{background:linear-gradient(135deg,#1f4e79 0%,#2e86c1 100%);color:#fff;border-radius:16px;
+                                      padding:26px 28px;margin:8px 0 20px;box-shadow:0 4px 16px rgba(16,42,67,.15)}
+                                .hero-title{font-size:clamp(1.3rem,3vw,1.8rem);font-weight:800;margin-bottom:4px}
+                                .hero-sub{opacity:.9;font-size:14px;margin-bottom:18px}
+                                .hero-selo{display:inline-block;border-radius:20px;padding:3px 12px;font-size:12px;font-weight:700;margin-left:6px;vertical-align:middle}
+                                .selo-ok{background:rgba(39,174,96,.22);color:#eafff0;border:1px solid rgba(255,255,255,.4)}
+                                .selo-aten{background:rgba(230,126,34,.28);color:#fff2e6;border:1px solid rgba(255,255,255,.4)}
+                                .selo-crit{background:rgba(192,57,43,.32);color:#ffeae7;border:1px solid rgba(255,255,255,.45)}
+                                .hero-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:14px}
+                                .hero-stat{background:rgba(255,255,255,.96);border-radius:12px;padding:14px 12px;text-align:center}
+                                .hs-ic{font-size:20px;margin-bottom:2px}
+                                .hs-val{font-size:clamp(1.3rem,3vw,1.7rem);font-weight:800;line-height:1.1}
+                                .hs-lbl{font-size:11px;color:#5b6b7f;font-weight:700;margin-top:4px;text-transform:uppercase;letter-spacing:.3px}
+                                @media print{.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+                                .hero-link{text-decoration:none;cursor:pointer;transition:transform .15s,box-shadow .15s;display:block}
+                                .hero-link:hover{transform:translateY(-3px);box-shadow:0 6px 16px rgba(0,0,0,.22)}
+                                .hs-go{font-size:10px;color:#2e86c1;font-weight:700;margin-top:4px;text-transform:uppercase;letter-spacing:.4px}
+                                @keyframes fadeInUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+                                .hero-stat,.kpi-box{animation:fadeInUp .45s ease both}
+                                @media (prefers-reduced-motion:reduce){.hero-stat,.kpi-box{animation:none}}
+                                @media print{.hero-stat,.kpi-box{animation:none}.hs-go{display:none}}
                                 .gfilter{background:#f0f6fc;border:1px solid #d5e3f2;border-radius:12px;padding:12px 16px;
                                          margin:14px 0;display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center}
                                 .gfilter .gf-t{font-weight:800;color:#1f4e79;margin-right:6px}
@@ -11880,6 +12422,70 @@ def _run_streamlit_app() -> None:
                                              border-left:5px solid #1f4e79;border-radius:12px;padding:14px 18px;margin:14px 0}
                                 .resumo-exec .re-t{font-weight:800;color:#1f4e79;margin-bottom:4px}
                                 .resumo-exec p{margin:0;font-size:14px;line-height:1.6;color:#2a3a4d}
+                                /* v64: HIERARQUIA E SEPARAÇÃO IMPECÁVEIS (gráficos, títulos, instruções) */
+                                .card{padding:22px 24px!important;margin:0 0 26px 0!important;border:1px solid #e3e8ef!important;
+                                      border-radius:14px!important;box-shadow:0 1px 4px rgba(16,42,67,.06)!important;
+                                      background:#fff!important;overflow:visible!important}
+                                /* Título do gráfico: NEGRITO, tamanho claro, delimitado por baixo */
+                                .card-title{font-weight:800!important;font-size:clamp(1.05rem,2.2vw,1.35rem)!important;
+                                      color:#1f4e79!important;margin:0 0 2px 0!important;padding:0 0 10px 0!important;
+                                      border-bottom:2px solid #eef2f7!important;line-height:1.35!important;display:block!important;
+                                      letter-spacing:-.2px!important}
+                                /* Título interno do Plotly também em negrito */
+                                .chart-container text.gtitle,.js-plotly-plot text.gtitle,.gtitle{font-weight:700!important}
+                                /* Instrução: caixa distinta, claramente separada do título e do gráfico */
+                                .aula-box{background:#f3f8ff!important;border:1px solid #d5e6fb!important;
+                                      border-left:4px solid #4a90d9!important;border-radius:10px!important;
+                                      padding:12px 16px!important;margin:16px 0 22px 0!important;font-size:14px!important;
+                                      line-height:1.62!important;color:#31465c!important}
+                                /* Gráfico: respiro amplo acima e abaixo */
+                                .chart-container{margin:22px 0 10px 0!important;padding:12px!important;min-height:220px}
+                                /* Ritmo vertical explícito entre título → instrução → gráfico */
+                                .card-title + .aula-box{margin-top:16px!important}
+                                .card-title + .chart-container{margin-top:20px!important}
+                                .aula-box + .chart-container,.aula-box + .chart-grid{margin-top:10px!important}
+                                .chart-container + .aula-box{margin-top:26px!important}
+                                .chart-grid{gap:30px!important;margin:20px 0!important}
+                                .section-header{font-weight:800!important;margin:30px 0 16px 0!important;
+                                      padding-bottom:10px!important;border-bottom:2px solid #e3e8ef!important}
+                                /* Alinhamento: KPIs e conteúdo alinhados à esquerda, números destacados */
+                                .kpi-box{padding:18px!important;text-align:left!important}
+                                .kpi-val{font-weight:800!important;line-height:1.1!important}
+                                @media (max-width:768px){
+                                  .card{padding:16px 16px!important;margin-bottom:18px!important}
+                                  .aula-box{margin:12px 0 16px 0!important}
+                                  .chart-container{margin:16px 0 8px 0!important}
+                                  .chart-grid{gap:22px!important}
+                                }
+                                /* v65: legibilidade > compactação — 1 gráfico por linha por padrão */
+                                .chart-grid{grid-template-columns:1fr!important}
+                                @media (min-width:1400px){
+                                  /* só em telas largas dois gráficos podem dividir a linha, e apenas se couberem confortáveis */
+                                  .chart-grid{grid-template-columns:repeat(auto-fit,minmax(560px,1fr))!important}
+                                }
+                                /* separação MUITO clara entre grandes blocos/seções */
+                                .section-header{margin-top:44px!important;margin-bottom:18px!important;
+                                      padding:10px 0 12px 0!important;border-bottom:3px solid #1f4e79!important;
+                                      font-size:clamp(1.15rem,2.6vw,1.6rem)!important}
+                                .section-header:first-of-type{margin-top:16px!important}
+                                /* espaço confortável entre cards consecutivos e ao redor de tabelas */
+                                .card + .card{margin-top:8px!important}
+                                .table-wrapper-div,.tbl-wrap{margin:16px 0!important}
+                                table th{font-weight:700!important;background:#1f4e79!important;color:#fff!important;
+                                      padding:9px 12px!important}
+                                table td{padding:8px 12px!important}
+                                /* badges/alertas de severidade consistentes */
+                                .badge,.tag{border-radius:6px!important;padding:3px 9px!important;font-weight:600!important;
+                                      font-size:12px!important}
+                                /* foco visível para navegação por teclado (acessibilidade) */
+                                a:focus,button:focus,summary:focus,input:focus,select:focus{
+                                      outline:2px solid #2e86c1!important;outline-offset:2px!important}
+                                .chart-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+                                      text-align:center;min-height:200px;background:#fafbfd;border:2px dashed #d5dee8;
+                                      border-radius:10px;padding:24px;color:#5b6b7f}
+                                .chart-empty .ce-icon{font-size:34px;opacity:.5;margin-bottom:8px}
+                                .chart-empty .ce-title{font-weight:800;color:#1f4e79;font-size:15px;margin-bottom:6px}
+                                .chart-empty .ce-msg{font-size:13px;line-height:1.55;max-width:460px}
                                 @media print{.print-header{display:block;position:fixed;top:0;left:0;right:0;font-size:10px;
                                              color:#555;border-bottom:1px solid #ccc;padding:3px 0 4px;text-align:center;background:#fff}}
                                 @media print{.sec-toggle{display:none}}
@@ -11892,6 +12498,19 @@ def _run_streamlit_app() -> None:
                                 .unif-capa{background:linear-gradient(135deg,#1f4e79,#2e86c1);color:#fff;border-radius:14px;
                                            padding:22px 26px;margin-bottom:14px;box-shadow:0 2px 10px rgba(16,42,67,.12)}
                                 .unif-capa h1{color:#fff!important;margin:0 0 6px;font-size:24px}
+                                .unif-capa .uc-badge{display:inline-block;background:rgba(255,255,255,.18);color:#fff;
+                                     font-size:11px;font-weight:800;letter-spacing:1px;padding:4px 12px;border-radius:20px;
+                                     margin-bottom:10px;border:1px solid rgba(255,255,255,.3)}
+                                .exec-dash{max-width:1240px;margin:0 auto 14px;display:grid;
+                                     grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+                                .exec-tile{background:#fff;border:1px solid #e3e8ef;border-radius:12px;padding:14px 16px;
+                                     box-shadow:0 1px 4px rgba(16,42,67,.07);transition:transform .15s,box-shadow .15s}
+                                .exec-tile:hover{transform:translateY(-2px);box-shadow:0 4px 14px rgba(16,42,67,.12)}
+                                .exec-tile .et-val{font-size:26px;font-weight:800;color:#1f4e79;line-height:1.1}
+                                .exec-tile .et-lbl{font-size:12px;font-weight:700;color:#42546b;text-transform:uppercase;
+                                     letter-spacing:.3px;margin-top:4px}
+                                .exec-tile .et-sub{font-size:11px;color:#8a94a3;margin-top:3px}
+                                @media(max-width:480px){.exec-dash{grid-template-columns:1fr 1fr}.exec-tile .et-val{font-size:22px}}
                                 .unif-capa p{margin:0;opacity:.93;font-size:14px}
                                 .unif-nav{position:sticky;top:0;z-index:99999;background:rgba(255,255,255,.97);
                                           -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);border:1px solid #e3e8ef;
@@ -11923,16 +12542,46 @@ def _run_streamlit_app() -> None:
                                 else:
                                     _dash_html = _head_inject + _dash_html
 
-                                # Capa + sumário/menu com âncoras para o documento inteiro
+                                # Painel Executivo + sumário/menu com âncoras para o documento inteiro
+                                _colu2 = {str(_c).upper(): _c for _c in _base.columns}
+                                _ens_u = int(_base[_colu2["ID_SALA"]].notna().sum()) if "ID_SALA" in _colu2 else _N
+                                _nens_u = _N - _ens_u
+                                _gcu = [_colu2[_c] for _c in ("CO_LOCAL", "ID_SALA") if _c in _colu2]
+                                _salas_u = int(_base.groupby(_gcu).ngroups) if len(_gcu) == 2 else 0
+                                _media_u = (_N / _salas_u) if _salas_u else 0
+                                _crit_u = sum(len(_d) for _sv, _a, _r, _e, _d in _casos if "Crítico" in _sv and _e == "Participante")
+                                _aten_u = sum(len(_d) for _sv, _a, _r, _e, _d in _casos if "Atenção" in _sv and _e == "Participante")
+                                _lays_u = _detectar_layouts(_base)
+                                _nlay_u = sum(1 for _v in _lays_u.values() if _v)
+                                _fm = lambda _x: f"{int(_x):,}".replace(",", ".")
+
+                                def _tile(_lbl, _val, _cor, _sub=""):
+                                    return (f'<div class="exec-tile" style="border-top:4px solid {_cor}">'
+                                            f'<div class="et-val">{_val}</div><div class="et-lbl">{_lbl}</div>'
+                                            f'<div class="et-sub">{_sub}</div></div>')
+                                _tiles = (
+                                    _tile("Participantes", _fm(_N), "#2e86c1", "universo analisado")
+                                    + _tile("Ensalados", _fm(_ens_u), "#27ae60", (f"{_ens_u / _N * 100:.0f}% do total" if _N else ""))
+                                    + _tile("Não ensalados", _fm(_nens_u), ("#c0392b" if _nens_u else "#27ae60"), "sem ID_SALA")
+                                    + _tile("Salas", _fm(_salas_u), "#8e44ad", "locais × salas distintos")
+                                    + _tile("Média por sala", f"{_media_u:.1f}".replace(".", ","), "#16a085", "participantes/sala")
+                                    + _tile("Casos críticos", _fm(_crit_u), ("#c0392b" if _crit_u else "#27ae60"), "🔴 &gt; limite/regra")
+                                    + _tile("Casos de atenção", _fm(_aten_u), ("#e67e22" if _aten_u else "#27ae60"), "🟠 verificar")
+                                    + _tile("Layouts carregados", str(_nlay_u), "#1f4e79", "de 6 possíveis")
+                                )
                                 _capa_nav = f"""
                                 <div class="unif-top">
-                                <div class="unif-capa"><h1>🚨 Relatório Analítico Integrado — Auditoria de Layouts PND</h1>
-                                <p>Universo: {_N:,} participantes · Gerado em {_dtu.now().strftime('%d/%m/%Y %H:%M')} ·
-                                Motor v{APP_VERSION} · camada v{STREAMLIT_APP_VERSION}</p></div>
-                                <nav class="unif-nav"><span>📑 Sumário</span>
-                                <a href="#topo-dashboard">📊 Dashboard analítico do motor</a>
-                                <a href="#central-casos">🚨 Central de Casos &amp; auditoria de registros</a></nav></div>
-                                <div id="topo-dashboard"></div>""".replace("{_N:,}", f"{_N:,}".replace(",", "."))
+                                <div class="unif-capa">
+                                  <div class="uc-badge">PAINEL DE ANÁLISE E AUDITORIA · PND</div>
+                                  <h1>Relatório Analítico Integrado</h1>
+                                  <p>Gerado em {_dtu.now().strftime('%d/%m/%Y %H:%M')} · Motor v{APP_VERSION} · camada v{STREAMLIT_APP_VERSION}
+                                  · {_nlay_u} layout(s) carregado(s)</p>
+                                </div>
+                                <div class="exec-dash">{_tiles}</div>
+                                <nav class="unif-nav"><span>📑 Ir para</span>
+                                <a href="#topo-dashboard">📊 Dashboard do motor</a>
+                                <a href="#central-casos">🚨 Central de Casos &amp; achados</a></nav></div>
+                                <div id="topo-dashboard"></div>"""
                                 if _reu.search(r"<body[^>]*>", _dash_html):
                                     _dash_html = _reu.sub(r"(<body[^>]*>)", lambda _m: _m.group(1) + _capa_nav,
                                                           _dash_html, count=1)
@@ -12038,10 +12687,33 @@ def _run_streamlit_app() -> None:
                                     var nav=document.querySelector('.unif-nav');
                                     if(nav) nav.insertAdjacentHTML('afterend', h);
                                   }
+                                  function handleEmptyCharts(){
+                                    document.querySelectorAll('.chart-container').forEach(function(c){
+                                      if(c.getAttribute('data-empty-checked')) return;
+                                      var content=c.querySelector('.plotly-graph-div,.js-plotly-plot,svg,canvas,img,table');
+                                      var h=0;
+                                      if(content){ try{ h=content.getBoundingClientRect().height; }catch(e){ h=content.offsetHeight||0; } }
+                                      var ok = content && h>20;
+                                      if(!ok){
+                                        c.setAttribute('data-empty-checked','1');
+                                        var t=(c.id||'').replace(/^chart/,'');
+                                        c.innerHTML='<div class="chart-empty"><div class="ce-icon">📊</div>'
+                                          +'<div class="ce-title">Visualização indisponível</div>'
+                                          +'<div class="ce-msg">Este gráfico depende de um layout que não foi carregado '
+                                          +'(por exemplo N90 · inscritos, ou N91 · kits/atendimento) ou não há dados '
+                                          +'suficientes para exibi-lo. Carregue os layouts necessários para ativá-lo.</div></div>';
+                                      } else {
+                                        c.setAttribute('data-empty-checked','1');
+                                      }
+                                    });
+                                  }
                                   function onReady(){
                                     try{ enhanceTables(); }catch(e){}
                                     try{ buildIndex(); }catch(e){}
                                     setTimeout(resizePlotly, 300);
+                                    // v66: após o Plotly ter tempo de renderizar, converte gráficos vazios em aviso claro
+                                    setTimeout(function(){ try{ handleEmptyCharts(); }catch(e){} }, 1800);
+                                    setTimeout(function(){ try{ handleEmptyCharts(); }catch(e){} }, 4000);
                                     var bt=document.getElementById('unif-backtop');
                                     window.addEventListener('scroll', function(){
                                       if(bt){ if(window.scrollY>400) bt.classList.add('show'); else bt.classList.remove('show'); }
@@ -12272,6 +12944,74 @@ def _run_streamlit_app() -> None:
                 for _col, _card in zip(st.columns(4), _cards[_i0:_i0 + 4]):
                     _col.markdown(_card, unsafe_allow_html=True)
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        # v71: prévia do MAPA DE COBERTURA ANALÍTICA no Streamlit (motor de capacidades v70)
+        if arquivo is not None:
+            try:
+                _bk_cap = _bk if ("_bk" in dir() and _bk is not None) else None
+                if _bk_cap is not None:
+                    _capsv = _avaliar_capacidades(_bk_cap)
+                    _nd = sum(1 for _c in _capsv if _c[3] == "DISPONIVEL")
+                    _npar = sum(1 for _c in _capsv if _c[3] == "PARCIAL")
+                    _nind = sum(1 for _c in _capsv if _c[3] == "INDISPONIVEL")
+                    with st.expander(f"🧭 Mapa de cobertura analítica — {_nd} disponíveis · {_npar} parciais · "
+                                     f"{_nind} dependem de layouts ausentes", expanded=False):
+                        st.caption("A aplicação avalia, a partir das colunas realmente presentes e preenchidas, o que é "
+                                   "possível analisar — sem inventar. As indisponíveis dependem de layouts que você não "
+                                   "carregou (ex.: N50/N52 capacidade, N90 inscritos, N91 kits/atendimento). Carregue-os "
+                                   "para habilitá-las automaticamente.")
+                        _laysv = _detectar_layouts(_bk_cap)
+                        _nlayv = sum(1 for _v in _laysv.values() if _v)
+                        _badges_md = " ".join((f"✅ **{_lk}**" if _lv else f"❌ {_lk}") for _lk, _lv in _laysv.items())
+                        st.markdown(f"**Layouts detectados:** {_badges_md}")
+                        st.info(f"📊 Você carregou **{_nlayv} layout(s)** e habilitou **{_nd} análises**. "
+                                f"**{_nind}** dependem de layouts não carregados.")
+                        _cc1, _cc2, _cc3 = st.columns(3)
+                        _cc1.metric("✅ Disponíveis", _nd)
+                        _cc2.metric("⚠️ Parciais (coluna vazia)", _npar)
+                        _cc3.metric("❌ Dependem de layout ausente", _nind)
+                        _lbl = {"DISPONIVEL": "✅ Disponível", "PARCIAL": "⚠️ Parcial", "INDISPONIVEL": "❌ Indisponível"}
+                        _dfcap = _pd.DataFrame([{"Análise": _n, "Grupo": _g, "Colunas necessárias": ", ".join(_cs),
+                                                 "Status": _lbl.get(_s, _s), "Motivo": _mo}
+                                                for _n, _g, _cs, _s, _mo in _capsv])
+                        st.dataframe(_dfcap, use_container_width=True, height=440, hide_index=True)
+                        st.caption("Esta mesma matriz vai no relatório HTML exportável (seção « Mapa de cobertura analítica »).")
+                    # v75: painel de saúde/qualidade da base no Streamlit
+                    _bk_q = _bk if ("_bk" in dir() and _bk is not None) else None
+                    if _bk_q is not None:
+                        try:
+                            _cu2 = {str(c).upper(): c for c in _bk_q.columns}
+                            _Nq = len(_bk_q)
+                            _dq = _dist_km(_bk_q[_cu2["NU_DISTANCIA"]]) if "NU_DISTANCIA" in _cu2 else None
+                            _checks = []
+                            if "CO_INSCRICAO" in _cu2:
+                                _v = int(_bk_q[_cu2["CO_INSCRICAO"]].duplicated().sum()); _checks.append(("Inscrições duplicadas", _v, _v > 0))
+                            if "ID_SALA" in _cu2:
+                                _v = int(_bk_q[_cu2["ID_SALA"]].isna().sum()); _checks.append(("Sem ensalamento", _v, _v > 0))
+                            if "CO_LOCAL" in _cu2 and "ID_SALA" in _cu2:
+                                _v = int((_bk_q[_cu2["ID_SALA"]].notna() & _bk_q[_cu2["CO_LOCAL"]].isna()).sum()); _checks.append(("Sala sem local", _v, _v > 0))
+                            if _dq is not None:
+                                _v = int((_dq < 0).sum()); _checks.append(("Distâncias negativas", _v, _v > 0))
+                            if "ID_KIT_PROVA" in _cu2:
+                                _v = int(_bk_q[_cu2["ID_KIT_PROVA"]].isna().sum()); _checks.append(("Kit não preenchido", _v, _v > 0))
+                            if "CO_LOCAL" in _cu2 and "ID_SALA" in _cu2:
+                                _oq = _bk_q.groupby([_cu2["CO_LOCAL"], _cu2["ID_SALA"]]).size(); _v = int((_oq == 1).sum())
+                                _checks.append(("Salas unitárias", _v, _v > 0))
+                            if _checks:
+                                _nprob = sum(1 for _, _, _p in _checks if _p)
+                                _lbl = "🟢 Base íntegra" if _nprob == 0 else f"🟠 {_nprob} ponto(s) de atenção"
+                                with st.expander(f"🔍 Saúde e qualidade da base — {_lbl}", expanded=False):
+                                    st.caption("Checagens objetivas de consistência sobre a base carregada. Um apontamento não é "
+                                               "necessariamente erro — é algo a verificar. Estas mesmas checagens vão no relatório, e "
+                                               "os apontamentos aparecem como casos investigáveis na Central de Casos.")
+                                    _cols_q = st.columns(3)
+                                    for _i, (_nm, _val, _prob) in enumerate(_checks):
+                                        _pctq = f" ({_val / _Nq * 100:.0f}%)" if (_prob and _Nq and _val > 0 and "sala" not in _nm.lower()) else ""
+                                        _cols_q[_i % 3].metric(("🟠 " if _prob else "🟢 ") + _nm, f"{_val:,}".replace(",", ".") + _pctq)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         _rotulos = [
             ("total_inscritos", "Inscritos"), ("total_ensalados", "Ensalados"),
