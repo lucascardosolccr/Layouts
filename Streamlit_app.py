@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "88"
+STREAMLIT_APP_VERSION = "89"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -10611,6 +10611,27 @@ def _run_streamlit_app() -> None:
                 st.caption("Para cada campo esperado por layout, escolha a coluna correspondente da sua base. "
                            "Campos já reconhecidos (nome idêntico) não precisam ser mapeados. O mapeamento é aplicado "
                            "na próxima execução.")
+                # v89: mostra o relatório REAL da última execução (quais colunas o motor não reconheceu)
+                _bi_out_rep = st.session_state.get("bi_outdir")
+                if _bi_out_rep:
+                    try:
+                        from pathlib import Path as _PPr
+                        import json as _jrep
+                        _reps = list(_PPr(_bi_out_rep).rglob("COLUNAS_NAO_RECONHECIDAS.json"))
+                        if _reps:
+                            _repd = _jrep.loads(_reps[0].read_text(encoding="utf-8"))
+                            _linhas_rep = []
+                            for _lyr, _inf in _repd.items():
+                                if _lyr == "INSTRUCOES" or not isinstance(_inf, dict):
+                                    continue
+                                _falt = _inf.get("colunas_esperadas_ausentes", [])
+                                if _falt:
+                                    _linhas_rep.append(f"**{_lyr}** — faltam: {', '.join(_falt)}")
+                            if _linhas_rep:
+                                st.info("📋 **Da sua última execução, estas colunas não foram reconhecidas** "
+                                        "(mapeie-as abaixo):\n\n" + "\n\n".join(_linhas_rep))
+                    except Exception:
+                        pass
                 try:
                     _colsu = set()
                     try:
