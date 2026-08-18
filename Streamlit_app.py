@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "80"
+STREAMLIT_APP_VERSION = "86"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -10953,17 +10953,19 @@ def _run_streamlit_app() -> None:
             try:
                 import io as _ioc
                 import pandas as _pdc
-                _xc = _excelfile_fast(_ioc.BytesIO(arquivo.getvalue()))
-                _base = None
-                for _sh in _xc.sheet_names:
-                    _dc = _read_excel_fast(_ioc.BytesIO(arquivo.getvalue()), sheet_name=_sh)
-                    if any(str(c).upper() == "CO_INSCRICAO" for c in _dc.columns):
-                        _base = _dc
-                        break
+                # v81: leitura da base cacheada também na Central de Casos — não reparseia a cada rerun
+                @st.cache_data(show_spinner=False)
+                def _ler_base_cc(_bytes):
+                    _xcc = _excelfile_fast(_ioc.BytesIO(_bytes))
+                    for _shcc in _xcc.sheet_names:
+                        _dcc = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shcc)
+                        if any(str(_c).upper() == "CO_INSCRICAO" for _c in _dcc.columns):
+                            return _limpa_colunas_nome(_dcc)   # v34: nomes sem escapes _x0020_ (feito 1x, no cache)
+                    return None
+                _base = _ler_base_cc(arquivo.getvalue())
                 if _base is None:
                     st.warning("Não encontrei uma aba com CO_INSCRICAO (N02) para montar a central de casos.")
                 else:
-                    _base = _limpa_colunas_nome(_base)   # v34: nomes sem escapes _x0020_
                     _N = len(_base)
                     _distc = next((c for c in _base.columns if str(c).upper() in ("NU_DISTANCIA", "DISTANCIA")), None)
                     _dist = _dist_km(_base[_distc]) if _distc else None
@@ -11550,6 +11552,237 @@ def _run_streamlit_app() -> None:
                         except Exception:
                             pass
 
+                        # v81: EXPANSÃO ANALÍTICA — novas análises com profundidade estatística (deriváveis do N02)
+                        _cux = {str(c).upper(): c for c in _base.columns}
+                        # (1) Estatística descritiva da distância — percentis, desvio, coef. de variação
+                        try:
+                            if _dist is not None:
+                                _ds = _dist.dropna()
+                                if len(_ds) > 5:
+                                    _q = _ds.quantile([.25, .5, .75, .9, .95, .99])
+                                    _cv = (_ds.std() / _ds.mean() * 100) if _ds.mean() else 0
+                                    _pairs = [("Média", f"{_ds.mean():.2f} km"), ("Mediana", f"{_ds.median():.2f} km"),
+                                              ("Mínimo", f"{_ds.min():.2f} km"), ("Máximo", f"{_ds.max():.2f} km"),
+                                              ("Desvio padrão", f"{_ds.std():.2f} km"), ("Coef. de variação", f"{_cv:.1f}%"),
+                                              ("Percentil 25", f"{_q.loc[.25]:.2f} km"), ("Percentil 75", f"{_q.loc[.75]:.2f} km"),
+                                              ("Percentil 90", f"{_q.loc[.9]:.2f} km"), ("Percentil 95", f"{_q.loc[.95]:.2f} km"),
+                                              ("Percentil 99", f"{_q.loc[.99]:.2f} km")]
+                                    _srows = "".join(f"<tr><td>{_k}</td><td style='text-align:right;font-weight:600'>{_v}</td></tr>" for _k, _v in _pairs)
+                                    _extra += f"""<section><h2 style="border-left:5px solid #16a085">📐 Estatística descritiva da distância</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> medidas-resumo da distância percorrida. O <b>coeficiente de
+                                    variação</b> indica a dispersão relativa (quanto maior, mais heterogêneos os deslocamentos); os <b>percentis</b>
+                                    mostram, por exemplo, que 95% dos participantes estão abaixo do valor P95.</div>
+                                    <table style="max-width:420px"><thead><tr><th>Medida</th><th>Valor</th></tr></thead><tbody>{_srows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # (2) Distribuição etária — a partir de DT_NASCIMENTO
+                        try:
+                            _dtn = _cux.get("DT_NASCIMENTO")
+                            if _dtn is not None:
+                                _idade = ((_dt.now() - _pdc.to_datetime(_base[_dtn], errors="coerce")).dt.days / 365.25).dropna()
+                                _idade = _idade[(_idade >= 0) & (_idade < 120)]
+                                if len(_idade) > 5:
+                                    _fxid = _pdc.cut(_idade, [0, 18, 25, 35, 45, 60, 200], right=False,
+                                                     labels=["<18", "18-24", "25-34", "35-44", "45-59", "60+"]).value_counts().reindex(
+                                        ["<18", "18-24", "25-34", "35-44", "45-59", "60+"]).fillna(0).astype(int)
+                                    _extra += f"""<section><h2 style="border-left:5px solid #2980b9">🎂 Distribuição etária</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> faixas etárias dos participantes (idade calculada a partir de
+                                    DT_NASCIMENTO). Média <b>{_idade.mean():.1f} anos</b> · mediana <b>{_idade.median():.0f}</b> ·
+                                    mín <b>{_idade.min():.0f}</b> · máx <b>{_idade.max():.0f}</b>.</div>
+                                    <div class="grafico"><div class="graf-titulo">Participantes por faixa etária</div>
+                                    {_svg_vbar([(_k, _v) for _k, _v in _fxid.items()], cor="#2980b9")}
+                                    <div class="graf-leg">Cada barra é uma faixa etária; o número é a quantidade de participantes.</div></div></section>"""
+                        except Exception:
+                            pass
+                        # (3) TP_ENSALAMENTO aprofundado — participantes, salas e média por sala em cada tipo
+                        try:
+                            _tpc = _cux.get("TP_ENSALAMENTO")
+                            _cinsc2 = _cux.get("CO_INSCRICAO")
+                            if _tpc is not None and _salac is not None and _cinsc2 is not None:
+                                _tg = _base.groupby(_tpc).agg(_part=(_cinsc2, "count"), _sal=(_salac, "nunique"))
+                                if len(_tg):
+                                    _trows = "".join(
+                                        f"<tr><td>Tipo {_esc_h(_ix)}</td><td style='text-align:right'>{int(_r['_part']):,}</td>"
+                                        f"<td style='text-align:right'>{int(_r['_sal']):,}</td>"
+                                        f"<td style='text-align:right'>{(_r['_part'] / _r['_sal']):.1f}</td></tr>".replace(",", ".")
+                                        for _ix, _r in _tg.iterrows())
+                                    _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🧩 Tipos de ensalamento (TP_ENSALAMENTO) — detalhe</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> para cada tipo de ensalamento, o número de participantes, de
+                                    salas distintas e a média de participantes por sala. Tipos diferentes (ex.: atendimento especializado) tendem a
+                                    ter média por sala menor. Os códigos seguem o layout N02.</div>
+                                    <table><thead><tr><th>Tipo</th><th>Participantes</th><th>Salas</th><th>Média/sala</th></tr></thead>
+                                    <tbody>{_trows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # (4) Ocupação por faixa de taxa (referência 40/sala)
+                        try:
+                            if _locc is not None and _salac is not None:
+                                _occ2 = _base.groupby([_locc, _salac]).size()
+                                if len(_occ2):
+                                    _bandas = _pdc.cut(_occ2, [0, 20, 28, 34, 38, 40, 10**9], right=True,
+                                                       labels=["0–50%", "50–70%", "70–85%", "85–95%", "95–100%", ">100%"]).value_counts().reindex(
+                                        ["0–50%", "50–70%", "70–85%", "85–95%", "95–100%", ">100%"]).fillna(0).astype(int)
+                                    _extra += f"""<section><h2 style="border-left:5px solid #e67e22">📊 Ocupação das salas por faixa de taxa</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> classifica cada sala pela taxa de ocupação em relação à referência
+                                    contratual de ~40 participantes. Faixas <b>95–100%</b> e <b>&gt;100%</b> indicam salas no limite ou acima —
+                                    candidatas a verificação de capacidade. {int(_bandas.get('>100%', 0))} sala(s) acima de 100%.</div>
+                                    <div class="grafico"><div class="graf-titulo">Salas por faixa de taxa de ocupação</div>
+                                    {_svg_vbar([(_k, _v) for _k, _v in _bandas.items()], cor="#e67e22")}
+                                    <div class="graf-leg">Cada barra é uma faixa de ocupação; o número é a quantidade de salas.</div></div></section>"""
+                        except Exception:
+                            pass
+
+                        # v82: mais análises N02-deriváveis — anomalias, eficiência, índice de qualidade, concentração
+                        # (5) Anomalias de sala por desvio estatístico (> média + 2σ)
+                        try:
+                            if _locc is not None and _salac is not None:
+                                _occ3 = _base.groupby([_locc, _salac]).size()
+                                if len(_occ3) > 10:
+                                    _lim_sup = _occ3.mean() + 2 * _occ3.std()
+                                    _anom = _occ3[_occ3 > _lim_sup].sort_values(ascending=False).head(15)
+                                    if len(_anom):
+                                        _arows = "".join(
+                                            f"<tr class='row-aten'><td>{_esc_h(_ix[0])}</td><td>{_esc_h(_ix[1])}</td>"
+                                            f"<td style='text-align:right;font-weight:600'>{int(_v)}</td>"
+                                            f"<td style='text-align:right'>{_lim_sup:.0f}</td></tr>" for _ix, _v in _anom.items())
+                                        _extra += f"""<section><h2 style="border-left:5px solid #e67e22">🔬 Anomalias de ocupação (desvio estatístico)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> salas cuja ocupação está <b>acima de média + 2 desvios-padrão</b>
+                                        ({_lim_sup:.0f} participantes) — estatisticamente atípicas frente às demais. Média das salas: {_occ3.mean():.1f}.
+                                        Não é necessariamente erro, mas merece verificação.</div>
+                                        <table><thead><tr><th>Local</th><th>Sala</th><th>Participantes</th><th>Limite (μ+2σ)</th></tr></thead>
+                                        <tbody>{_arows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # (6) Eficiência de utilização por local
+                        try:
+                            _locn2 = _cux.get("NO_LOCAL_PROVA") or _locc
+                            if _locn2 is not None and _salac is not None and _cux.get("CO_INSCRICAO"):
+                                _ef = _base.groupby(_locn2).agg(_part=(_cux["CO_INSCRICAO"], "count"), _sal=(_salac, "nunique"))
+                                _ef["_med"] = _ef["_part"] / _ef["_sal"]
+                                _ef = _ef.sort_values("_part", ascending=False).head(15)
+                                if len(_ef):
+                                    _efrows = "".join(
+                                        f"<tr><td>{_esc_h(_limpa_nome(str(_ix)) if isinstance(_ix, str) else _ix)}</td>"
+                                        f"<td style='text-align:right'>{int(_r['_part']):,}</td><td style='text-align:right'>{int(_r['_sal']):,}</td>"
+                                        f"<td style='text-align:right'>{_r['_med']:.1f}</td></tr>".replace(",", ".")
+                                        for _ix, _r in _ef.iterrows())
+                                    _extra += f"""<section><h2 style="border-left:5px solid #16a085">🏫 Eficiência de utilização por local</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> para cada local, o total de participantes, o número de salas usadas
+                                    e a ocupação média por sala. Locais com média baixa podem ter capacidade ociosa; média alta indica uso intenso.</div>
+                                    <table><thead><tr><th>Local</th><th>Participantes</th><th>Salas usadas</th><th>Média/sala</th></tr></thead>
+                                    <tbody>{_efrows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # (7) Índice consolidado de qualidade dos dados (0-100)
+                        try:
+                            _iq = []
+                            if _cux.get("CO_INSCRICAO"):
+                                _iq.append(1 - int(_base[_cux["CO_INSCRICAO"]].duplicated().sum()) / _N)
+                            if _cux.get("ID_SALA"):
+                                _iq.append(1 - int(_base[_cux["ID_SALA"]].isna().sum()) / _N)
+                            if _cux.get("CO_LOCAL"):
+                                _iq.append(1 - int(_base[_cux["CO_LOCAL"]].isna().sum()) / _N)
+                            if _dist is not None:
+                                _iq.append(1 - int(_dist.isna().sum()) / _N)
+                            if _cux.get("ID_SALA") and _cux.get("CO_LOCAL"):
+                                _iq.append(1 - int((_base[_cux["ID_SALA"]].notna() & _base[_cux["CO_LOCAL"]].isna()).sum()) / _N)
+                            if _iq:
+                                _score = sum(_iq) / len(_iq) * 100
+                                _sc_cor = "#27ae60" if _score >= 95 else ("#e67e22" if _score >= 80 else "#c0392b")
+                                _sc_txt = "excelente" if _score >= 95 else ("boa" if _score >= 80 else "requer atenção")
+                                _extra += f"""<section><h2 style="border-left:5px solid #1f4e79">🏅 Índice de qualidade dos dados</h2>
+                                <div class="interp"><b>📖 Como interpretar:</b> média do percentual de registros conformes em {len(_iq)} dimensões
+                                de completude e consistência (unicidade, ensalamento, local, distância, coerência sala↔local). É um indicador
+                                de completude/consistência da base — não avalia a correção externa dos valores.</div>
+                                <div style="text-align:center;padding:10px"><div style="font-size:52px;font-weight:800;color:{_sc_cor};line-height:1">{_score:.1f}<span style="font-size:24px">/100</span></div>
+                                <div style="font-size:15px;color:{_sc_cor};font-weight:700;margin-top:4px">Qualidade {_sc_txt}</div></div></section>"""
+                        except Exception:
+                            pass
+                        # (8) Concentração — Top 10 salas com mais participantes
+                        try:
+                            if _locc is not None and _salac is not None:
+                                _tops = _base.groupby([_locc, _salac]).size().sort_values(ascending=False).head(10)
+                                if len(_tops):
+                                    _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🎯 Concentração — Top 10 salas</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> as 10 salas com maior número de participantes. Grandes concentrações
+                                    exigem mais fiscais e logística e são as primeiras a verificar quanto à capacidade.</div>
+                                    <div class="grafico"><div class="graf-titulo">Top 10 salas por nº de participantes</div>
+                                    {_svg_hbar([(f"{_esc_h(str(_ix[1]))}", _v) for _ix, _v in _tops.items()], cor="#c0392b")}
+                                    <div class="graf-leg">Cada barra é uma sala (identificador); o número é a quantidade de participantes.</div></div></section>"""
+                        except Exception:
+                            pass
+
+                        # v83: mais análises N02-deriváveis — território, subutilização, severidade de distância, blocos
+                        # (9) Distribuição territorial por município (Top 15 + participação %)
+                        try:
+                            _munc3 = _cux.get("NO_MUNICIPIO_PROVA") or _cux.get("NO_MUNICIPIO")
+                            if _munc3 is not None:
+                                _mdist = _base[_munc3].map(lambda x: _limpa_nome(x) if isinstance(x, str) else x).value_counts()
+                                if len(_mdist) > 1:
+                                    _mtop = _mdist.head(15)
+                                    _extra += f"""<section><h2 style="border-left:5px solid #2e86c1">🗺️ Distribuição territorial por município</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> quantidade de participantes por município de prova (de {len(_mdist)}
+                                    municípios). Os maiores concentram a operação — o líder responde por {_mtop.iloc[0] / _N * 100:.1f}% do total.</div>
+                                    <div class="grafico"><div class="graf-titulo">Top {len(_mtop)} municípios por nº de participantes</div>
+                                    {_svg_hbar([(_k, _v) for _k, _v in _mtop.items()], cor="#2e86c1")}
+                                    <div class="graf-leg">Cada barra é um município; o número é a quantidade de participantes alocados.</div></div></section>"""
+                        except Exception:
+                            pass
+                        # (10) Salas subutilizadas (ocupação < 50% da referência de 40)
+                        try:
+                            if _locc is not None and _salac is not None:
+                                _occ4 = _base.groupby([_locc, _salac]).size()
+                                _sub = _occ4[_occ4 < 20].sort_values().head(15)
+                                _nsub = int((_occ4 < 20).sum())
+                                if _nsub:
+                                    _subrows = "".join(f"<tr><td>{_esc_h(_ix[0])}</td><td>{_esc_h(_ix[1])}</td>"
+                                                       f"<td style='text-align:right'>{int(_v)}</td></tr>" for _ix, _v in _sub.items())
+                                    _extra += f"""<section><h2 style="border-left:5px solid #16a085">📉 Salas subutilizadas</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> {_nsub} sala(s) com <b>menos de 20 participantes</b> (abaixo de 50%
+                                    da referência de 40). Podem indicar capacidade ociosa ou fragmentação da alocação — oportunidade de consolidação.</div>
+                                    <table><thead><tr><th>Local</th><th>Sala</th><th>Participantes</th></tr></thead><tbody>{_subrows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # (11) Distância classificada por severidade (taxonomia 🟢/🟡/🔴)
+                        try:
+                            if _dist is not None:
+                                _dd3 = _dist.dropna()
+                                if len(_dd3):
+                                    _verde = int((_dd3 < 15).sum())
+                                    _amar = int(((_dd3 >= 15) & (_dd3 <= 20)).sum())
+                                    _verm = int((_dd3 > 20).sum())
+                                    _tt = _verde + _amar + _verm
+                                    _svrows = "".join(
+                                        f"<tr class='{_cls}'><td>{_ic} {_lbl}</td><td style='text-align:right;font-weight:600'>{_v:,}</td>"
+                                        f"<td style='text-align:right'>{_v / _tt * 100:.1f}%</td></tr>".replace(",", ".")
+                                        for _ic, _lbl, _v, _cls in [
+                                            ("🟢", "Conforme (&lt; 15 km)", _verde, ""),
+                                            ("🟡", "Atenção (15–20 km)", _amar, "row-aten"),
+                                            ("🔴", "Crítico (&gt; 20 km)", _verm, "row-crit")])
+                                    _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🚦 Distância classificada por severidade</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> taxonomia de severidade dos deslocamentos. 🟢 conforme, 🟡 atenção
+                                    (rever), 🔴 crítico (&gt; 20 km, ultrapassa a referência contratual). Os {_verm} críticos estão detalhados em « Casos ».</div>
+                                    <table style="max-width:460px"><thead><tr><th>Classificação</th><th>Participantes</th><th>%</th></tr></thead>
+                                    <tbody>{_svrows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # (12) Distribuição por bloco (organização física)
+                        try:
+                            _bloc = _cux.get("CO_BLOCO")
+                            if _bloc is not None and _locc is not None:
+                                _nbl = int(_base[_bloc].nunique())
+                                _bl_loc = _base.groupby(_locc)[_bloc].nunique().sort_values(ascending=False).head(10)
+                                _med_bl = _N / _nbl if _nbl else 0
+                                if _nbl > 1:
+                                    _blrows = "".join(f"<tr><td>{_esc_h(_ix)}</td><td style='text-align:right'>{int(_v)}</td></tr>"
+                                                      for _ix, _v in _bl_loc.items())
+                                    _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🧱 Distribuição por bloco</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> a base tem <b>{_nbl} blocos</b>, com média de {_med_bl:.1f}
+                                    participantes por bloco. A tabela mostra os locais com mais blocos (maior complexidade logística de organização física).</div>
+                                    <table style="max-width:460px"><thead><tr><th>Local</th><th>Nº de blocos</th></tr></thead><tbody>{_blrows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+
                         # v74: Qualidade e consistência dos dados — checagens de auditoria (só N02)
                         try:
                             _qc = []  # (verificação, resultado, severidade)  sev ∈ crit/aten/ok
@@ -11755,6 +11988,71 @@ def _run_streamlit_app() -> None:
                         <table><thead><tr><th>Análise</th><th>Grupo</th><th>Colunas necessárias</th><th>Status</th><th>Motivo</th></tr></thead>
                         <tbody>{_cap_rows}</tbody></table></details></section>"""
 
+                        # v84: CONSULTA DE PARTICIPANTES — tabela-mestre com drill-down por qualquer dimensão.
+                        # Garante rastreabilidade total: para qualquer número do relatório, filtre e veja exatamente quem são.
+                        _master_section = ""
+                        try:
+                            _mp_cols = []
+                            for _lbl, _key in [("Inscrição", "CO_INSCRICAO"), ("UF", "SG_UF_PROVA"),
+                                               ("Município", "NO_MUNICIPIO_PROVA"), ("Local", "NO_LOCAL_PROVA"),
+                                               ("Bloco", "CO_BLOCO"), ("Sala", "ID_SALA"), ("Tipo ens.", "TP_ENSALAMENTO"),
+                                               ("Atend.", "IN_ATENDIMENTO_ESPECIFICO"), ("Kit", "ID_KIT_PROVA")]:
+                                _c = _cux.get(_key)
+                                if _c is not None:
+                                    _mp_cols.append((_lbl, _c))
+                            if _mp_cols and _cux.get("CO_INSCRICAO"):
+                                _has_d = _dist is not None
+                                _sub = _base[[_c for _, _c in _mp_cols]].copy()
+                                if _has_d:
+                                    _sub["_DKM"] = _dist.values
+                                _limpa_loc = _cux.get("NO_LOCAL_PROVA")
+                                _rws = []
+                                for _t in _sub.itertuples(index=False):
+                                    _vals = list(_t)
+                                    if _has_d:
+                                        _dv = _vals[-1]
+                                        _base_vals = _vals[:-1]
+                                    else:
+                                        _dv, _base_vals = None, _vals
+                                    _tds = []
+                                    for _lbl, _c in _mp_cols:
+                                        _vv = _base_vals[[cc for _, cc in _mp_cols].index(_c)]
+                                        _txt = "" if _vv is None or (isinstance(_vv, float) and _vv != _vv) else str(_vv)
+                                        if _c == _limpa_loc and _txt:
+                                            _txt = _limpa_nome(_txt)
+                                        _tds.append(f"<td>{_esc_h(_txt)}</td>")
+                                    _rcls = ""
+                                    if _has_d and _dv is not None and _dv == _dv:
+                                        if _dv > 20:
+                                            _sev, _rcls = "🔴", " class='row-crit'"
+                                        elif _dv >= 15:
+                                            _sev, _rcls = "🟡", " class='row-aten'"
+                                        else:
+                                            _sev = "🟢"
+                                        _tds.append(f"<td style='text-align:right'>{_dv:.1f}</td><td>{_sev}</td>")
+                                    _rws.append(f"<tr{_rcls}>" + "".join(_tds) + "</tr>")
+                                _head = "".join(f"<th>{_l}</th>" for _l, _ in _mp_cols) + ("<th>Dist. km</th><th>Sev.</th>" if _has_d else "")
+                                _tot_mp = len(_rws)
+                                _rows_html = "".join(
+                                    _r.replace("<tr", "<tr class='mp-hide'", 1) if (_r.startswith("<tr>") and _i >= 200) else
+                                    (_r.replace("<tr ", "<tr class='mp-hide' ", 1) if _i >= 200 else _r)
+                                    for _i, _r in enumerate(_rws))
+                                _master_section = f"""<section id="consulta-participantes"><h2 style="border-left:5px solid #1f4e79">🔍 Consulta de participantes — quem são</h2>
+                                <div class="interp"><b>📖 Rastreabilidade total:</b> para qualquer número deste relatório (participantes de um kit, de uma sala,
+                                de uma faixa de distância, de um município…), digite o termo abaixo e veja <b>exatamente quais participantes</b>. Ex.: digite o
+                                nome de um município para ver todos os seus inscritos; digite uma sala para ver quem está nela. Clique nos cabeçalhos para ordenar.
+                                <br><b>💡 Dica:</b> em qualquer tabela de análise acima, <b>clique no nome</b> (município, local, sala, bloco) para filtrar esta consulta automaticamente.</div>
+                                <input id="mp-search" placeholder="🔍 Buscar por inscrição, município, local, sala, bloco, tipo, kit…"
+                                       oninput="mpFilter()" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;margin-bottom:8px">
+                                <div id="mp-count" style="font-size:13px;color:#5b6b7f;margin-bottom:8px">{_tot_mp:,} participantes — mostrando os primeiros 200</div>
+                                <div class="tbl-wrap"><table id="mp-table"><thead><tr>{_head}</tr></thead><tbody>{_rows_html}</tbody></table></div>
+                                <div style="text-align:center;margin-top:10px">
+                                  <button id="mp-more" onclick="mpShowAll()" style="padding:8px 16px;background:#1f4e79;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600">Mostrar todos os {_tot_mp:,}</button>
+                                  <button onclick="mpExport()" style="padding:8px 16px;background:#16a085;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600;margin-left:8px">⬇️ Baixar participantes (visão atual)</button>
+                                </div></section>""".replace("{_tot_mp:,}", f"{_tot_mp:,}".replace(",", "."))
+                        except Exception:
+                            _master_section = ""
+
                         _html_full = f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
                         <meta name="viewport" content="width=device-width, initial-scale=1">
                         <title>Central de Casos — Auditoria PND</title><style>
@@ -11782,6 +12080,13 @@ def _run_streamlit_app() -> None:
                                           pointer-events:none; transition:opacity .25s, transform .15s; box-shadow:0 4px 12px rgba(0,0,0,.25);
                                           z-index:999; }}
                         #casos-backtop.show {{ opacity:.92; pointer-events:auto; }}
+                        .mp-hide {{ display:none; }}
+                        #mp-table {{ font-size:13px; }}
+                        #mp-table th {{ position:sticky; top:0; }}
+                        #consulta-participantes .tbl-wrap {{ max-height:600px; overflow-y:auto; }}
+                        section:not(#consulta-participantes) tbody td:first-child {{ cursor:pointer; transition:background .12s; }}
+                        section:not(#consulta-participantes) tbody td:first-child:hover {{ background:#eef4fb; color:#1f4e79;
+                                    text-decoration:underline; }}
                         #casos-backtop:hover {{ transform:translateY(-3px); opacity:1; }}
                         @media print {{ #casos-backtop {{ display:none; }} }}
                         .selo-ok {{ background:rgba(39,174,96,.22); color:#eafff0; border:1px solid rgba(255,255,255,.4); }}
@@ -11936,10 +12241,74 @@ def _run_streamlit_app() -> None:
                         <table><thead><tr><th>Severidade</th><th>Análise</th><th>Entidade</th>
                         <th>Quantidade</th><th>%</th></tr></thead><tbody>{_resumo_rows}</tbody></table></section>
                         {_extra}
+                        {_master_section}
                         {''.join(_blocos)}
                         {_audit_sec}
                         {_footer}
                         <script>
+                        // v84: busca e paginação da tabela-mestre de participantes
+                        var _mpAll=false;
+                        function mpFilter(){{
+                          var inp=document.getElementById('mp-search'); if(!inp) return;
+                          var q=inp.value.toLowerCase().trim();
+                          var tb=document.querySelector('#mp-table tbody'); if(!tb) return;
+                          var rows=tb.querySelectorAll('tr'), vis=0;
+                          rows.forEach(function(tr){{
+                            var match = q==='' || tr.textContent.toLowerCase().indexOf(q)>=0;
+                            if(q===''){{
+                              // sem busca: respeita paginação (200) a menos que "mostrar todos"
+                              tr.style.display = (_mpAll || !tr.classList.contains('mp-hide')) ? '' : 'none';
+                            }} else {{
+                              tr.style.display = match ? '' : 'none';
+                            }}
+                            if(tr.style.display!=='none') vis++;
+                          }});
+                          var c=document.getElementById('mp-count');
+                          if(c) c.textContent = q==='' ? (vis+' participantes mostrados') : (vis+' participante(s) encontrado(s) para "'+inp.value+'"');
+                        }}
+                        function mpShowAll(){{
+                          _mpAll=true;
+                          document.querySelectorAll('#mp-table tbody tr.mp-hide').forEach(function(tr){{ tr.style.display=''; }});
+                          var b=document.getElementById('mp-more'); if(b) b.style.display='none';
+                          var c=document.getElementById('mp-count'); var n=document.querySelectorAll('#mp-table tbody tr').length;
+                          if(c) c.textContent=n+' participantes mostrados';
+                        }}
+                        // v85: clicar em qualquer nome (município/sala/local/bloco) nas análises → filtra a tabela-mestre
+                        function mpJump(term){{
+                          var inp=document.getElementById('mp-search');
+                          var sec=document.getElementById('consulta-participantes');
+                          if(!inp||!sec) return;
+                          inp.value=term; mpFilter();
+                          sec.scrollIntoView({{behavior:'smooth', block:'start'}});
+                          inp.focus();
+                        }}
+                        // v86: exportar a consulta de participantes (visão atual / filtrada) em CSV
+                        function mpExport(){{
+                          var t=document.getElementById('mp-table'); if(!t) return;
+                          var lines=[]; var head=[];
+                          t.querySelectorAll('thead th').forEach(function(th){{ head.push('"'+th.textContent.trim().replace(/"/g,'""')+'"'); }});
+                          lines.push(head.join(','));
+                          var n=0;
+                          t.querySelectorAll('tbody tr').forEach(function(tr){{
+                            if(tr.style.display==='none') return;
+                            var row=[]; tr.querySelectorAll('td').forEach(function(td){{ row.push('"'+td.textContent.trim().replace(/"/g,'""')+'"'); }});
+                            lines.push(row.join(',')); n++;
+                          }});
+                          if(!n){{ alert('Nenhum participante visível para exportar.'); return; }}
+                          var blob=new Blob(['\\ufeff'+lines.join('\\n')],{{type:'text/csv;charset=utf-8'}});
+                          var a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+                          a.download='participantes_visao_atual.csv'; document.body.appendChild(a); a.click(); a.remove();
+                        }}
+                        document.addEventListener('click', function(e){{
+                          var td=e.target.closest('section td');
+                          if(!td) return;
+                          var sec=td.closest('section');
+                          if(!sec || sec.id==='consulta-participantes') return;
+                          // só a 1ª coluna (nome/rótulo) e valores não numéricos
+                          if(td.cellIndex!==0) return;
+                          var txt=td.textContent.replace(/^[🔴🟠🟡🟢🔵\\s]+/,'').trim();
+                          if(txt && txt.length>1 && !/^[\\d.,%\\s]+$/.test(txt)) mpJump(txt);
+                        }});
                         function filterCase(inp){{
                           var q=inp.value.toLowerCase();
                           var det=inp.closest('details'); if(!det) return;
