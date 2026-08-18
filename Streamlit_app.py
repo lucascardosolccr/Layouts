@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "86"
+STREAMLIT_APP_VERSION = "88"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -10602,8 +10602,61 @@ def _run_streamlit_app() -> None:
             value="",
             help="Adaptativo: só tem efeito se a base tiver coluna de município (CO_MUNICIPIO_PROVA ou "
                  "NO_MUNICIPIO_PROVA). Aceita código(s) ou nome(s), separados por vírgula. Combina com o filtro de UF.")
-        rodar = st.button("▶️ Rodar análise", type="primary", use_container_width=True)
+        rodar = st.button("▶️ Rodar análise", type="primary", width='stretch')
         st.divider()
+        # v88: MAPEAMENTO DE COLUNAS por caixa de seleção — o app diz a coluna esperada de cada
+        # layout e o usuário escolhe a coluna correspondente da sua base.
+        if arquivo is not None:
+            with st.expander("🔗 Mapeamento de colunas (se algo não for reconhecido)", expanded=False):
+                st.caption("Para cada campo esperado por layout, escolha a coluna correspondente da sua base. "
+                           "Campos já reconhecidos (nome idêntico) não precisam ser mapeados. O mapeamento é aplicado "
+                           "na próxima execução.")
+                try:
+                    _colsu = set()
+                    try:
+                        import io as _iomap
+                        _xbm = _excelfile_fast(_iomap.BytesIO(arquivo.getvalue()))
+                        for _shm in _xbm.sheet_names:
+                            _dhm = _read_excel_fast(_iomap.BytesIO(arquivo.getvalue()), sheet_name=_shm, nrows=1)
+                            for _cc in _dhm.columns:
+                                _colsu.add(str(_cc))
+                    except Exception:
+                        pass
+                    _colsu_sorted = sorted(_colsu)
+                    if not _colsu_sorted:
+                        st.info("Não foi possível ler as colunas da base. Verifique o arquivo.")
+                    else:
+                        # campos esperados por layout (a partir do dicionário oficial do motor)
+                        _campos_lay = {}
+                        for _campo, _meta in INEPLayoutDictionary.FIELDS.items():
+                            _campos_lay.setdefault(_meta[0], []).append((_campo, _meta[4] if len(_meta) > 4 else ""))
+                        _upper_cols = {c.upper() for c in _colsu_sorted}
+                        _mapa_atual = st.session_state.get("col_map", {})
+                        _novo_mapa = dict(_mapa_atual)
+                        _tot_falta = 0
+                        for _lay in sorted(_campos_lay):
+                            _ausentes = [(c, d) for c, d in _campos_lay[_lay] if c.upper() not in _upper_cols]
+                            if not _ausentes:
+                                continue
+                            _tot_falta += len(_ausentes)
+                            st.markdown(f"**Layout {_lay}** — {len(_ausentes)} campo(s) a mapear")
+                            for _campo, _desc in _ausentes:
+                                _opts = ["(não mapear)"] + _colsu_sorted
+                                _prev = _mapa_atual.get(_campo, "(não mapear)")
+                                _idx = _opts.index(_prev) if _prev in _opts else 0
+                                _sel = st.selectbox(f"{_campo}" + (f" — {_desc[:60]}" if _desc else ""),
+                                                    _opts, index=_idx, key=f"map_{_lay}_{_campo}")
+                                if _sel and _sel != "(não mapear)":
+                                    _novo_mapa[_campo] = _sel
+                                elif _campo in _novo_mapa:
+                                    del _novo_mapa[_campo]
+                        st.session_state["col_map"] = _novo_mapa
+                        if _novo_mapa:
+                            st.success(f"✅ {len(_novo_mapa)} coluna(s) mapeada(s). Serão aplicadas ao rodar.")
+                        if _tot_falta == 0:
+                            st.success("✅ Todos os campos esperados já foram reconhecidos pelo nome — não é preciso mapear.")
+                except Exception as _emap:
+                    st.info(f"Não foi possível montar o mapeamento agora ({_emap}).")
         st.caption("Bases grandes podem levar alguns minutos. Os resultados ficam disponíveis até rodar de novo.")
 
     # ---- Execução (só ao clicar) -------------------------------------------
@@ -10653,7 +10706,7 @@ def _run_streamlit_app() -> None:
                     "Nº de colunas": _dfp.shape[1],
                     "Amostra de colunas": ", ".join(map(str, list(_dfp.columns)[:6])),
                 })
-            st.dataframe(_pd0.DataFrame(_linhas_det), use_container_width=True, hide_index=True)
+            st.dataframe(_pd0.DataFrame(_linhas_det), width='stretch', hide_index=True)
             st.info("Detecção automática por nome da aba e pelas colunas-chave de cada layout. "
                     "Se algum layout aparecer como « não reconhecido », verifique se a aba tem as colunas esperadas — "
                     "ou use o parâmetro de mapeamento de colunas do motor (o dashboard gera um guia quando falta alguma).")
@@ -10695,7 +10748,7 @@ def _run_streamlit_app() -> None:
                         if _vazias_n:
                             _rotulo += f"  ·  ⚠️ {_vazias_n} coluna(s) totalmente vazia(s)"
                         with st.expander(_rotulo):
-                            st.dataframe(_dfq, use_container_width=True, hide_index=True, height=260)
+                            st.dataframe(_dfq, width='stretch', hide_index=True, height=260)
                             st.download_button("⬇️ Baixar estrutura desta aba (CSV)",
                                                _dfq.to_csv(index=False).encode("utf-8-sig"),
                                                file_name=f"estrutura_{_s}.csv", mime="text/csv",
@@ -10785,7 +10838,18 @@ def _run_streamlit_app() -> None:
                             st.session_state.pop("bi_uf_info", None)
                     else:
                         st.session_state.pop("bi_uf_info", None)
-                    pipe = AnalyticsPipeline(input_override=str(inpath), output_override=str(outdir), offline=bool(offline))
+                    # v88: aplica o mapeamento de colunas escolhido na UI (se houver)
+                    _mapa_arg = None
+                    try:
+                        _cm = st.session_state.get("col_map", {})
+                        if _cm:
+                            import json as _jmap
+                            _mapa_arg = str(outdir / "mapa_colunas.json")
+                            (outdir / "mapa_colunas.json").write_text(_jmap.dumps(_cm, ensure_ascii=False, indent=2), encoding="utf-8")
+                    except Exception:
+                        _mapa_arg = None
+                    pipe = AnalyticsPipeline(input_override=str(inpath), output_override=str(outdir),
+                                             offline=bool(offline), mapa_path=_mapa_arg)
                 import time as _time
                 _t0 = _time.time()
                 # v25: para economizar memória (evita « Oh no » por falta de RAM), permite
@@ -10862,17 +10926,17 @@ def _run_streamlit_app() -> None:
         st.header("2. Downloads")
         if html_path.exists():
             st.download_button("⬇️ Dashboard (HTML)", html_path.read_bytes(),
-                               file_name="Dashboard_BI.html", mime="text/html", use_container_width=True)
+                               file_name="Dashboard_BI.html", mime="text/html", width='stretch')
         if xlsx_path.exists():
             st.download_button("⬇️ Planilha completa (Excel)", xlsx_path.read_bytes(),
-                               file_name=xlsx_path.name, use_container_width=True,
+                               file_name=xlsx_path.name, width='stretch',
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         if csv_path.exists():
             st.download_button("⬇️ Base tratada (CSV)", csv_path.read_bytes(),
-                               file_name="Base_Tratada.csv", mime="text/csv", use_container_width=True)
+                               file_name="Base_Tratada.csv", mime="text/csv", width='stretch')
         if json_path.exists():
             st.download_button("⬇️ Metadados/achados (JSON)", json_path.read_bytes(),
-                               file_name="Metadados_Insights.json", mime="application/json", use_container_width=True)
+                               file_name="Metadados_Insights.json", mime="application/json", width='stretch')
 
     st.success("Análise concluída. Explore nas abas abaixo — tudo de forma nativa e interativa — ou baixe os arquivos.")
     # v38 (#28): distingue visualmente demonstração × dados do usuário (mesmo motor).
@@ -11023,7 +11087,7 @@ def _run_streamlit_app() -> None:
                         "%": f"{len(_df) / _N * 100:.2f}%" if _e == "Participante" and _N else "—",
                     } for _s, _a, _r, _e, _df in _casos])
                     st.markdown("#### Resumo consolidado")
-                    st.dataframe(_resumo, use_container_width=True, hide_index=True)
+                    st.dataframe(_resumo, width='stretch', hide_index=True)
                     _tot_crit = sum(len(_df) for _s, _a, _r, _e, _df in _casos if "Crítico" in _s)
                     _tot_at = sum(len(_df) for _s, _a, _r, _e, _df in _casos if "Atenção" in _s)
                     _m1, _m2, _m3 = st.columns(3)
@@ -11074,10 +11138,10 @@ def _run_streamlit_app() -> None:
                                         _xr, _yr = _dfr.columns[0], _dfr.columns[-1]
                                         _figr = _px.bar(_dfr, x=_xr, y=_yr, text_auto=True)
                                         _figr.update_layout(xaxis_title="", margin=dict(t=10), height=300)
-                                        st.plotly_chart(_figr, use_container_width=True)
+                                        st.plotly_chart(_figr, width='stretch')
                                     except Exception:
                                         pass
-                                st.dataframe(_dfr, use_container_width=True, hide_index=True)
+                                st.dataframe(_dfr, width='stretch', hide_index=True)
 
                     # v33 (#16): EXPLORADOR HIERÁRQUICO — drill-down UF → município → local → sala → participante
                     st.markdown("#### 🧭 Explorador hierárquico")
@@ -11111,7 +11175,7 @@ def _run_streamlit_app() -> None:
                         _vf = _flt[_colf].rename(columns={"_dkm": "DISTANCIA_KM"}) if _colf else _flt
                         if "DISTANCIA_KM" in _vf.columns:
                             _vf = _vf.sort_values("DISTANCIA_KM", ascending=False)
-                        st.dataframe(_vf.head(1000), use_container_width=True, height=300)
+                        st.dataframe(_vf.head(1000), width='stretch', height=300)
                         st.download_button("⬇️ Exportar recorte (CSV)", _vf.to_csv(index=False).encode("utf-8-sig"),
                                            file_name="recorte_hierarquico.csv", mime="text/csv", key="hier_dl")
 
@@ -13161,7 +13225,7 @@ def _run_streamlit_app() -> None:
                         elif "Participantes" in _view.columns:
                             _view = _view.sort_values("Participantes", ascending=False)
                         st.caption(f"Mostrando **{len(_view):,}** registro(s) após filtros.".replace(",", "."))
-                        st.dataframe(_view, use_container_width=True, height=340)
+                        st.dataframe(_view, width='stretch', height=340)
                         st.download_button("⬇️ Exportar estes casos (CSV) — respeita UF, município e busca",
                                            _view.to_csv(index=False).encode("utf-8-sig"),
                                            file_name=f"central_casos_{_i}.csv", mime="text/csv", key="casos_dl")
@@ -13346,7 +13410,7 @@ def _run_streamlit_app() -> None:
                         _dfcap = _pd.DataFrame([{"Análise": _n, "Grupo": _g, "Colunas necessárias": ", ".join(_cs),
                                                  "Status": _lbl.get(_s, _s), "Motivo": _mo}
                                                 for _n, _g, _cs, _s, _mo in _capsv])
-                        st.dataframe(_dfcap, use_container_width=True, height=440, hide_index=True)
+                        st.dataframe(_dfcap, width='stretch', height=440, hide_index=True)
                         st.caption("Esta mesma matriz vai no relatório HTML exportável (seção « Mapa de cobertura analítica »).")
                     # v75: painel de saúde/qualidade da base no Streamlit
                     _bk_q = _bk if ("_bk" in dir() and _bk is not None) else None
@@ -13405,7 +13469,7 @@ def _run_streamlit_app() -> None:
         if kp:
             with st.expander(f"Ver todos os indicadores calculados pelo motor ({len(kp)})"):
                 st.dataframe(_pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()]),
-                             use_container_width=True, height=300)
+                             width='stretch', height=300)
 
         # --- Principais alertas (achados críticos/atenção) ---
         if isinstance(achados_vg, list) and achados_vg:
@@ -13527,7 +13591,7 @@ def _run_streamlit_app() -> None:
                                     "Quais": ", ".join(map(str, _cols_vazias))[:80]})
             if _vazias:
                 st.markdown("**Colunas totalmente vazias detectadas** (transparência de qualidade):")
-                st.dataframe(_pd.DataFrame(_vazias), use_container_width=True, hide_index=True, height=180)
+                st.dataframe(_pd.DataFrame(_vazias), width='stretch', hide_index=True, height=180)
             else:
                 st.caption("Nenhuma coluna totalmente vazia nas análises geradas. ✓")
             if st.session_state.get("bi_uf_info"):
@@ -13606,7 +13670,7 @@ def _run_streamlit_app() -> None:
                 df = df[mask]
             st.markdown(f"**{escolha}**")
             st.caption(f"{len(df):,} linha(s) × {df.shape[1]} coluna(s)".replace(",", "."))
-            st.dataframe(df, use_container_width=True, height=380)
+            st.dataframe(df, width='stretch', height=380)
             st.download_button("⬇️ Baixar esta análise (CSV)",
                                df.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"{escolha}.csv", mime="text/csv", key="dl_aba_nativa")
@@ -13630,7 +13694,7 @@ def _run_streamlit_app() -> None:
                         else:
                             fig = _px.bar(dplot, x=eixo_x, y=eixo_y, text_auto=True)
                         fig.update_layout(xaxis_title="", margin=dict(t=10))
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
                     except Exception as e:  # noqa
                         st.caption(f"Não foi possível gerar o gráfico automático: {e}")
                 else:
@@ -13673,7 +13737,7 @@ def _run_streamlit_app() -> None:
                         try:
                             figh = _px.histogram(df, x=col_hist, nbins=30)
                             figh.update_layout(margin=dict(t=10), yaxis_title="Frequência")
-                            st.plotly_chart(figh, use_container_width=True)
+                            st.plotly_chart(figh, width='stretch')
                             serie = _pd.to_numeric(df[col_hist], errors="coerce").dropna()
                             if not serie.empty:
                                 m1, m2, m3, m4 = st.columns(4)
@@ -13730,7 +13794,7 @@ def _run_streamlit_app() -> None:
                             _colsg = st.columns(len(_par))
                             for _cg, (_nm, _fg) in zip(_colsg, _par):
                                 with _cg:
-                                    st.plotly_chart(_fg, use_container_width=True, key=f"gal_{_nm}")
+                                    st.plotly_chart(_fg, width='stretch', key=f"gal_{_nm}")
                     else:
                         st.info("Nenhuma análise deste capítulo tem formato adequado para gráfico automático. "
                                 "As tabelas completas seguem disponíveis acima e no Excel.")
@@ -13780,14 +13844,14 @@ def _run_streamlit_app() -> None:
                     _c4.metric("Casos > 30 km", f"{int((_fgv_d > 30).sum()):,}".replace(",", "."))
                     _cta, _ctb = st.columns([3, 2])
                     with _cta:
-                        st.dataframe(_tab_f, use_container_width=True, hide_index=True)
+                        st.dataframe(_tab_f, width='stretch', hide_index=True)
                         st.download_button("⬇️ Baixar faixas (CSV)", _tab_f.to_csv(index=False).encode("utf-8-sig"),
                                            file_name="faixas_distancia_fgv.csv", mime="text/csv", key="dl_faixas")
                     with _ctb:
                         if _px is not None:
                             _figf = _px.bar(_tab_f, x="Faixa de distância", y="Participantes", text_auto=True)
                             _figf.update_layout(xaxis_title="", showlegend=False, margin=dict(t=10))
-                            st.plotly_chart(_figf, use_container_width=True)
+                            st.plotly_chart(_figf, width='stretch')
                     # Casos de atenção (15–20) e críticos (>20) por município — como nos relatórios
                     if _mun_series is not None:
                         _dfm = _pd4.DataFrame({"dist": _fgv_d.values, "mun": _mun_series.reindex(_fgv_d.index).values})
@@ -13800,14 +13864,14 @@ def _run_streamlit_app() -> None:
                                 _ra = _aten.groupby("mun")["dist"].agg(["count", "mean"]).round(2)
                                 _ra.columns = ["Participantes", "Distância média"]
                                 st.dataframe(_ra.sort_values("Participantes", ascending=False).head(15),
-                                             use_container_width=True, height=220)
+                                             width='stretch', height=220)
                         with _cc:
                             st.markdown(f"**Casos críticos (> 20 km): {len(_crit)}**")
                             if not _crit.empty:
                                 _rc = _crit.groupby("mun")["dist"].agg(["count", "mean"]).round(2)
                                 _rc.columns = ["Participantes", "Distância média"]
                                 st.dataframe(_rc.sort_values("Participantes", ascending=False).head(15),
-                                             use_container_width=True, height=220)
+                                             width='stretch', height=220)
 
                     # ---- v21: DRILL-DOWN individual dos casos (quem são) ----------
                     st.markdown("##### 🔎 Ver casos individuais")
@@ -13841,7 +13905,7 @@ def _run_streamlit_app() -> None:
                     _det = _det.sort_values("DISTANCIA_KM", ascending=False) if "DISTANCIA_KM" in _det.columns else _det
                     st.markdown(f"**{len(_det):,} caso(s)** de **{len(_dd_full):,}** participantes "
                                 f"(**{len(_det) / len(_dd_full) * 100:.2f}%**)".replace(",", "."))
-                    st.dataframe(_det, use_container_width=True, height=340)
+                    st.dataframe(_det, width='stretch', height=340)
                     st.download_button("⬇️ Exportar estes casos (CSV) — respeita os filtros",
                                        _det.to_csv(index=False).encode("utf-8-sig"),
                                        file_name="casos_distancia.csv", mime="text/csv", key="dl_drill")
@@ -13861,7 +13925,7 @@ def _run_streamlit_app() -> None:
                                                   "CO_LOCAL", "ID_SALA", "TP_ENSALAMENTO", "ID_KIT_PROVA"]
                                       if c in _sem_kit.columns]
                             st.dataframe(_sem_kit[_colsk] if _colsk else _sem_kit,
-                                         use_container_width=True, height=240)
+                                         width='stretch', height=240)
                             st.download_button("⬇️ Exportar participantes sem kit (CSV)",
                                                (_sem_kit[_colsk] if _colsk else _sem_kit).to_csv(index=False).encode("utf-8-sig"),
                                                file_name="participantes_sem_kit.csv", mime="text/csv", key="dl_semkit")
@@ -13883,7 +13947,7 @@ def _run_streamlit_app() -> None:
                         _c3o.metric("Salas com > 40", f"{int((_ocup['Participantes'] > 40).sum()):,}".replace(",", "."))
                         st.caption("Regra contratual de referência: ~40 participantes por sala. Ordenado por ocupação.")
                         st.dataframe(_ocup.sort_values("Participantes", ascending=False),
-                                     use_container_width=True, height=260)
+                                     width='stretch', height=260)
                         st.download_button("⬇️ Exportar ocupação por sala (CSV)",
                                            _ocup.to_csv(index=False).encode("utf-8-sig"),
                                            file_name="ocupacao_por_sala.csv", mime="text/csv", key="dl_ocup")
@@ -13987,7 +14051,7 @@ def _run_streamlit_app() -> None:
                             _fig1 = _px.bar(_dist_cls, x="Classificação", y="Participantes",
                                             title="Participantes por grau de divergência FGV × INEP", text_auto=True)
                             _fig1.update_layout(xaxis_title="", margin=dict(t=40))
-                            st.plotly_chart(_fig1, use_container_width=True)
+                            st.plotly_chart(_fig1, width='stretch')
                             # dispersão FGV vs INEP
                             _amostra = _mrg.sample(min(3000, _n), random_state=1)
                             _fig2 = _px.scatter(_amostra, x="DIST_FGV", y="DIST_INEP",
@@ -13996,12 +14060,12 @@ def _run_streamlit_app() -> None:
                             _lim = float(max(_amostra["DIST_FGV"].max(), _amostra["DIST_INEP"].max()))
                             _fig2.add_shape(type="line", x0=0, y0=0, x1=_lim, y1=_lim,
                                             line=dict(dash="dash", color="red"))
-                            st.plotly_chart(_fig2, use_container_width=True)
+                            st.plotly_chart(_fig2, width='stretch')
 
                         # Tabela detalhada (maiores divergências primeiro) + download
                         st.markdown("##### Detalhamento por participante (maiores divergências primeiro)")
                         _tab = _mrg.sort_values("DIFERENCA_ABS", ascending=False)
-                        st.dataframe(_tab.head(1000), use_container_width=True, height=360)
+                        st.dataframe(_tab.head(1000), width='stretch', height=360)
                         st.download_button("⬇️ Baixar comparativo completo (CSV)",
                                            _tab.to_csv(index=False).encode("utf-8-sig"),
                                            file_name="comparativo_fgv_inep.csv", mime="text/csv", key="dl_fgv_inep")
@@ -14072,7 +14136,7 @@ def _run_streamlit_app() -> None:
                 # Tabela resumida
                 cols_show = [c for c in ["severidade", "titulo", "categoria", "valor"] if c in df_view.columns]
                 st.dataframe(df_view[cols_show] if cols_show else df_view,
-                             use_container_width=True, height=320)
+                             width='stretch', height=320)
                 st.download_button("⬇️ Baixar achados (CSV)",
                                    df_view.to_csv(index=False).encode("utf-8-sig"),
                                    file_name="achados_auditoria.csv", mime="text/csv", key="dl_ach")
@@ -14137,7 +14201,7 @@ def _run_streamlit_app() -> None:
                                 if _bev:
                                     _dfe = _dfe[_dfe.apply(
                                         lambda r: _bev.lower() in " ".join(map(str, r.values)).lower(), axis=1)]
-                                st.dataframe(_dfe, use_container_width=True, height=260)
+                                st.dataframe(_dfe, width='stretch', height=260)
                                 st.download_button("⬇️ Exportar evidências (CSV)",
                                                    _dfe.to_csv(index=False).encode("utf-8-sig"),
                                                    file_name=f"evidencias_{_aba_ev}.csv", mime="text/csv",
@@ -14153,7 +14217,7 @@ def _run_streamlit_app() -> None:
             if isinstance(kp, dict) and kp:
                 with st.expander(f"Todos os indicadores da auditoria ({len(kp)})"):
                     dfk = _pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()])
-                    st.dataframe(dfk, use_container_width=True, height=320)
+                    st.dataframe(dfk, width='stretch', height=320)
                     st.download_button("⬇️ Baixar indicadores (CSV)",
                                        dfk.to_csv(index=False).encode("utf-8-sig"),
                                        file_name="indicadores_auditoria.csv", mime="text/csv", key="dl_kpis_all")
