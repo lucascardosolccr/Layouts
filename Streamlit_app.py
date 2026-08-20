@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "87"
+STREAMLIT_APP_VERSION = "88"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -330,6 +330,44 @@ _ASSINATURA_LAYOUT = {
     "N90": ["CO_INSCRITO_N90", "NU_INSCRITO_N90"],
     "N91": ["CO_ATENDIMENTO", "TP_ATENDIMENTO", "CO_ITEM_ATENDIMENTO", "TP_LAUDO", "IN_ATENDIMENTO_REALIZADO"],
 }
+
+
+# v88: campos canônicos que a aplicação usa + reconhecimento editável pelo usuário.
+_CAMPOS_CANONICOS = [
+    ("CO_INSCRICAO", "Identificador do participante / inscrição"),
+    ("SG_UF_PROVA", "UF da prova"),
+    ("NO_MUNICIPIO_PROVA", "Município da prova"),
+    ("CO_LOCAL", "Código do local de prova"),
+    ("NO_LOCAL_PROVA", "Nome do local de prova"),
+    ("CO_BLOCO", "Bloco"),
+    ("ID_SALA", "Sala"),
+    ("TP_ENSALAMENTO", "Tipo de ensalamento"),
+    ("NU_DISTANCIA", "Distância até o local de prova (km)"),
+    ("DT_NASCIMENTO", "Data de nascimento"),
+    ("IN_ATENDIMENTO_ESPECIFICO", "Indicador de atendimento especializado"),
+    ("ID_KIT_PROVA", "Kit de prova"),
+]
+
+
+def _auto_detecta_coluna(cols, campo):
+    """Detecta a coluna correspondente a um campo canônico (match exato por maiúsculas)."""
+    for _c in cols:
+        if str(_c).upper() == campo:
+            return _c
+    return None
+
+
+def _aplicar_mapa_colunas(df, mapa):
+    """Renomeia colunas reais → nomes canônicos conforme o mapa {canônico: coluna_real} do usuário.
+    Só renomeia quando a coluna real existe e difere do nome canônico; não sobrescreve uma canônica já presente."""
+    if df is None or not mapa:
+        return df
+    _ren = {}
+    _cols = set(df.columns)
+    for _canon, _real in mapa.items():
+        if _real and _real in _cols and _real != _canon and _canon not in _cols:
+            _ren[_real] = _canon
+    return df.rename(columns=_ren) if _ren else df
 
 
 def _detectar_layouts(df):
@@ -11115,6 +11153,29 @@ def _run_streamlit_app() -> None:
                 if _base is None:
                     st.warning("Não encontrei uma aba com CO_INSCRICAO (N02) para montar a central de casos.")
                 else:
+                    # v88: conferência e ajuste do reconhecimento de colunas pelo usuário
+                    with st.expander("🔧 Conferir e ajustar o reconhecimento de colunas"):
+                        st.caption("A aplicação tentou identificar cada campo pelo nome das colunas da sua planilha. "
+                                   "Se algo foi reconhecido errado (ou não reconhecido), corrija aqui: escolha a coluna certa "
+                                   "para cada campo. As análises, KPIs, casos e o relatório passam a usar o mapeamento corrigido.")
+                        _cols_op = ["(nenhuma)"] + [str(_c) for _c in _base.columns]
+                        _mapa = dict(st.session_state.get("col_map", {}))
+                        _colwrap = st.columns(2)
+                        for _ii, (_campo, _descc) in enumerate(_CAMPOS_CANONICOS):
+                            _auto = _auto_detecta_coluna(_base.columns, _campo)
+                            _cur = _mapa.get(_campo, _auto)
+                            _cur = str(_cur) if _cur is not None else "(nenhuma)"
+                            _idx = _cols_op.index(_cur) if _cur in _cols_op else 0
+                            _lbl = ("✅ " if _idx > 0 else "❌ ") + f"{_campo}"
+                            _sel = _colwrap[_ii % 2].selectbox(f"{_lbl} — {_descc}", _cols_op, index=_idx,
+                                                               key=f"colmap_{_campo}",
+                                                               help=f"Campo canônico {_campo}. Escolha qual coluna da sua planilha corresponde a ele.")
+                            _mapa[_campo] = None if _sel == "(nenhuma)" else _sel
+                        st.session_state["col_map"] = _mapa
+                        _n_rec = sum(1 for _cp, _ in _CAMPOS_CANONICOS if _mapa.get(_cp))
+                        st.success(f"{_n_rec} de {len(_CAMPOS_CANONICOS)} campos reconhecidos. "
+                                   "Altere os seletores acima para corrigir qualquer associação.")
+                    _base = _aplicar_mapa_colunas(_base, st.session_state.get("col_map", {}))
                     _N = len(_base)
                     _distc = next((c for c in _base.columns if str(c).upper() in ("NU_DISTANCIA", "DISTANCIA")), None)
                     _dist = _dist_km(_base[_distc]) if _distc else None
@@ -13547,6 +13608,8 @@ def _run_streamlit_app() -> None:
                             return _dkc
                     return None
                 _bk = _ler_base_cache(arquivo.getvalue())
+                # v88: aplica o mapeamento de colunas ajustado pelo usuário (se houver)
+                _bk = _aplicar_mapa_colunas(_bk, st.session_state.get("col_map", {}))
                 if _bk is not None:
                     _Nk = len(_bk)
                     _fmt = lambda v: f"{int(v):,}".replace(",", ".")
