@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "92"
+STREAMLIT_APP_VERSION = "93"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -355,6 +355,16 @@ def _auto_detecta_coluna(cols, campo):
         if str(_c).upper() == campo:
             return _c
     return None
+
+
+def _valor_arrow_safe(v):
+    """Converte valores não-escalares (dict/list) em texto legível, evitando erro de
+    serialização Arrow do st.dataframe (que quebra a exibição de tabelas com tipos mistos)."""
+    if isinstance(v, dict):
+        return "; ".join(f"{_k}: {_vv}" for _k, _vv in v.items())
+    if isinstance(v, (list, tuple, set)):
+        return ", ".join(str(_x) for _x in v)
+    return v
 
 
 def _aplicar_mapa_colunas(df, mapa):
@@ -11277,7 +11287,7 @@ def _run_streamlit_app() -> None:
                     # Painel consolidado
                     _resumo = _pdc.DataFrame([{
                         "Severidade": _s, "Análise": _a, "Entidade": _e,
-                        "Quantidade": len(_df), "Universo": _N if _e == "Participante" else "—",
+                        "Quantidade": len(_df), "Universo": str(_N) if _e == "Participante" else "—",
                         "%": f"{len(_df) / _N * 100:.2f}%" if _e == "Participante" and _N else "—",
                     } for _s, _a, _r, _e, _df in _casos])
                     st.markdown("#### Resumo consolidado")
@@ -13811,7 +13821,7 @@ def _run_streamlit_app() -> None:
             st.caption("Indicadores aparecerão conforme os layouts disponíveis.")
         if kp:
             with st.expander(f"Ver todos os indicadores calculados pelo motor ({len(kp)})"):
-                st.dataframe(_pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()]),
+                st.dataframe(_pd.DataFrame([{"Indicador": k, "Valor": _valor_arrow_safe(v)} for k, v in kp.items()]),
                              width='stretch', height=300)
 
         # --- Principais alertas (achados críticos/atenção) ---
@@ -14559,7 +14569,7 @@ def _run_streamlit_app() -> None:
             kp = ac.get("kpis")
             if isinstance(kp, dict) and kp:
                 with st.expander(f"Todos os indicadores da auditoria ({len(kp)})"):
-                    dfk = _pd.DataFrame([{"Indicador": k, "Valor": v} for k, v in kp.items()])
+                    dfk = _pd.DataFrame([{"Indicador": k, "Valor": _valor_arrow_safe(v)} for k, v in kp.items()])
                     st.dataframe(dfk, width='stretch', height=320)
                     st.download_button("⬇️ Baixar indicadores (CSV)",
                                        dfk.to_csv(index=False).encode("utf-8-sig"),
