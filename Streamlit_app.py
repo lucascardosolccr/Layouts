@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "90"
+STREAMLIT_APP_VERSION = "87"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -339,6 +339,22 @@ def _detectar_layouts(df):
     except Exception:
         _cols = set()
     return {_lay: any(_s in _cols for _s in _sig) for _lay, _sig in _ASSINATURA_LAYOUT.items()}
+
+
+def _ram_disponivel_mb():
+    """RAM disponível em MB (Linux, via /proc/meminfo), sem dependências. None se indisponível."""
+    try:
+        with open("/proc/meminfo") as _f:
+            for _ln in _f:
+                if _ln.startswith("MemAvailable:"):
+                    return int(_ln.split()[1]) / 1024.0
+    except Exception:
+        pass
+    try:
+        import os as _os
+        return (_os.sysconf("SC_AVPHYS_PAGES") * _os.sysconf("SC_PAGE_SIZE")) / (1024.0 * 1024.0)
+    except Exception:
+        return None
 
 
 def _avaliar_capacidades(df):
@@ -10561,6 +10577,11 @@ def _run_streamlit_app() -> None:
                  "« Oh no » em ambientes com pouca RAM (ex.: Streamlit Cloud). Você NÃO precisa dele — a análise "
                  "nativa é completa, e o relatório exportável « Central de Casos em HTML » (leve, ~90 KB, responsivo) "
                  "cobre KPIs, faixas, ocupação, rankings, hierarquia, FGV×INEP e casos. Marque só se tiver bastante RAM.")
+        gerar_excel = st.checkbox(
+            "Gerar planilha Excel completa (usa mais memória)", value=False,
+            help="DESMARCADO por padrão: a planilha Excel com até 53 abas é montada em memória (openpyxl) e é o segundo "
+                 "maior consumo de RAM depois do HTML pesado (~42 MB de pico). Ela NÃO é necessária para as análises "
+                 "nem para o HTML unificado. Marque só se quiser o download da planilha e tiver RAM suficiente.")
         st.markdown("**Filtro global (opcional)**")
         # v13 — multiselect de UF populado a partir do próprio arquivo (adaptativo).
         _uf_opcoes = []
@@ -10873,6 +10894,18 @@ def _run_streamlit_app() -> None:
                                              offline=bool(offline), mapa_path=_mapa_arg)
                 import time as _time
                 _t0 = _time.time()
+                # v84: GARANTIA anti-« Oh no » — se a RAM disponível estiver baixa, desativa automaticamente
+                # a geração pesada (que causa o OOM que mata o processo), mesmo que o usuário a tenha marcado.
+                # Um OOM real mata o processo e o Python não consegue capturá-lo; a única garantia é PREVENIR.
+                _ram_mb = _ram_disponivel_mb()
+                if gerar_pesados and _ram_mb is not None and _ram_mb < 1800:
+                    gerar_pesados = False
+                    st.warning(
+                        f"⚠️ Memória disponível baixa (~{_ram_mb:.0f} MB). Para **evitar o travamento** (« Oh no »), "
+                        "a geração do dashboard HTML pesado (~13–16 MB) foi **desativada automaticamente** nesta "
+                        "execução. A análise completa continua disponível, e você pode baixar o **relatório leve** "
+                        "da aba « Central de Casos » — que abre sem problemas mesmo com pouca memória."
+                    )
                 # v25: para economizar memória (evita « Oh no » por falta de RAM), permite
                 # pular a geração do HTML e dos gráficos avulsos — os passos mais pesados.
                 # A análise nativa (JSON de metadados + Excel de abas) continua completa.
@@ -10880,19 +10913,45 @@ def _run_streamlit_app() -> None:
                     _orig_dash = VisualizerAndExporter.generate_didactic_html_dashboard
                     _orig_charts = VisualizerAndExporter.generate_standalone_charts
                     _orig_sweet = VisualizerAndExporter.generate_html_report
+                    _orig_xlsx = VisualizerAndExporter.build_excel_workbook
                     VisualizerAndExporter.generate_didactic_html_dashboard = lambda self, *a, **k: None
                     VisualizerAndExporter.generate_standalone_charts = lambda self, *a, **k: None
                     VisualizerAndExporter.generate_html_report = lambda self, *a, **k: None
+                    # v85/v86: pula também a montagem do Excel gigante (até 53 abas via openpyxl) — maior consumo
+                    # de RAM depois do HTML. Só monta se o usuário pedir explicitamente (checkbox de planilha).
+                    if not gerar_excel:
+                        VisualizerAndExporter.build_excel_workbook = lambda self, *a, **k: None
                     try:
                         pipe.execute()
                     finally:
                         VisualizerAndExporter.generate_didactic_html_dashboard = _orig_dash
                         VisualizerAndExporter.generate_standalone_charts = _orig_charts
                         VisualizerAndExporter.generate_html_report = _orig_sweet
+                        VisualizerAndExporter.build_excel_workbook = _orig_xlsx
                     st.session_state["bi_html_pulado"] = True
                 else:
-                    pipe.execute()
+                    # v86: modo pesado — gera o dashboard do motor (necessário para o HTML unificado),
+                    # mas pula o Excel gigante (~42 MB de pico) e os gráficos avulsos, que o unificado NÃO usa.
+                    # Isso reduz muito o pico de RAM ao gerar o unificado, evitando o « Oh no ». O Excel/charts
+                    # continuam disponíveis via a opção dedicada (checkbox de planilha), sob demanda.
+                    _oxh = VisualizerAndExporter.build_excel_workbook
+                    _och = VisualizerAndExporter.generate_standalone_charts
+                    if not gerar_excel:
+                        VisualizerAndExporter.build_excel_workbook = lambda self, *a, **k: None
+                        VisualizerAndExporter.generate_standalone_charts = lambda self, *a, **k: None
+                    try:
+                        pipe.execute()
+                    finally:
+                        VisualizerAndExporter.build_excel_workbook = _oxh
+                        VisualizerAndExporter.generate_standalone_charts = _och
                     st.session_state["bi_html_pulado"] = False
+                # v85: libera memória do pipe e força coleta de lixo antes de renderizar as abas
+                try:
+                    import gc as _gc
+                    del pipe
+                    _gc.collect()
+                except Exception:
+                    pass
                 st.session_state["bi_tempo"] = round(_time.time() - _t0, 1)
                 st.session_state["bi_outdir"] = str(outdir)
                 st.session_state["bi_ok"] = True
@@ -10900,6 +10959,11 @@ def _run_streamlit_app() -> None:
             except SystemExit as e:
                 st.session_state["bi_ok"] = False
                 st.error(f"O processamento foi interrompido pelo motor: {e}")
+            except MemoryError:
+                st.session_state["bi_ok"] = False
+                st.error("⚠️ Memória insuficiente para esta operação. Para resolver: **desmarque** « Gerar dashboard HTML "
+                         "pesado » e « Gerar planilha Excel completa » na barra lateral e rode novamente. O relatório leve "
+                         "(Central de Casos → baixar HTML) funciona sem esse custo de memória.")
             except Exception as e:  # noqa
                 st.session_state["bi_ok"] = False
                 st.error(f"Erro ao processar a base: {e}")
@@ -11865,6 +11929,117 @@ def _run_streamlit_app() -> None:
                                     <div class="interp"><b>📖 Como interpretar:</b> a base tem <b>{_nbl} blocos</b>, com média de {_med_bl:.1f}
                                     participantes por bloco. A tabela mostra os locais com mais blocos (maior complexidade logística de organização física).</div>
                                     <table style="max-width:460px"><thead><tr><th>Local</th><th>Nº de blocos</th></tr></thead><tbody>{_blrows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+
+                        # v82: mais análises N02 — anomalias por desvio, eficiência de locais, índice de qualidade, concentração
+                        # (5) Anomalias de sala — ocupação acima de média + 2 desvios (outliers estatísticos)
+                        try:
+                            if _locc is not None and _salac is not None:
+                                _occ3 = _base.groupby([_locc, _salac]).size()
+                                if len(_occ3) > 5 and _occ3.std() > 0:
+                                    _thr = _occ3.mean() + 2 * _occ3.std()
+                                    _anom = _occ3[_occ3 > _thr].sort_values(ascending=False).head(15)
+                                    if len(_anom):
+                                        _arows = "".join(
+                                            f"<tr class='row-aten'><td>{_esc_h(_limpa_nome(str(_k[0])))} / sala {_esc_h(str(_k[1]))}</td>"
+                                            f"<td style='text-align:right;font-weight:600'>{int(_v)}</td></tr>" for _k, _v in _anom.items())
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🔺 Anomalias de ocupação (salas atípicas)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> salas cuja ocupação está <b>acima de média + 2 desvios-padrão</b>
+                                        ({_thr:.0f} participantes) — estatisticamente atípicas em relação ao conjunto. Não são necessariamente erro,
+                                        mas destoam do padrão e merecem verificação. Média geral <b>{_occ3.mean():.1f}</b>, desvio <b>{_occ3.std():.1f}</b>.</div>
+                                        <table><thead><tr><th>Local / Sala</th><th>Participantes</th></tr></thead><tbody>{_arows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # (6) Eficiência por local — salas usadas, ocupação média e máxima por local
+                        try:
+                            if _locc is not None and _salac is not None and _cux.get("CO_INSCRICAO"):
+                                _og = _base.groupby([_locc, _salac]).size().rename("q").reset_index()
+                                _ef = _og.groupby(_locc).agg(_part=("q", "sum"), _sal=("q", "size"),
+                                                             _med=("q", "mean"), _mx=("q", "max")).sort_values("_part", ascending=False).head(12)
+                                if len(_ef):
+                                    _efrows = "".join(
+                                        f"<tr><td>{_esc_h(_limpa_nome(str(_ix)))}</td><td style='text-align:right'>{int(_r['_part']):,}</td>"
+                                        f"<td style='text-align:right'>{int(_r['_sal']):,}</td><td style='text-align:right'>{_r['_med']:.1f}</td>"
+                                        f"<td style='text-align:right'>{int(_r['_mx'])}</td></tr>".replace(",", ".") for _ix, _r in _ef.iterrows())
+                                    _extra += f"""<section><h2 style="border-left:5px solid #16a085">🏢 Eficiência de utilização dos locais</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> para os maiores locais, quantos participantes e salas foram usados, e a
+                                    ocupação <b>média</b> e <b>máxima</b> por sala. Média baixa com muitas salas pode indicar capacidade ociosa; média alta
+                                    indica local pressionado. Ajuda a avaliar aproveitamento e contingência.</div>
+                                    <table><thead><tr><th>Local</th><th>Participantes</th><th>Salas</th><th>Média/sala</th><th>Máx/sala</th></tr></thead>
+                                    <tbody>{_efrows}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # (7) Índice consolidado de qualidade dos dados (0–100, defensável por completude+consistência)
+                        try:
+                            _pen = 0.0
+                            if _cux.get("CO_INSCRICAO"):
+                                _pen += (int(_base[_cux["CO_INSCRICAO"]].duplicated().sum()) / _N) * 100 * 2
+                            if _cux.get("ID_SALA"):
+                                _pen += (int(_base[_cux["ID_SALA"]].isna().sum()) / _N) * 100 * 2
+                            if _cux.get("CO_LOCAL"):
+                                _pen += (int(_base[_cux["CO_LOCAL"]].isna().sum()) / _N) * 100 * 1.5
+                            if _dist is not None:
+                                _pen += (int(_dist.isna().sum()) / _N) * 100 * 0.5
+                            if _cux.get("CO_LOCAL") and _cux.get("ID_SALA"):
+                                _pen += (int((_base[_cux["ID_SALA"]].notna() & _base[_cux["CO_LOCAL"]].isna()).sum()) / _N) * 100 * 2
+                            _score = max(0.0, 100.0 - _pen)
+                            _rate = ("Excelente" if _score >= 95 else "Bom" if _score >= 85 else "Regular" if _score >= 70 else "Requer atenção")
+                            _cor_sc = ("#27ae60" if _score >= 95 else "#16a085" if _score >= 85 else "#e67e22" if _score >= 70 else "#c0392b")
+                            _extra += f"""<section><h2 style="border-left:5px solid #2e86c1">🧮 Índice de qualidade dos dados</h2>
+                            <div class="interp"><b>📖 Como interpretar:</b> índice de 0 a 100 que penaliza a base por <b>incompletude</b> (campos-chave
+                            vazios) e <b>inconsistência</b> (sala sem local, duplicidades), ponderando os itens mais graves. É um resumo objetivo da
+                            confiabilidade — quanto mais próximo de 100, mais íntegra a base.</div>
+                            <div class="grafico" style="text-align:center"><div class="graf-titulo">Índice de qualidade</div>
+                            <div style="font-size:52px;font-weight:800;color:{_cor_sc};line-height:1.1">{_score:.0f}<span style="font-size:22px;color:#8a94a3">/100</span></div>
+                            <div style="font-size:16px;font-weight:700;color:{_cor_sc}">{_rate}</div>
+                            <div class="graf-leg">Penalização total aplicada: {_pen:.1f} ponto(s), a partir das checagens de completude e consistência.</div></div></section>"""
+                        except Exception:
+                            pass
+                        # (8) Concentração — Top 10 salas mais cheias e Top 10 blocos
+                        try:
+                            if _locc is not None and _salac is not None:
+                                _top_sala = _base.groupby([_locc, _salac]).size().sort_values(ascending=False).head(10)
+                                if len(_top_sala):
+                                    _tsr = "".join(f"<tr><td>{_esc_h(_limpa_nome(str(_k[0])))} / sala {_esc_h(str(_k[1]))}</td>"
+                                                   f"<td style='text-align:right;font-weight:600'>{int(_v)}</td></tr>" for _k, _v in _top_sala.items())
+                                    _bloco_sec = ""
+                                    _cbloco = _cux.get("CO_BLOCO") or _cux.get("NO_BLOCO")
+                                    if _cbloco is not None:
+                                        _top_bloco = _base.groupby(_cbloco).size().sort_values(ascending=False).head(8)
+                                        _tbr = "".join(f"<tr><td>Bloco {_esc_h(str(_k))}</td><td style='text-align:right'>{int(_v):,}</td></tr>".replace(",", ".") for _k, _v in _top_bloco.items())
+                                        _bloco_sec = f"""<div class="graf-titulo" style="margin-top:14px">Top blocos por participantes</div>
+                                        <table><thead><tr><th>Bloco</th><th>Participantes</th></tr></thead><tbody>{_tbr}</tbody></table>"""
+                                    _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🏆 Concentração — salas e blocos mais cheios</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> onde os participantes estão mais concentrados. Salas e blocos no topo
+                                    exigem mais fiscalização e logística e são os primeiros a verificar quanto à capacidade.</div>
+                                    <div class="graf-titulo">Top 10 salas por participantes</div>
+                                    <table><thead><tr><th>Local / Sala</th><th>Participantes</th></tr></thead><tbody>{_tsr}</tbody></table>
+                                    {_bloco_sec}</section>"""
+                        except Exception:
+                            pass
+
+                        # v83: Anomalias de sala por desvio estatístico (> 2σ da média de ocupação)
+                        try:
+                            if _locc is not None and _salac is not None:
+                                _occ3 = _base.groupby([_locc, _salac]).size().reset_index(name="Participantes")
+                                if len(_occ3) > 8:
+                                    _mn, _sd = _occ3["Participantes"].mean(), _occ3["Participantes"].std()
+                                    _lim_sup = _mn + 2 * _sd
+                                    _anom = _occ3[_occ3["Participantes"] > _lim_sup].sort_values("Participantes", ascending=False)
+                                    if len(_anom):
+                                        _na = len(_anom)
+                                        _arows = "".join(
+                                            f"<tr class='row-aten'><td>{_esc_h(_limpa_nome(str(_r[_locc])))}</td>"
+                                            f"<td>{_esc_h(str(_r[_salac]))}</td>"
+                                            f"<td style='text-align:right;font-weight:600'>{int(_r['Participantes'])}</td></tr>"
+                                            for _, _r in _anom.head(50).iterrows())
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🚨 Anomalias de ocupação (salas fora do padrão)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> salas cuja ocupação está <b>acima de 2 desvios-padrão</b> da média
+                                        ({_mn:.1f} ± {_sd:.1f}), ou seja, estatisticamente atípicas (limite {_lim_sup:.0f}). Não é necessariamente erro, mas
+                                        merece verificação. {_na} sala(s) atípica(s) identificada(s).</div>
+                                        <table><thead><tr><th>Local</th><th>Sala</th><th>Participantes</th></tr></thead><tbody>{_arows}</tbody></table>
+                                        <p class="nota">Até 50 salas atípicas exibidas (de {_na}).</p></section>"""
                         except Exception:
                             pass
 
@@ -13192,13 +13367,33 @@ def _run_streamlit_app() -> None:
                                     _unif = _dash_html.replace("</body>", _sep + "</body>", 1)
                                 else:
                                     _unif = _dash_html + _sep
+                                # v86: libera as strings intermediárias grandes (~13-16 MB cada) ANTES de codificar,
+                                # e codifica _unif UMA única vez — antes o app mantinha _dash_html + _casos_html + _unif
+                                # e ainda chamava _unif.encode() duas vezes (download + legenda), multiplicando o pico de RAM.
+                                try:
+                                    del _dash_html, _casos_html, _corpo_casos, _sep
+                                    import gc as _gcu2
+                                    _gcu2.collect()
+                                except Exception:
+                                    pass
+                                _unif_bytes = _unif.encode("utf-8")
+                                try:
+                                    del _unif
+                                    _gcu2.collect()
+                                except Exception:
+                                    pass
+                                _mb_unif = len(_unif_bytes) // (1024 * 1024)
                                 st.download_button(
                                     "⬇️ Baixar HTML unificado (dashboard + casos)",
-                                    _unif.encode("utf-8"),
+                                    _unif_bytes,
                                     file_name="dashboard_e_central_de_casos_PND.html", mime="text/html",
                                     key="dl_unif")
-                                st.caption(f"Arquivo unificado pronto (~{len(_unif.encode('utf-8')) // (1024 * 1024)} MB) "
+                                st.caption(f"Arquivo unificado pronto (~{_mb_unif} MB) "
                                            "— com capa, sumário navegável, responsividade e estilos de impressão.")
+                            except MemoryError:
+                                st.warning("⚠️ Memória insuficiente para gerar o HTML unificado (~16 MB). Use o **relatório "
+                                           "leve** acima (« Baixar Central de Casos em HTML »), que tem os mesmos dados, gráficos "
+                                           "e casos, sem esse custo de memória.")
                             except Exception as _eu:  # noqa
                                 st.warning(f"Não foi possível gerar o HTML unificado: {_eu}")
                     else:
