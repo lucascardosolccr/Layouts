@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "88"
+STREAMLIT_APP_VERSION = "90"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -10666,10 +10666,10 @@ def _run_streamlit_app() -> None:
         # v88: MAPEAMENTO DE COLUNAS por caixa de seleção — o app diz a coluna esperada de cada
         # layout e o usuário escolhe a coluna correspondente da sua base.
         if arquivo is not None:
-            with st.expander("🔗 Mapeamento de colunas (se algo não for reconhecido)", expanded=False):
-                st.caption("Para cada campo esperado por layout, escolha a coluna correspondente da sua base. "
-                           "Campos já reconhecidos (nome idêntico) não precisam ser mapeados. O mapeamento é aplicado "
-                           "na próxima execução.")
+            with st.expander("🔗 Correlacionar colunas (conferir e ajustar todos os campos)", expanded=False):
+                st.caption("Para cada campo esperado por layout, confira a coluna correspondente da sua base e ajuste se preciso. "
+                           "Campos com ✅ foram reconhecidos automaticamente (nome idêntico) — você pode confirmar ou trocar; "
+                           "campos com ❌ não foram reconhecidos — escolha a coluna certa. As correlações são aplicadas na próxima execução e nas análises.")
                 # v89: mostra o relatório REAL da última execução (quais colunas o motor não reconheceu)
                 _bi_out_rep = st.session_state.get("bi_outdir")
                 if _bi_out_rep:
@@ -10713,28 +10713,49 @@ def _run_streamlit_app() -> None:
                         _upper_cols = {c.upper() for c in _colsu_sorted}
                         _mapa_atual = st.session_state.get("col_map", {})
                         _novo_mapa = dict(_mapa_atual)
+                        # v90: permite correlacionar TODOS os campos (inclusive os já reconhecidos), não só os ausentes
+                        _mostrar_todos = st.checkbox("Mostrar todos os campos (inclusive os já reconhecidos) para conferir/corrigir",
+                                                     value=True, key="map_mostrar_todos")
                         _tot_falta = 0
+                        _tot_rec = 0
                         for _lay in sorted(_campos_lay):
-                            _ausentes = [(c, d) for c, d in _campos_lay[_lay] if c.upper() not in _upper_cols]
-                            if not _ausentes:
+                            _lista = []
+                            for _c, _d in _campos_lay[_lay]:
+                                _auto = next((_cc for _cc in _colsu_sorted if _cc.upper() == _c.upper()), None)
+                                _rec = _auto is not None
+                                if _rec:
+                                    _tot_rec += 1
+                                else:
+                                    _tot_falta += 1
+                                if _mostrar_todos or not _rec:
+                                    _lista.append((_c, _d, _auto, _rec))
+                            if not _lista:
                                 continue
-                            _tot_falta += len(_ausentes)
-                            st.markdown(f"**Layout {_lay}** — {len(_ausentes)} campo(s) a mapear")
-                            for _campo, _desc in _ausentes:
+                            _n_rec_lay = sum(1 for *_x, _r in _lista if _r)
+                            st.markdown(f"**Layout {_lay}** — {_n_rec_lay}/{len(_lista)} reconhecido(s)")
+                            for _campo, _desc, _auto, _rec in _lista:
                                 _opts = ["(não mapear)"] + _colsu_sorted
-                                _prev = _mapa_atual.get(_campo, "(não mapear)")
+                                _prev = _mapa_atual.get(_campo, _auto if _auto else "(não mapear)")
                                 _idx = _opts.index(_prev) if _prev in _opts else 0
-                                _sel = st.selectbox(f"{_campo}" + (f" — {_desc[:60]}" if _desc else ""),
-                                                    _opts, index=_idx, key=f"map_{_lay}_{_campo}")
+                                _lbl = ("✅ " if _rec else "❌ ") + f"{_campo}" + (f" — {_desc[:55]}" if _desc else "")
+                                _sel = st.selectbox(_lbl, _opts, index=_idx, key=f"map_{_lay}_{_campo}",
+                                                    help=("Reconhecido automaticamente. Você pode confirmar ou trocar a coluna."
+                                                          if _rec else "Não reconhecido — escolha a coluna correspondente, se houver."))
                                 if _sel and _sel != "(não mapear)":
-                                    _novo_mapa[_campo] = _sel
+                                    if _sel.upper() != _campo.upper():
+                                        _novo_mapa[_campo] = _sel   # override explícito
+                                    elif _campo in _novo_mapa:
+                                        del _novo_mapa[_campo]       # voltou ao reconhecimento automático
                                 elif _campo in _novo_mapa:
                                     del _novo_mapa[_campo]
                         st.session_state["col_map"] = _novo_mapa
+                        st.divider()
+                        st.caption(f"Total: **{_tot_rec}** campo(s) reconhecido(s) automaticamente · "
+                                   f"**{_tot_falta}** não reconhecido(s) · **{len(_novo_mapa)}** correlação(ões) manual(is) definida(s).")
                         if _novo_mapa:
-                            st.success(f"✅ {len(_novo_mapa)} coluna(s) mapeada(s). Serão aplicadas ao rodar.")
+                            st.success(f"✅ {len(_novo_mapa)} correlação(ões) manual(is). Serão aplicadas ao rodar e nas análises.")
                         if _tot_falta == 0:
-                            st.success("✅ Todos os campos esperados já foram reconhecidos pelo nome — não é preciso mapear.")
+                            st.info("Todos os campos esperados foram reconhecidos pelo nome. Você ainda pode trocar qualquer correlação acima, se quiser.")
                 except Exception as _emap:
                     st.info(f"Não foi possível montar o mapeamento agora ({_emap}).")
         st.caption("Bases grandes podem levar alguns minutos. Os resultados ficam disponíveis até rodar de novo.")
