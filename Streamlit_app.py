@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "90"
+STREAMLIT_APP_VERSION = "92"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -810,13 +810,39 @@ class INEPLayoutDictionary:
         recognized = sorted(known & present_cols)
         missing_known = sorted(known - present_cols)
         unknown_extra = sorted(present_cols - known - set(cls.DERIVED_FIELDS.keys()))
+        # v91: cobertura POR LAYOUT — mede contra os layouts realmente presentes, não contra os 148 campos
+        # de todos os 6 layouts. Um layout só entra no denominador se estiver de fato presente na base.
+        _by_layout = {}
+        for _f, _meta in cls.FIELDS.items():
+            _by_layout.setdefault(_meta[0], set()).add(_f)
+        _cob_layout = {}
+        _lay_present = []
+        for _lay, _fields in _by_layout.items():
+            _rec = _fields & present_cols
+            _cob_layout[_lay] = {"reconhecidos": len(_rec), "total": len(_fields),
+                                 "pct": round(100 * len(_rec) / max(1, len(_fields)), 1)}
+            # layout considerado presente se reconheceu >= 3 campos OU >= 40% dos seus campos
+            if len(_rec) >= max(3, 0.4 * len(_fields)):
+                _lay_present.append(_lay)
+        if _lay_present:
+            _relevant = set().union(*[_by_layout[_l] for _l in _lay_present])
+        else:
+            _relevant = known
+        _rec_rel = _relevant & present_cols
         return {
             "total_campos_layout": len(known),
             "campos_reconhecidos": recognized,
             "qtd_reconhecidos": len(recognized),
             "campos_layout_ausentes": missing_known,
             "colunas_nao_mapeadas": unknown_extra,
-            "cobertura_percentual": round(100 * len(recognized) / max(1, len(known)), 1),
+            # cobertura principal = contra os layouts PRESENTES (o que faz sentido para o usuário)
+            "cobertura_percentual": round(100 * len(_rec_rel) / max(1, len(_relevant)), 1),
+            "qtd_campos_relevantes": len(_relevant),
+            "qtd_reconhecidos_relevantes": len(_rec_rel),
+            # cobertura global (contra todos os 148) mantida para referência
+            "cobertura_global": round(100 * len(recognized) / max(1, len(known)), 1),
+            "layouts_presentes": sorted(_lay_present),
+            "cobertura_por_layout": _cob_layout,
         }
 
 
@@ -3392,7 +3418,7 @@ class VisualizerAndExporter:
         ws_capa.write('B9', f'• {n_locais:,} locais/prédios únicos mapeados'.replace(',', '.'), capa_kpi)
         ws_capa.write('B10', f'• {n_ufs} Unidades Federativas (UFs) cobertas', capa_kpi)
         if cov:
-            ws_capa.write('B11', f'• {cov.get("qtd_reconhecidos", 0)} de {cov.get("total_campos_layout", 0)} campos oficiais reconhecidos ({cov.get("cobertura_percentual", 0)}% de cobertura)', capa_kpi)
+            ws_capa.write('B11', f'• {cov.get("qtd_reconhecidos_relevantes", 0)} de {cov.get("qtd_campos_relevantes", 0)} campos do(s) layout(s) presente(s) reconhecidos ({cov.get("cobertura_percentual", 0)}% de cobertura)', capa_kpi)
         ws_capa.write('B13', 'FUNDAMENTO OFICIAL', workbook.add_format({'bold': True, 'font_size': 12, 'font_color': '#0F172A'}))
         ws_capa.write('B14', 'Todos os indicadores derivam campo a campo dos layouts oficiais do INEP: N50 (Salas/Espaço Físico), '
                              'N52 (Locação de Espaço Físico) e N60 (Questionário de Visita ao Local de Prova). Consulte a aba '
@@ -7317,7 +7343,8 @@ class VisualizerAndExporter:
         try:
             _cov = getattr(results, 'column_validation', {}) or {}
             _cov_txt = (f"{_cov.get('cobertura_percentual', 0)}% "
-                        f"({_cov.get('qtd_reconhecidos', 0)}/{_cov.get('total_campos_layout', 0)} campos)") if _cov else "n/d"
+                        f"({_cov.get('qtd_reconhecidos_relevantes', 0)}/{_cov.get('qtd_campos_relevantes', 0)} campos "
+                        f"do(s) layout(s) presente(s): {', '.join(_cov.get('layouts_presentes', [])) or '—'})") if _cov else "n/d"
             _n_rows = 0
             try:
                 _n_rows = int(len(results.df)) if getattr(results, 'df', None) is not None else 0
@@ -13418,7 +13445,23 @@ def _run_streamlit_app() -> None:
                                       }
                                     });
                                   }
+                                  function checkPlotlyLoaded(){
+                                    if(typeof Plotly === 'undefined' || typeof jQuery === 'undefined'){
+                                      var _b=document.createElement('div');
+                                      _b.setAttribute('style','position:sticky;top:0;z-index:9999;background:#fff3cd;color:#664d03;'
+                                        +'border:1px solid #ffe69c;border-radius:10px;padding:14px 18px;margin:10px 0;font-size:14px;'
+                                        +'font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.1)');
+                                      _b.innerHTML='⚠️ <b>Os gráficos e tabelas interativas não puderam ser carregados.</b> '
+                                        +'Este relatório usa bibliotecas (Plotly, jQuery, DataTables) via internet (CDN). '
+                                        +'Você está <b>sem conexão</b> ou sua rede <b>bloqueia</b> esses endereços '
+                                        +'(cdn.plot.ly, code.jquery.com, cdn.datatables.net). '
+                                        +'Abra com internet, ou peça à TI para liberar esses domínios — os dados e textos abaixo permanecem visíveis.';
+                                      var _w=document.querySelector('.unif-top')||document.body;
+                                      _w.insertBefore(_b, _w.firstChild);
+                                    }
+                                  }
                                   function onReady(){
+                                    checkPlotlyLoaded();
                                     try{ enhanceTables(); }catch(e){}
                                     try{ buildIndex(); }catch(e){}
                                     setTimeout(resizePlotly, 300);
