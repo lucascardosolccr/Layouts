@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "109"
+STREAMLIT_APP_VERSION = "110"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -13935,6 +13935,17 @@ def _run_streamlit_app() -> None:
                                     _dash_html = _dash_html.replace("</head>", _head_inject + "</head>", 1)
                                 else:
                                     _dash_html = _head_inject + _dash_html
+                                # v110: atalho fixo visível que leva à Central de Casos (que fica ao FINAL do unificado,
+                                # após todo o dashboard do motor). Sem isto, muitos não rolam até as análises de casos.
+                                _atalho_casos = ('<a href="#central-casos" id="unif-gotocasos" '
+                                                 'style="position:fixed;left:18px;bottom:18px;z-index:99999;background:#1f4e79;'
+                                                 'color:#fff;text-decoration:none;font-weight:700;font-size:13px;padding:10px 16px;'
+                                                 'border-radius:24px;box-shadow:0 3px 12px rgba(16,42,67,.28);font-family:system-ui,sans-serif">'
+                                                 '🚨 Ir para a Central de Casos ⬇</a>')
+                                if "<body>" in _dash_html:
+                                    _dash_html = _dash_html.replace("<body>", "<body>" + _atalho_casos, 1)
+                                else:
+                                    _dash_html = _atalho_casos + _dash_html
 
                                 # Painel Executivo + sumário/menu com âncoras para o documento inteiro
                                 _colu2 = {str(_c).upper(): _c for _c in _base.columns}
