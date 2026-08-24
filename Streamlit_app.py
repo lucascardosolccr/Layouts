@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "93"
+STREAMLIT_APP_VERSION = "107"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -358,13 +358,16 @@ def _auto_detecta_coluna(cols, campo):
 
 
 def _valor_arrow_safe(v):
-    """Converte valores não-escalares (dict/list) em texto legível, evitando erro de
-    serialização Arrow do st.dataframe (que quebra a exibição de tabelas com tipos mistos)."""
+    """Converte QUALQUER valor em texto, evitando o erro de serialização Arrow do st.dataframe
+    em colunas de tipo misto (números + dict + string na mesma coluna 'Valor'). Retorna sempre str
+    para que a coluna seja uniformemente textual."""
+    if v is None:
+        return ""
     if isinstance(v, dict):
         return "; ".join(f"{_k}: {_vv}" for _k, _vv in v.items())
     if isinstance(v, (list, tuple, set)):
         return ", ".join(str(_x) for _x in v)
-    return v
+    return str(v)
 
 
 def _aplicar_mapa_colunas(df, mapa):
@@ -3985,7 +3988,25 @@ class VisualizerAndExporter:
         self.logger.info("Engenharia Web Avançada: Renderizando Dashboard Interativo Ultimate SPA 27.0 (Data Explorer Pleno, Cross-Filtering Dinâmico, 11 Charts e Todos os KPIs com Explainable AI Ouro)...")
         filepath = self.dirs[""] / "Dashboard_BI.html" if "" in self.dirs else self.dirs["arquivos_auxiliares"].parent / "Dashboard_BI.html"
         
-        df_json_str = results.df.to_json(orient='records', force_ascii=True, date_format='iso')
+        # v95 (Passo 2): não embutir no HTML colunas operacionais/PII que nenhum gráfico ou análise usa
+        # (códigos de barra, CPF, RG, nome, códigos de controle). Reduz drasticamente o tamanho SEM
+        # remover nenhuma linha nem qualquer dado analítico — a análise segue usando results.df completo.
+        # v96: mantém colunas ANALÍTICAS que o usuário precisa (NO_INSCRITO, NO_SOCIAL, NU_PROVA,
+        # NO_RESPONSAVEL, TX_EMAIL_LOCAL) — só exclui código de barra e PII sensível (CPF/RG/telefone).
+        _BLOAT_PREFIXOS = ('CO_BARRA', 'CO_CONTROLE', 'NO_ARQUIVO', 'ID_MALOTE', 'NU_SEQ_ENVELOPE',
+                           'NU_TOTAL_ENVELOPE', 'CO_ATENDIMENTO_LISTA', 'ID_ENADE_ORIGEM', 'DS_LINHA_ARQUIVO',
+                           'TX_CABECALHO')
+        _BLOAT_EXATOS = {'NU_CPF', 'NU_RG', 'NU_CDL', 'NU_CNPJ', 'NU_CPF_RESPONSAVEL',
+                         'NU_TELEFONE', 'NU_TELEFONE1', 'NU_TELEFONE2'}
+        try:
+            _cols_bloat = [c for c in results.df.columns
+                           if str(c).upper() in _BLOAT_EXATOS or str(c).upper().startswith(_BLOAT_PREFIXOS)]
+            _df_embed = results.df.drop(columns=_cols_bloat) if _cols_bloat else results.df
+            self.logger.info(f"[HTML] Embutindo {len(_df_embed.columns)} de {len(results.df.columns)} colunas "
+                             f"({len(_cols_bloat)} operacionais/PII omitidas do HTML; análise usa todas).")
+        except Exception:
+            _df_embed = results.df
+        df_json_str = _df_embed.to_json(orient='records', force_ascii=True, date_format='iso')
         locais_json_str = results.locais_agg.to_json(orient='records', force_ascii=True, date_format='iso')
         
         df_totals_clean = results.totals_df.copy().reset_index()
@@ -11207,7 +11228,36 @@ def _run_streamlit_app() -> None:
                         if any(str(_c).upper() == "CO_INSCRICAO" for _c in _dcc.columns):
                             return _limpa_colunas_nome(_dcc)   # v34: nomes sem escapes _x0020_ (feito 1x, no cache)
                     return None
-                _base = _ler_base_cc(arquivo.getvalue())
+                # v97: leitor cacheado da aba N52 (locais/instituições) para análise de responsável/contato
+                @st.cache_data(show_spinner=False)
+                def _ler_n52_cc(_bytes):
+                    try:
+                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
+                        for _shn in _xn.sheet_names:
+                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
+                            _up = {str(_c).upper() for _c in _dn.columns}
+                            # N52 = locação de espaço físico: CO_LOCAL + coordenadas/responsável/e-mail, sem CO_INSCRICAO/ID_SALA
+                            if "CO_LOCAL" in _up and "CO_INSCRICAO" not in _up and "ID_SALA" not in _up and (
+                                    "NO_RESPONSAVEL" in _up or "TX_EMAIL_LOCAL" in _up or "NU_LATITUDE_LOCAL" in _up):
+                                return _limpa_colunas_nome(_dn)
+                    except Exception:
+                        pass
+                    return None
+                # v96: leitor cacheado da aba N90 (inscritos) para cruzamentos de nome social
+                @st.cache_data(show_spinner=False)
+                def _ler_n90_cc(_bytes):
+                    try:
+                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
+                        for _shn in _xn.sheet_names:
+                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
+                            _up = {str(_c).upper() for _c in _dn.columns}
+                            # N90 = inscritos: tem CO_INSCRICAO + colunas de residência/situação, NÃO tem ID_SALA
+                            if "CO_INSCRICAO" in _up and "ID_SALA" not in _up and (
+                                    "CO_MUNICIPIO_RESIDENCIA" in _up or "TP_SITUACAO" in _up or "SG_UF_MUNICIPIO_RESIDENCIA" in _up):
+                                return _limpa_colunas_nome(_dn)
+                    except Exception:
+                        pass
+                    return None
                 if _base is None:
                     st.warning("Não encontrei uma aba com CO_INSCRICAO (N02) para montar a central de casos.")
                 else:
@@ -11234,11 +11284,31 @@ def _run_streamlit_app() -> None:
                         st.success(f"{_n_rec} de {len(_CAMPOS_CANONICOS)} campos reconhecidos. "
                                    "Altere os seletores acima para corrigir qualquer associação.")
                     _base = _aplicar_mapa_colunas(_base, st.session_state.get("col_map", {}))
+                    # v107: normaliza o identificador de sala. Em muitas bases reais o ID_SALA vem VAZIO e a sala
+                    # está em NO_SALA. Sem isto, TODAS as análises que usam ID_SALA (ocupação, ensalados, salas por
+                    # local, hero, qualidade) falham silenciosamente. Copia NO_SALA/CO_SALA/NU_SALA para ID_SALA.
+                    try:
+                        _idsc = next((c for c in _base.columns if str(c).upper() == "ID_SALA"), None)
+                        _id_vazio = (_idsc is None) or (not _base[_idsc].notna().any())
+                        if _id_vazio:
+                            _alt_sala = next((c for c in _base.columns if str(c).upper() in ("NO_SALA", "CO_SALA", "NU_SALA") and _base[c].notna().any()), None)
+                            if _alt_sala is not None:
+                                _base = _base.copy()
+                                _base["ID_SALA"] = _base[_alt_sala]
+                    except Exception:
+                        pass
                     _N = len(_base)
                     _distc = next((c for c in _base.columns if str(c).upper() in ("NU_DISTANCIA", "DISTANCIA")), None)
                     _dist = _dist_km(_base[_distc]) if _distc else None
                     _kitc = next((c for c in _base.columns if str(c).upper() == "ID_KIT_PROVA"), None)
-                    _salac = next((c for c in _base.columns if str(c).upper() == "ID_SALA"), None)
+                    # v107: identificador de sala — usa ID_SALA se tiver dados; senão cai para NO_SALA/CO_SALA/NU_SALA.
+                    # (Em muitas bases reais o ID_SALA vem vazio e a sala fica em NO_SALA — sem isto, TODAS as análises de sala/ocupação falham.)
+                    _salac = None
+                    for _cand_sala in ("ID_SALA", "NO_SALA", "CO_SALA", "NU_SALA"):
+                        _cc_sala = next((c for c in _base.columns if str(c).upper() == _cand_sala), None)
+                        if _cc_sala is not None and _base[_cc_sala].notna().any():
+                            _salac = _cc_sala
+                            break
                     _locc = next((c for c in _base.columns if str(c).upper() == "CO_LOCAL"), None)
 
                     # Define os conjuntos de casos (só os calculáveis com o que existe)
@@ -11285,6 +11355,54 @@ def _run_streamlit_app() -> None:
                                                "Participante", _incons_df))
 
                     # Painel consolidado
+                    # v103: NÃO ENSALADOS GERAL — inscritos do N90 que não aparecem no ensalamento (N02)
+                    try:
+                        _n90ne = _ler_n90_cc(arquivo.getvalue())
+                        _cin02n = next((c for c in _base.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                        if _n90ne is not None and _cin02n is not None:
+                            _cin90n = next((c for c in _n90ne.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                            if _cin90n is not None:
+                                _ids02 = set(_base[_cin02n].astype(str))
+                                _fora = _n90ne[~_n90ne[_cin90n].astype(str).isin(_ids02)]
+                                if len(_fora):
+                                    _colsne = [c for c in _n90ne.columns if str(c).upper() in
+                                               ("CO_INSCRICAO", "NO_INSCRITO", "NO_SOCIAL", "SG_UF_MUNICIPIO_PROVA", "NO_MUNICIPIO_PROVA")]
+                                    _fora_v = _fora[_colsne] if _colsne else _fora
+                                    _casos.append(("🔴 Crítico", "Inscritos no N90 ausentes do ensalamento (N02)",
+                                                   "Pessoa inscrita (N90) que não aparece em nenhum registro de ensalamento (N02) — não tem lugar de prova.",
+                                                   "Participante", _fora_v))
+                                    # v105: recorte de MÁXIMA prioridade — não ensalados que TÊM atendimento (N91)
+                                    try:
+                                        def _ler_n91_x(_b):
+                                            import io as _iox
+                                            _xlx = _pdc.ExcelFile(_iox.BytesIO(_b))
+                                            for _sx in _xlx.sheet_names:
+                                                _dx = _pdc.read_excel(_xlx, _sx)
+                                                _ux = {str(c).upper() for c in _dx.columns}
+                                                if "NO_ITEM_ATENDIMENTO" in _ux and "CO_INSCRICAO" in _ux:
+                                                    return _dx
+                                            return None
+                                        _n91x = _ler_n91_x(arquivo.getvalue())
+                                        if _n91x is not None:
+                                            _ci91x = next((c for c in _n91x.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                                            _cit91 = next((c for c in _n91x.columns if str(c).upper() == "NO_ITEM_ATENDIMENTO"), None)
+                                            if _ci91x is not None:
+                                                _ids91x = set(_n91x[_ci91x].astype(str))
+                                                _fora_at = _fora[_fora[_cin90n].astype(str).isin(_ids91x)].copy()
+                                                if len(_fora_at):
+                                                    # anexa o tipo de atendimento do N91
+                                                    if _cit91 is not None:
+                                                        _mapat = _n91x.groupby(_n91x[_ci91x].astype(str))[_cit91].apply(lambda s: "; ".join(sorted(set(str(x) for x in s)))).to_dict()
+                                                        _fora_at["ATENDIMENTO_N91"] = _fora_at[_cin90n].astype(str).map(_mapat)
+                                                    _colat = [c for c in _fora_at.columns if str(c).upper() in
+                                                              ("CO_INSCRICAO", "NO_INSCRITO", "NO_SOCIAL", "SG_UF_MUNICIPIO_PROVA", "NO_MUNICIPIO_PROVA") or c == "ATENDIMENTO_N91"]
+                                                    _casos.append(("🔴 Crítico", "NÃO ensalados COM atendimento especializado (N91)",
+                                                                   "Pessoa com atendimento especializado (N91) que não está ensalada (N02) — prioridade MÁXIMA: precisa de estrutura própria e não tem lugar.",
+                                                                   "Participante", _fora_at[_colat] if _colat else _fora_at))
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
                     _resumo = _pdc.DataFrame([{
                         "Severidade": _s, "Análise": _a, "Entidade": _e,
                         "Quantidade": len(_df), "Universo": str(_N) if _e == "Participante" else "—",
@@ -11292,6 +11410,22 @@ def _run_streamlit_app() -> None:
                     } for _s, _a, _r, _e, _df in _casos])
                     st.markdown("#### Resumo consolidado")
                     st.dataframe(_resumo, width='stretch', hide_index=True)
+                    # v103: exportar cada lista crítica em CSV (validado: to_csv sobre os DataFrames já computados)
+                    _casos_ne = [(_s, _a, _e, _df) for _s, _a, _r, _e, _df in _casos if len(_df)]
+                    if _casos_ne:
+                        with st.expander(f"⬇️ Exportar listas em CSV ({len(_casos_ne)} lista(s) com casos)"):
+                            st.caption("Baixe cada lista de casos como CSV (separador vírgula, codificação UTF-8 com BOM — abre direto no Excel).")
+                            _dlc = st.columns(2)
+                            for _ic, (_s, _a, _e, _df) in enumerate(_casos_ne):
+                                _slug = "".join(_ch if _ch.isalnum() else "_" for _ch in _a.lower()).strip("_")[:45]
+                                try:
+                                    _csv_bytes = _df.to_csv(index=False).encode("utf-8-sig")
+                                    _dlc[_ic % 2].download_button(
+                                        f"{_s.split()[0]} {_a} ({len(_df)})",
+                                        _csv_bytes, file_name=f"{_slug or 'lista'}.csv",
+                                        mime="text/csv", key=f"dlcaso_{_ic}", width='stretch')
+                                except Exception as _edl:
+                                    _dlc[_ic % 2].caption(f"⚠️ {_a}: não foi possível gerar o CSV ({_edl}).")
                     _tot_crit = sum(len(_df) for _s, _a, _r, _e, _df in _casos if "Crítico" in _s)
                     _tot_at = sum(len(_df) for _s, _a, _r, _e, _df in _casos if "Atenção" in _s)
                     _m1, _m2, _m3 = st.columns(3)
@@ -11822,6 +11956,499 @@ def _run_streamlit_app() -> None:
 
                         # v81: EXPANSÃO ANALÍTICA — novas análises com profundidade estatística (deriváveis do N02)
                         _cux = {str(c).upper(): c for c in _base.columns}
+                        # v96: Nome social — usa o flag oficial IN_ALOCACAO_NOME_SOCIAL (N90); NO_SOCIAL textual
+                        # é pouco confiável (em bases anonimizadas vem sempre preenchido). Verifica se quem tem nome
+                        # social alocado está de fato ensalado (o nome social deve constar na prova/lista de presença).
+                        try:
+                            _cinsc_ns = _cux.get("CO_INSCRICAO")
+                            _n90 = _ler_n90_cc(arquivo.getvalue())
+                            if _n90 is not None and _cinsc_ns is not None:
+                                _un90 = {str(c).upper(): c for c in _n90.columns}
+                                _cflag = _un90.get("IN_ALOCACAO_NOME_SOCIAL")
+                                _cin90 = _un90.get("CO_INSCRICAO")
+                                if _cflag is not None and _cin90 is not None:
+                                    _fl = _pdc.to_numeric(_n90[_cflag], errors="coerce")
+                                    _com_ns = _n90[_fl == 1]
+                                    _qns = len(_com_ns)
+                                    _ids_ns = set(_com_ns[_cin90].astype(str))
+                                    _ids_n02 = set(_base[_cinsc_ns].astype(str))
+                                    _ensalados_ns = _ids_ns & _ids_n02
+                                    _nao_ens_ns = _ids_ns - _ids_n02   # tem nome social mas NÃO está ensalado (crítico)
+                                    # v98: monta a lista investigável de QUEM tem nome social e não está ensalado
+                                    _cnome_ns = _un90.get("NO_SOCIAL") or _un90.get("NO_INSCRITO")
+                                    _cmun_ns = _un90.get("NO_MUNICIPIO_PROVA") or _un90.get("CO_MUNICIPIO_PROVA")
+                                    _cufd_ns = _un90.get("SG_UF_MUNICIPIO_PROVA") or _un90.get("SG_UF_PROVA") or _un90.get("SG_UF")
+                                    _drill_ns = ""
+                                    if _nao_ens_ns:
+                                        _sub = _com_ns[_com_ns[_cin90].astype(str).isin(_nao_ens_ns)].copy()
+                                        _cols_show = [(_cin90, "Inscrição")]
+                                        if _cnome_ns is not None:
+                                            _cols_show.append((_cnome_ns, "Nome social"))
+                                        if _cufd_ns is not None:
+                                            _cols_show.append((_cufd_ns, "UF"))
+                                        if _cmun_ns is not None:
+                                            _cols_show.append((_cmun_ns, "Município da prova"))
+                                        _hd = "".join(f"<th>{_esc_h(_t)}</th>" for _c, _t in _cols_show)
+                                        _rw = ""
+                                        for _, _r in _sub.head(500).iterrows():
+                                            _rw += "<tr class='row-crit'>" + "".join(
+                                                f"<td>{_esc_h(_limpa_nome(str(_r[_c])) if isinstance(_r[_c], str) else _r[_c])}</td>"
+                                                for _c, _t in _cols_show) + "</tr>"
+                                        _drill_ns = (f"""<details class="casos-det" open><summary>🔎 Ver os {len(_nao_ens_ns)} candidato(s) com nome social NÃO ensalado(s)</summary>
+                                        <table><thead><tr>{_hd}</tr></thead><tbody>{_rw}</tbody></table>
+                                        <p class="nota">Até 500 exibidos. Cada linha é um candidato que declarou nome social mas não foi localizado no ensalamento (N02) — verificar antes da prova.</p></details>""")
+                                    _bloco = ""
+                                    if _nao_ens_ns:
+                                        _bloco = f"""<div class="interp" style="border-left-color:#c0392b"><b>🔴 Atenção:</b>
+                                        {len(_nao_ens_ns):,} candidato(s) com nome social alocado <b>não está(ão) ensalado(s)</b> no N02.
+                                        O nome social precisa constar na prova e na lista de presença — verificar.</div>""".replace(",", ".")
+                                    _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🏳️‍🌈 Nome social</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> candidatos com <b>alocação de nome social</b>
+                                    (IN_ALOCACAO_NOME_SOCIAL = 1 no N90). O nome social é essencial: deve acompanhar o candidato na prova
+                                    e na lista de presença. Verificamos se cada um está efetivamente ensalado (presente no N02).</div>
+                                    <p class="meta"><b>Candidatos com nome social alocado:</b> {_qns:,} &nbsp;|&nbsp;
+                                    <b>Ensalados:</b> {len(_ensalados_ns):,} &nbsp;|&nbsp; <b>Não ensalados:</b> {len(_nao_ens_ns):,}.</p>
+                                    {_bloco}
+                                    <div class="grafico"><div class="graf-titulo">Nome social: alocação e ensalamento</div>
+                                    {_svg_hbar([("Ensalados (ok)", len(_ensalados_ns)), ("Não ensalados", len(_nao_ens_ns))], cor="#8e44ad")}
+                                    <div class="graf-leg">Dos {_qns:,} candidatos com nome social alocado no N90, quantos constam no ensalamento (N02).</div></div>
+                                    {_drill_ns}</section>""".replace(",", ".")
+                                    # v99: CONFORMIDADE do nome social — a pessoa foi ensalada COM o nome social?
+                                    # O documento só sai com nome social se: (1) está ensalada (N02) E (2) o N02 tem NO_SOCIAL preenchido.
+                                    _cnos_n90 = _un90.get("NO_SOCIAL")
+                                    _cnoi_n90 = _un90.get("NO_INSCRITO")
+                                    _cnos_n02 = next((c for c in _base.columns if str(c).upper() == "NO_SOCIAL"), None)
+                                    if _cnos_n02 is not None and _cnos_n90 is not None:
+                                        # mapa inscrição -> NO_SOCIAL no N02
+                                        _map_n02 = _base.set_index(_base[_cinsc_ns].astype(str))[_cnos_n02].to_dict()
+                                        _ok_doc, _sem_social_n02, _diverg, _nao_ens_c = 0, 0, 0, 0
+                                        _linhas_conf = []
+                                        for _, _r in _com_ns.iterrows():
+                                            _idc = str(_r[_cin90])
+                                            _nsoc90 = str(_r[_cnos_n90]).strip() if _cnos_n90 and not _pdc.isna(_r[_cnos_n90]) else ""
+                                            _nciv = str(_r[_cnoi_n90]).strip() if _cnoi_n90 and not _pdc.isna(_r[_cnoi_n90]) else ""
+                                            if _idc not in _map_n02:
+                                                _nao_ens_c += 1
+                                                _status, _sev = "❌ NÃO ensalado", "crit"
+                                            else:
+                                                _ns02 = _map_n02.get(_idc)
+                                                _ns02 = str(_ns02).strip() if (_ns02 is not None and not _pdc.isna(_ns02)) else ""
+                                                if not _ns02 or _ns02.lower() == "nan":
+                                                    _sem_social_n02 += 1
+                                                    _status, _sev = "🔴 Ensalado SEM nome social no N02", "crit"
+                                                elif _nsoc90 and _ns02.upper() != _nsoc90.upper():
+                                                    _diverg += 1
+                                                    _status, _sev = "🟠 Nome social DIVERGENTE (N02 x N90)", "aten"
+                                                else:
+                                                    _ok_doc += 1
+                                                    _status, _sev = "✅ Ensalado com nome social", "ok"
+                                            _linhas_conf.append((_idc, _limpa_nome(_nciv), _limpa_nome(_nsoc90), _status, _sev))
+                                        _sic = {"crit": "row-crit", "aten": "row-aten", "ok": ""}
+                                        _crows = "".join(
+                                            f"<tr class='{_sic[_sv]}'><td>{_esc_h(_i)}</td><td>{_esc_h(_nc)}</td>"
+                                            f"<td>{_esc_h(_nsx)}</td><td>{_esc_h(_stt)}</td></tr>"
+                                            for _i, _nc, _nsx, _stt, _sv in _linhas_conf[:500])
+                                        _prob_c = _nao_ens_c + _sem_social_n02 + _diverg
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🏳️‍🌈 Nome social — conformidade nos documentos de prova</h2>
+                                        <div class="interp"><b>📖 O que isto verifica:</b> se cada pessoa que <b>deve ser tratada pelo nome social</b>
+                                        (IN_ALOCACAO_NOME_SOCIAL = 1 no N90) foi <b>ensalada</b> e se o <b>nome social está presente no registro de
+                                        ensalamento (N02)</b>. Isso é o que garante que o nome social apareça na <b>prova, na lista de presença e nos
+                                        demais documentos</b> — que são gerados a partir do ensalamento. Se a pessoa não está ensalada, ou o N02 não tem o
+                                        nome social, ou ele diverge do N90, os documentos sairão com o nome civil — <b>violação a ser corrigida antes da prova</b>.</div>
+                                        <div class="kpi-grid">
+                                          <div class="kpi-box" style="border-left:5px solid #27ae60"><div class="kpi-lbl">✅ OK (nome social nos documentos)</div><div class="kpi-val">{_ok_doc}</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">🔴 ENSALADO SEM NOME SOCIAL (N02)</div><div class="kpi-val">{_sem_social_n02}</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">❌ NÃO ENSALADO</div><div class="kpi-val">{_nao_ens_c}</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #e67e22"><div class="kpi-lbl">🟠 NOME SOCIAL DIVERGENTE</div><div class="kpi-val">{_diverg}</div></div>
+                                        </div>
+                                        <p class="meta"><b>{_prob_c}</b> de <b>{_qns}</b> candidato(s) com nome social têm alguma pendência que faria os
+                                        documentos saírem com o nome civil.</p>
+                                        <details class="casos-det" open><summary>🔎 Ver situação de cada candidato com nome social</summary>
+                                        <table><thead><tr><th>Inscrição</th><th>Nome civil</th><th>Nome social</th><th>Situação nos documentos</th></tr></thead>
+                                        <tbody>{_crows}</tbody></table>
+                                        <p class="nota">Até 500 exibidos. ✅ = nome social presente no ensalamento (sairá nos documentos). 🔴/❌/🟠 = corrigir antes da prova.</p></details></section>"""
+                                    # v97: distribuição por UF dos candidatos com nome social
+                                    _cuf_ns = _un90.get("SG_UF_MUNICIPIO_PROVA") or _un90.get("SG_UF_PROVA") or _un90.get("SG_UF")
+                                    if _cuf_ns is not None and _qns:
+                                        _uf_ns = _com_ns[_cuf_ns].astype(str).str.strip().replace({"": "—"}).value_counts().head(15)
+                                        if len(_uf_ns):
+                                            _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🏳️‍🌈 Nome social — distribuição por UF</h2>
+                                            <div class="interp"><b>📖 Como interpretar:</b> concentração geográfica dos candidatos com nome social alocado.
+                                            Ajuda as coordenações estaduais a se prepararem (nome social na lista de presença, sensibilização de fiscais).</div>
+                                            <div class="grafico"><div class="graf-titulo">Candidatos com nome social por UF (top {len(_uf_ns)})</div>
+                                            {_svg_hbar([(_k, _v) for _k, _v in _uf_ns.items()], cor="#8e44ad")}
+                                            <div class="graf-leg">Cada barra é uma UF; o número é a quantidade de candidatos com nome social alocado.</div></div></section>"""
+                                    # v97: cruzamento nome social × atendimento especializado
+                                    _atc_ns = _cux.get("IN_ATENDIMENTO_ESPECIFICO") or _cux.get("IN_ATENDIMENTO_ESPECIALIZADO")
+                                    if _atc_ns is not None and _ensalados_ns:
+                                        _base_ns = _base[_base[_cinsc_ns].astype(str).isin(_ensalados_ns)]
+                                        _av_ns = _pdc.to_numeric(_base_ns[_atc_ns], errors="coerce")
+                                        _com_at_ns = int((_av_ns == 1).sum())
+                                        _sem_at_ns = int((_av_ns == 0).sum())
+                                        if (_com_at_ns + _sem_at_ns) > 0:
+                                            _pct_at_ns = _com_at_ns / (_com_at_ns + _sem_at_ns) * 100
+                                            _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🏳️‍🌈 Nome social × Atendimento especializado</h2>
+                                            <div class="interp"><b>📖 Como interpretar:</b> entre os candidatos com nome social <b>ensalados</b>, quantos também
+                                            solicitaram atendimento especializado. A dupla condição (nome social + atendimento) exige atenção redobrada de
+                                            fiscais e da logística de sala. {_com_at_ns:,} de {_com_at_ns + _sem_at_ns:,} ({_pct_at_ns:.1f}%) têm ambos.</div>
+                                            <div class="grafico"><div class="graf-titulo">Nome social: com x sem atendimento especializado</div>
+                                            {_svg_hbar([("Com atendimento", _com_at_ns), ("Sem atendimento", _sem_at_ns)], cor="#8e44ad")}
+                                            <div class="graf-leg">Base: candidatos com nome social alocado e efetivamente ensalados.</div></div></section>""".replace(",", ".")
+                        except Exception:
+                            pass
+                        # v97: análise de RESPONSÁVEL pelo local (N52) — cadastro, contato, completude
+                        try:
+                            _n52 = _ler_n52_cc(arquivo.getvalue())
+                            if _n52 is not None:
+                                _u52 = {str(c).upper(): c for c in _n52.columns}
+                                _cloc52 = _u52.get("CO_LOCAL")
+                                _cresp = _u52.get("NO_RESPONSAVEL")
+                                _cmail = _u52.get("TX_EMAIL_LOCAL")
+                                _ctel = _u52.get("NU_TELEFONE1") or _u52.get("NU_TELEFONE") or _u52.get("NU_TELEFONE2")
+                                if _cloc52 is not None:
+                                    _nloc52 = len(_n52)
+
+                                    def _vazio(_col):
+                                        if _col is None:
+                                            return None
+                                        _s = _n52[_col].astype(str).str.strip()
+                                        return int(((_n52[_col].isna()) | (_s == "") | (_s.str.lower() == "nan")).sum())
+                                    _sem_resp = _vazio(_cresp)
+                                    _sem_mail = _vazio(_cmail)
+                                    _sem_tel = _vazio(_ctel)
+                                    _linhas_r = []
+                                    if _sem_resp is not None:
+                                        _linhas_r.append(("Locais sem responsável cadastrado", _sem_resp, "crit"))
+                                    if _sem_mail is not None:
+                                        _linhas_r.append(("Locais sem e-mail de contato", _sem_mail, "aten"))
+                                    if _sem_tel is not None:
+                                        _linhas_r.append(("Locais sem telefone de contato", _sem_tel, "aten"))
+                                    # completude de contato: locais sem NENHUM meio de contato
+                                    _sem_contato = None
+                                    if _cmail is not None and _ctel is not None:
+                                        _sm = _n52[_cmail].astype(str).str.strip()
+                                        _st2 = _n52[_ctel].astype(str).str.strip()
+                                        _mail_vazio = (_n52[_cmail].isna()) | (_sm == "") | (_sm.str.lower() == "nan")
+                                        _tel_vazio = (_n52[_ctel].isna()) | (_st2 == "") | (_st2.str.lower() == "nan")
+                                        _sem_contato = int((_mail_vazio & _tel_vazio).sum())
+                                        _linhas_r.append(("Locais sem NENHUM contato (e-mail e telefone)", _sem_contato, "crit"))
+                                    if _linhas_r:
+                                        _sevic = {"crit": "🔴", "aten": "🟠", "ok": "🟢"}
+                                        _rrows = "".join(
+                                            f"<tr class=\"{('row-crit' if _s == 'crit' else 'row-aten')}\"><td>{_sevic[_s]} {_esc_h(_lbl)}</td>"
+                                            f"<td style='text-align:right;font-weight:600'>{_v:,}</td>"
+                                            f"<td style='text-align:right'>{_v / _nloc52 * 100:.1f}%</td></tr>".replace(",", ".")
+                                            for _lbl, _v, _s in _linhas_r)
+                                        _nprob_r = sum(1 for _, _v, _ in _linhas_r if _v > 0)
+                                        _extra += f"""<section><h2 style="border-left:5px solid #e67e22">👤 Responsável e contato dos locais (N52)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> completude do cadastro de <b>responsável e contato</b> por local de prova
+                                        (layout N52). Locais sem responsável ou sem qualquer meio de contato são <b>risco operacional</b>: dificultam
+                                        comunicação urgente (mudança de logística, incidentes) no dia da prova. Percentuais sobre {_nloc52:,} locais.</div>
+                                        <p class="meta"><b>Verificações com apontamento:</b> {_nprob_r} de {len(_linhas_r)}.</p>
+                                        <table><thead><tr><th>Verificação</th><th>Locais</th><th>%</th></tr></thead><tbody>{_rrows}</tbody></table>
+                                        <div class="grafico"><div class="graf-titulo">Completude do cadastro de responsável/contato</div>
+                                        {_svg_hbar([(_lbl.replace("Locais ", ""), _v) for _lbl, _v, _s in _linhas_r], cor="#e67e22")}
+                                        <div class="graf-leg">Quantidade de locais com cada lacuna de cadastro (menor é melhor).</div></div></section>""".replace("{_nloc52:,}", f"{_nloc52:,}".replace(",", "."))
+                        except Exception:
+                            pass
+                        # v100: análises da metodologia SAS do usuário
+                        # (A) Incompatibilidade de ensalamento especial — recurso/atendimento em sala comum (Regra N02 nº 13)
+                        try:
+                            _crec = next((c for c in _base.columns if str(c).upper() == "IN_RECURSO"), None)
+                            _cate = next((c for c in _base.columns if str(c).upper() in ("IN_ATENDIMENTO_ESPECIALIZADO", "IN_ATENDIMENTO_ESPECIFICO")), None)
+                            _ctpe = next((c for c in _base.columns if str(c).upper() == "TP_ENSALAMENTO"), None)
+                            if _ctpe is not None and (_crec is not None or _cate is not None):
+                                _need = _pdc.Series(False, index=_base.index)
+                                if _crec is not None:
+                                    _need = _need | (_pdc.to_numeric(_base[_crec], errors="coerce") == 1)
+                                if _cate is not None:
+                                    _need = _need | (_pdc.to_numeric(_base[_cate], errors="coerce") == 1)
+                                _comum = _pdc.to_numeric(_base[_ctpe], errors="coerce") == 0
+                                _viol = _base[_need & _comum]
+                                _nv = len(_viol)
+                                if _nv >= 0:
+                                    _cshow = [c for c in ["CO_INSCRICAO", "NO_INSCRITO", "SG_UF_PROVA", "NO_LOCAL_PROVA", "NO_SALA"] if any(str(x).upper() == c for x in _base.columns)]
+                                    _mp = {c: next(x for x in _base.columns if str(x).upper() == c) for c in _cshow}
+                                    _vh = "".join(f"<th>{_esc_h(c.replace('_', ' ').title())}</th>" for c in _cshow)
+                                    _vr = "".join("<tr class='row-crit'>" + "".join(f"<td>{_esc_h(_limpa_nome(str(_row[_mp[c]])) if isinstance(_row[_mp[c]], str) else _row[_mp[c]])}</td>" for c in _cshow) + "</tr>" for _, _row in _viol.head(500).iterrows())
+                                    _extra += f"""<section><h2 style="border-left:5px solid #c0392b">♿ Incompatibilidade de ensalamento especial</h2>
+                                    <div class="interp"><b>📖 O que isto verifica (Regra N02 nº 13):</b> candidatos que solicitaram <b>recurso de acessibilidade</b>
+                                    (IN_RECURSO=1) ou <b>atendimento especializado</b> (=1), mas foram alocados em <b>sala comum</b> (TP_ENSALAMENTO=0).
+                                    Isso viola o direito ao atendimento adequado e precisa ser corrigido antes da prova.</div>
+                                    <p class="meta"><b>{_nv:,}</b> participante(s) com recurso/atendimento em sala comum.</p>
+                                    {'<details class="casos-det" open><summary>🔎 Ver os ' + str(_nv) + ' caso(s)</summary><table><thead><tr>' + _vh + '</tr></thead><tbody>' + _vr + '</tbody></table><p class="nota">Até 500 exibidos.</p></details>' if _nv else '<p class="meta">🟢 Nenhuma incompatibilidade encontrada — todos com recurso/atendimento estão em sala adequada.</p>'}</section>""".replace("{_nv:,}", f"{_nv:,}".replace(",", "."))
+                        except Exception:
+                            pass
+                        # (B) Casamento geográfico — município de residência × município de prova (forasteiros)
+                        try:
+                            _n90g = _ler_n90_cc(arquivo.getvalue())
+                            if _n90g is not None:
+                                _u90g = {str(c).upper(): c for c in _n90g.columns}
+                                _cres = _u90g.get("CO_MUNICIPIO_RESIDENCIA")
+                                _cprv = _u90g.get("CO_MUNICIPIO_PROVA")
+                                _cufg = _u90g.get("SG_UF_MUNICIPIO_PROVA") or _u90g.get("SG_UF_MUNICIPIO_RESIDENCIA")
+                                if _cres is not None and _cprv is not None:
+                                    # compara como NÚMERO (os códigos podem vir como float e int — comparar texto daria falso)
+                                    _rr = _pdc.to_numeric(_n90g[_cres], errors="coerce")
+                                    _pp = _pdc.to_numeric(_n90g[_cprv], errors="coerce")
+                                    _valid = _rr.notna() & _pp.notna()
+                                    _mesmo = int((_rr[_valid] == _pp[_valid]).sum())
+                                    _distinto = int((_rr[_valid] != _pp[_valid]).sum())
+                                    _tot_g = _mesmo + _distinto
+                                    _pct_d = _distinto / _tot_g * 100 if _tot_g else 0
+                                    _extra += f"""<section><h2 style="border-left:5px solid #16a085">🗺️ Casamento geográfico — residência × prova (forasteiros)</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> compara o município de <b>residência</b> (na inscrição) com o município da
+                                    <b>prova</b> agendada. "Município distinto" = o candidato faz prova fora da própria cidade (forasteiro) — indicador de
+                                    esforço logístico e correlacionado a maior abstenção. <b>{_pct_d:.1f}%</b> fazem prova em município distinto do de residência.</div>
+                                    <div class="grafico"><div class="graf-titulo">Candidatos por casamento geográfico</div>
+                                    {_svg_hbar([("Mesmo município", _mesmo), ("Município distinto (forasteiro)", _distinto)], cor="#16a085")}
+                                    <div class="graf-leg">Base: {_tot_g:,} inscritos do N90 com município de residência e de prova informados.</div></div></section>""".replace("{_tot_g:,}", f"{_tot_g:,}".replace(",", "."))
+                        except Exception:
+                            pass
+                        # (C) Nome social ignorado na impressão — nome que vai à gráfica (N02.NO_INSCRITO) diverge do nome social (N90)
+                        try:
+                            _n90c = _ler_n90_cc(arquivo.getvalue())
+                            if _n90c is not None:
+                                _u90c = {str(c).upper(): c for c in _n90c.columns}
+                                _cflc = _u90c.get("IN_ALOCACAO_NOME_SOCIAL")
+                                _cnsc = _u90c.get("NO_SOCIAL")
+                                _cinc = _u90c.get("CO_INSCRICAO")
+                                _cnoi02 = next((c for c in _base.columns if str(c).upper() == "NO_INSCRITO"), None)
+                                _cin02 = next((c for c in _base.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                                if all(x is not None for x in [_cflc, _cnsc, _cinc, _cnoi02, _cin02]):
+                                    _flc = _pdc.to_numeric(_n90c[_cflc], errors="coerce")
+                                    _cand_c = _n90c[_flc == 1]
+                                    _map_civ = _base.set_index(_base[_cin02].astype(str))[_cnoi02].to_dict()
+                                    _err_c = []
+                                    for _, _r in _cand_c.iterrows():
+                                        _idc = str(_r[_cinc])
+                                        _ns = str(_r[_cnsc]).strip() if not _pdc.isna(_r[_cnsc]) else ""
+                                        if _idc in _map_civ and _ns:
+                                            _nprint = _map_civ.get(_idc)
+                                            _nprint = str(_nprint).strip() if not _pdc.isna(_nprint) else ""
+                                            if _nprint and _ns.upper() != _nprint.upper():
+                                                _err_c.append((_idc, _limpa_nome(_ns), _limpa_nome(_nprint)))
+                                    _ne = len(_err_c)
+                                    _erows = "".join(f"<tr class='row-crit'><td>{_esc_h(_i)}</td><td>{_esc_h(_ns)}</td><td>{_esc_h(_nc)}</td></tr>" for _i, _ns, _nc in _err_c[:500])
+                                    _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🏳️‍🌈 Nome social ignorado na impressão (nome civil na gráfica)</h2>
+                                    <div class="interp"><b>📖 O que isto verifica (Análise 13 — quebra de resolução do INEP):</b> candidatos que <b>deveriam</b> ser
+                                    tratados pelo nome social (IN_ALOCACAO_NOME_SOCIAL=1 no N90), mas cujo <b>nome que vai para a gráfica</b> no ensalamento
+                                    (N02 · NO_INSCRITO) <b>diverge do nome social</b> — ou seja, a lista de presença e a carteira de mesa sairiam com o
+                                    <b>nome civil</b>. Isso gera constrangimento e sanções administrativas. Cada caso deve ser corrigido antes da impressão.</div>
+                                    <p class="meta"><b>{_ne}</b> candidato(s) com nome social cujo nome de impressão (N02) diverge do nome social.</p>
+                                    {'<details class="casos-det" open><summary>🔎 Ver os ' + str(_ne) + ' caso(s) crítico(s)</summary><table><thead><tr><th>Inscrição</th><th>Nome social (correto)</th><th>Nome que iria à gráfica (N02)</th></tr></thead><tbody>' + _erows + '</tbody></table><p class="nota">Até 500 exibidos. Corrigir o NO_INSCRITO do N02 para o nome social antes de gerar a lista de presença.</p></details>' if _ne else '<p class="meta">🟢 Nenhum caso — o nome de impressão confere com o nome social em todos os candidatos sinalizados.</p>'}</section>"""
+                        except Exception:
+                            pass
+                        # v102: (D) Inscritos por UF (N90)
+                        try:
+                            _n90u = _ler_n90_cc(arquivo.getvalue())
+                            if _n90u is not None:
+                                _cuf90 = next((c for c in _n90u.columns if str(c).upper() == "SG_UF_MUNICIPIO_PROVA"), None) or next((c for c in _n90u.columns if str(c).upper() == "SG_UF_PROVA"), None)
+                                if _cuf90 is not None:
+                                    _iu = _n90u[_cuf90].astype(str).str.strip().replace({"": "—", "nan": "—"}).value_counts()
+                                    if len(_iu):
+                                        _extra += f"""<section><h2 style="border-left:5px solid #2980b9">🗺️ Inscritos por UF (N90)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> volume de inscritos por unidade federativa do local de prova. Base para
+                                        dimensionar logística, fiscalização e distribuição de recursos por estado. Total: {int(_iu.sum()):,} inscritos em {len(_iu)} UF(s).</div>
+                                        <div class="grafico"><div class="graf-titulo">Inscritos por UF</div>
+                                        {_svg_hbar([(_k, int(_v)) for _k, _v in _iu.head(27).items()], cor="#2980b9")}
+                                        <div class="graf-leg">Cada barra é uma UF; o número é a quantidade de inscritos no N90.</div></div></section>""".replace("{int(_iu.sum()):,}", f"{int(_iu.sum()):,}".replace(",", "."))
+                        except Exception:
+                            pass
+                        # v102: (E) Logística reversa — malotes e CDL por UF (N02)
+                        try:
+                            _cufb = next((c for c in _base.columns if str(c).upper() == "SG_UF_PROVA"), None)
+                            _cmal = next((c for c in _base.columns if str(c).upper() == "ID_MALOTE"), None)
+                            _ccdl = next((c for c in _base.columns if str(c).upper() == "NU_CDL"), None)
+                            if _cufb is not None and (_cmal is not None or _ccdl is not None):
+                                _agg = {}
+                                if _cmal is not None:
+                                    _agg["Malotes"] = (_cmal, "nunique")
+                                if _ccdl is not None:
+                                    _agg["CDL"] = (_ccdl, "nunique")
+                                _gb = _base.groupby(_base[_cufb].astype(str).str.strip()).agg(**_agg)
+                                _gb = _gb.sort_values(_gb.columns[0], ascending=False)
+                                if len(_gb):
+                                    _hd = "".join(f"<th>{_esc_h(c)}</th>" for c in _gb.columns)
+                                    _rw = "".join(f"<tr><td>{_esc_h(_ix)}</td>" + "".join(f"<td style='text-align:right'>{int(_r[c]):,}</td>".replace(",", ".") for c in _gb.columns) + "</tr>" for _ix, _r in _gb.iterrows())
+                                    _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">📦 Logística reversa — malotes e CDL por UF</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> número de <b>malotes</b> (ID_MALOTE) e <b>centrais de distribuição logística</b>
+                                    (NU_CDL) distintos por UF. Dimensiona a operação de ida e retorno do material de prova — UFs com muitos malotes exigem
+                                    maior controle de rastreamento e prazo de coleta.</div>
+                                    <table><thead><tr><th>UF</th>{_hd}</tr></thead><tbody>{_rw}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # v102: (F) Concentração de recursos de atendimento por polo/UF (N91)
+                        try:
+                            _n91 = _ler_n52_cc  # placeholder guard; usa leitor dedicado abaixo
+                        except Exception:
+                            pass
+                        try:
+                            def _ler_n91_cc(_bytes):
+                                import io as _io91
+                                _xl = _pdc.ExcelFile(_io91.BytesIO(_bytes))
+                                for _s in _xl.sheet_names:
+                                    _d = _pdc.read_excel(_xl, _s)
+                                    _up = {str(c).upper() for c in _d.columns}
+                                    if "NO_ITEM_ATENDIMENTO" in _up and "CO_INSCRICAO" in _up:
+                                        return _d
+                                return None
+                            _n91d = _ler_n91_cc(arquivo.getvalue())
+                            if _n91d is not None:
+                                _u91 = {str(c).upper(): c for c in _n91d.columns}
+                                _cit = _u91.get("NO_ITEM_ATENDIMENTO")
+                                _cuf91 = _u91.get("SG_UF_MUNICIPIO_PROVA") or _u91.get("SG_UF_PROVA")
+                                if _cit is not None:
+                                    _itc = _n91d[_cit].astype(str).str.strip().replace({"": "—", "nan": "—"}).value_counts()
+                                    _extra += f"""<section><h2 style="border-left:5px solid #16a085">🧰 Concentração de recursos de atendimento (N91)</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> tipos de atendimento/recurso mais solicitados (N91). Orienta a preparação
+                                    de fiscais, materiais e salas — os itens no topo são os que mais demandam preparo. Total de solicitações: {int(_itc.sum()):,}.</div>
+                                    <div class="grafico"><div class="graf-titulo">Recursos de atendimento mais solicitados</div>
+                                    {_svg_hbar([(_k[:38], int(_v)) for _k, _v in _itc.head(15).items()], cor="#16a085")}
+                                    <div class="graf-leg">Cada barra é um tipo de recurso; o número é a quantidade de solicitações.</div></div>""".replace("{int(_itc.sum()):,}", f"{int(_itc.sum()):,}".replace(",", "."))
+                                    if _cuf91 is not None:
+                                        _u91c = _n91d[_cuf91].astype(str).str.strip().replace({"": "—", "nan": "—"}).value_counts()
+                                        if len(_u91c):
+                                            _extra += f"""<div class="grafico"><div class="graf-titulo">Solicitações de recurso por UF (polo)</div>
+                                            {_svg_hbar([(_k, int(_v)) for _k, _v in _u91c.head(27).items()], cor="#16a085")}
+                                            <div class="graf-leg">Concentração geográfica das solicitações de atendimento — polos que exigem mais preparo.</div></div>"""
+                                    _extra += "</section>"
+                        except Exception:
+                            pass
+                        # v104: PRIORIZAÇÃO dos não ensalados (N90 ausentes do N02) — por UF, nome social e atendimento
+                        try:
+                            _n90p = _ler_n90_cc(arquivo.getvalue())
+                            _cin02p = next((c for c in _base.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                            if _n90p is not None and _cin02p is not None:
+                                _up = {str(c).upper(): c for c in _n90p.columns}
+                                _cinp = _up.get("CO_INSCRICAO")
+                                if _cinp is not None:
+                                    _ids02p = set(_base[_cin02p].astype(str))
+                                    _forap = _n90p[~_n90p[_cinp].astype(str).isin(_ids02p)]
+                                    _nf = len(_forap)
+                                    if _nf:
+                                        # (i) por UF
+                                        _cufp = _up.get("SG_UF_MUNICIPIO_PROVA") or _up.get("SG_UF_PROVA")
+                                        _grafuf = ""
+                                        if _cufp is not None:
+                                            _ufp = _forap[_cufp].astype(str).str.strip().replace({"": "—", "nan": "—"}).value_counts().head(27)
+                                            if len(_ufp):
+                                                _grafuf = f"""<div class="grafico"><div class="graf-titulo">Não ensalados por UF</div>
+                                                {_svg_hbar([(_k, int(_v)) for _k, _v in _ufp.items()], cor="#c0392b")}
+                                                <div class="graf-leg">Concentração geográfica dos inscritos sem ensalamento — priorize as UFs no topo.</div></div>"""
+                                        # (ii) com nome social (prioridade máxima)
+                                        _cflp = _up.get("IN_ALOCACAO_NOME_SOCIAL")
+                                        _ns_fora = 0
+                                        if _cflp is not None:
+                                            _ns_fora = int((_pdc.to_numeric(_forap[_cflp], errors="coerce") == 1).sum())
+                                        # (iii) com atendimento (aparece no N91)
+                                        _at_fora = None
+                                        try:
+                                            def _ler_n91_p(_b):
+                                                import io as _io
+                                                _xl = _pdc.ExcelFile(_io.BytesIO(_b))
+                                                for _s in _xl.sheet_names:
+                                                    _d = _pdc.read_excel(_xl, _s)
+                                                    _u = {str(c).upper() for c in _d.columns}
+                                                    if "NO_ITEM_ATENDIMENTO" in _u and "CO_INSCRICAO" in _u:
+                                                        return _d
+                                                return None
+                                            _n91p = _ler_n91_p(arquivo.getvalue())
+                                            if _n91p is not None:
+                                                _ci91 = next((c for c in _n91p.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                                                if _ci91 is not None:
+                                                    _ids91 = set(_n91p[_ci91].astype(str))
+                                                    _at_fora = int(_forap[_cinp].astype(str).isin(_ids91).sum())
+                                        except Exception:
+                                            _at_fora = None
+                                        _cards = f"""<div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">Total não ensalados (N90 sem N02)</div><div class="kpi-val">{_nf:,}</div></div>
+                                        <div class="kpi-box" style="border-left:5px solid #8e44ad"><div class="kpi-lbl">🏳️‍🌈 Destes, com NOME SOCIAL</div><div class="kpi-val">{_ns_fora:,}</div></div>""".replace(",", ".")
+                                        if _at_fora is not None:
+                                            _cards += f"""<div class="kpi-box" style="border-left:5px solid #e67e22"><div class="kpi-lbl">♿ Destes, com ATENDIMENTO (N91)</div><div class="kpi-val">{_at_fora:,}</div></div>""".replace(",", ".")
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🚨 Não ensalados — priorização (quem mais preocupa)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> dos {_nf:,} inscritos no N90 que não constam no ensalamento (N02), esta análise
+                                        separa os que exigem <b>ação urgente</b>: quem tem <b>nome social</b> (direito a tratamento específico) e quem tem
+                                        <b>atendimento especializado</b> (N91) — grupos que, sem ensalamento, ficam sem a estrutura a que têm direito.
+                                        Comece pelos casos com nome social e/ou atendimento, depois pelas UFs de maior volume.</div>
+                                        <div class="kpi-grid">{_cards}</div>
+                                        {_grafuf}</section>""".replace("{_nf:,}", f"{_nf:,}".replace(",", "."))
+                        except Exception:
+                            pass
+                        # v105: completude por UF — quais UFs têm inscritos (N90) mas pouco/nenhum ensalamento (N02)
+                        try:
+                            _n90co = _ler_n90_cc(arquivo.getvalue())
+                            _cin02c = next((c for c in _base.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                            _cuf02 = next((c for c in _base.columns if str(c).upper() == "SG_UF_PROVA"), None)
+                            if _n90co is not None and _cin02c is not None:
+                                _uc = {str(c).upper(): c for c in _n90co.columns}
+                                _cuf90c = _uc.get("SG_UF_MUNICIPIO_PROVA") or _uc.get("SG_UF_PROVA")
+                                if _cuf90c is not None and _cuf02 is not None:
+                                    _insc_uf = _n90co[_cuf90c].astype(str).str.strip().replace({"": "—", "nan": "—"}).value_counts()
+                                    _ens_uf = _base[_cuf02].astype(str).str.strip().replace({"": "—", "nan": "—"}).value_counts()
+                                    _rows_c = []
+                                    for _uf in sorted(_insc_uf.index):
+                                        _ni = int(_insc_uf.get(_uf, 0))
+                                        _ne2 = int(_ens_uf.get(_uf, 0))
+                                        _cob = (_ne2 / _ni * 100) if _ni else 0
+                                        if _cob < 99.5:  # só UFs com lacuna de ensalamento
+                                            _sev_c = "crit" if _cob < 1 else ("aten" if _cob < 80 else "ok")
+                                            _rows_c.append((_uf, _ni, _ne2, _cob, _sev_c))
+                                    _rows_c.sort(key=lambda x: x[3])  # pior cobertura primeiro
+                                    if _rows_c:
+                                        _sic2 = {"crit": "row-crit", "aten": "row-aten", "ok": ""}
+                                        _emo = {"crit": "🔴", "aten": "🟠", "ok": "🟢"}
+                                        _crc = "".join(
+                                            f"<tr class='{_sic2[_sv]}'><td>{_emo[_sv]} {_esc_h(_uf)}</td>"
+                                            f"<td style='text-align:right'>{_ni:,}</td><td style='text-align:right'>{_ne2:,}</td>"
+                                            f"<td style='text-align:right;font-weight:600'>{_cob:.1f}%</td></tr>".replace(",", ".")
+                                            for _uf, _ni, _ne2, _cob, _sv in _rows_c)
+                                        _uf_zero = sum(1 for *_x, _c, _s in _rows_c if _c < 1)
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🧭 Completude do ensalamento por UF (N90 × N02)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> compara, por UF, quantos estão <b>inscritos</b> (N90) e quantos estão
+                                        <b>ensalados</b> (N02). Cobertura baixa indica que o ensalamento daquela UF pode estar <b>ausente ou incompleto na base</b>
+                                        — o que explicaria "não ensalados" em massa sem ser violação individual. UFs com <b>0%</b> quase certamente estão com o
+                                        N02 faltando. {_uf_zero} UF(s) com cobertura praticamente nula.</div>
+                                        <table><thead><tr><th>UF</th><th>Inscritos (N90)</th><th>Ensalados (N02)</th><th>Cobertura</th></tr></thead>
+                                        <tbody>{_crc}</tbody></table>
+                                        <p class="nota">Apenas UFs com cobertura &lt; 99,5% são listadas. 🔴 = ensalamento provavelmente ausente; 🟠 = incompleto.</p></section>"""
+                        except Exception:
+                            pass
+                        # v106: (equidade) Distância × atendimento especializado
+                        try:
+                            _cate2 = next((c for c in _base.columns if str(c).upper() in ("IN_ATENDIMENTO_ESPECIALIZADO", "IN_ATENDIMENTO_ESPECIFICO")), None)
+                            if _cate2 is not None and _dist is not None:
+                                _atv = _pdc.to_numeric(_base[_cate2], errors="coerce")
+                                _dcom = _dist[_atv == 1].dropna()
+                                _dsem = _dist[_atv == 0].dropna()
+                                if len(_dcom) > 3 and len(_dsem) > 3:
+                                    _difm = _dcom.mean() - _dsem.mean()
+                                    _sinal = "mais" if _difm > 0 else "menos"
+                                    _extra += f"""<section><h2 style="border-left:5px solid #2980b9">⚖️ Equidade — distância × atendimento especializado</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> compara o deslocamento de quem <b>tem</b> atendimento especializado com quem
+                                    <b>não tem</b>. Idealmente, quem precisa de atendimento não deveria percorrer distâncias maiores. Aqui, quem tem atendimento
+                                    percorre em média <b>{_dcom.mean():.2f} km</b> contra <b>{_dsem.mean():.2f} km</b> — <b>{abs(_difm):.2f} km {_sinal}</b>.
+                                    Diferenças relevantes podem indicar necessidade de aproximar esses participantes de locais acessíveis.</div>
+                                    <div class="grafico"><div class="graf-titulo">Distância média (km): com x sem atendimento</div>
+                                    {_svg_hbar([("Com atendimento", round(float(_dcom.mean()), 2)), ("Sem atendimento", round(float(_dsem.mean()), 2))], cor="#2980b9")}
+                                    <div class="graf-leg">Mediana: com atendimento {_dcom.median():.1f} km · sem atendimento {_dsem.median():.1f} km.</div></div></section>"""
+                        except Exception:
+                            pass
+                        # v106: (concentração) Top 10 salas mais lotadas
+                        try:
+                            if _locc is not None and _salac is not None:
+                                _occt = _base.groupby([_locc, _salac]).size().reset_index(name="Participantes").sort_values("Participantes", ascending=False).head(10)
+                                if len(_occt):
+                                    _trs = "".join(
+                                        f"<tr class=\"{'row-crit' if _r['Participantes'] > 40 else ''}\"><td>{_esc_h(_limpa_nome(str(_r[_locc])))}</td>"
+                                        f"<td>{_esc_h(str(_r[_salac]))}</td>"
+                                        f"<td style='text-align:right;font-weight:600'>{int(_r['Participantes'])}</td></tr>"
+                                        for _, _r in _occt.iterrows())
+                                    _extra += f"""<section><h2 style="border-left:5px solid #e67e22">🏆 Top 10 salas mais lotadas</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> as 10 salas com mais participantes. Salas acima da referência contratual
+                                    (~40) aparecem em vermelho — candidatas a verificação de capacidade e conforto. Concentração ajuda a priorizar fiscalização.</div>
+                                    <table><thead><tr><th>Local</th><th>Sala</th><th>Participantes</th></tr></thead><tbody>{_trs}</tbody></table></section>"""
+                        except Exception:
+                            pass
                         # (1) Estatística descritiva da distância — percentis, desvio, coef. de variação
                         try:
                             if _dist is not None:
@@ -13684,6 +14311,17 @@ def _run_streamlit_app() -> None:
                 _bk = _ler_base_cache(arquivo.getvalue())
                 # v88: aplica o mapeamento de colunas ajustado pelo usuário (se houver)
                 _bk = _aplicar_mapa_colunas(_bk, st.session_state.get("col_map", {}))
+                # v107: mesma normalização de sala na Visão Geral (ID_SALA vazio → usa NO_SALA)
+                try:
+                    if _bk is not None:
+                        _idsk = next((c for c in _bk.columns if str(c).upper() == "ID_SALA"), None)
+                        if (_idsk is None) or (not _bk[_idsk].notna().any()):
+                            _altk = next((c for c in _bk.columns if str(c).upper() in ("NO_SALA", "CO_SALA", "NU_SALA") and _bk[c].notna().any()), None)
+                            if _altk is not None:
+                                _bk = _bk.copy()
+                                _bk["ID_SALA"] = _bk[_altk]
+                except Exception:
+                    pass
                 if _bk is not None:
                     _Nk = len(_bk)
                     _fmt = lambda v: f"{int(v):,}".replace(",", ".")
