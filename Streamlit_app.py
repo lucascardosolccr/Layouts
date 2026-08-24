@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "107"
+STREAMLIT_APP_VERSION = "109"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -4007,6 +4007,18 @@ class VisualizerAndExporter:
         except Exception:
             _df_embed = results.df
         df_json_str = _df_embed.to_json(orient='records', force_ascii=True, date_format='iso')
+        # v109: compressão do maior blob (rawData). Em bases grandes este JSON chega a ~66 MB e sozinho
+        # inviabiliza o HTML (navegador e geração). Comprimido com gzip+base64 cai ~24x (para ~3 MB), SEM
+        # perder nenhuma linha/coluna. É descomprimido no navegador via pako (síncrono). Mantém fallback:
+        # se algo falhar, usa o JSON puro embutido.
+        import gzip as _gzip109
+        import base64 as _b64109
+        try:
+            _raw_b64gz = _b64109.b64encode(_gzip109.compress(df_json_str.encode('utf-8'), 6)).decode('ascii')
+            _raw_compressed_ok = True
+        except Exception:
+            _raw_b64gz = ""
+            _raw_compressed_ok = False
         locais_json_str = results.locais_agg.to_json(orient='records', force_ascii=True, date_format='iso')
         
         df_totals_clean = results.totals_df.copy().reset_index()
@@ -4142,6 +4154,7 @@ class VisualizerAndExporter:
             
             <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
             <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
             
             <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
             <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -5243,7 +5256,22 @@ class VisualizerAndExporter:
             <!-- MOTOR JAVASCRIPT DE CONECTIVIDADE, CROSS-FILTERING BLINDADO, EXPLAINABLE AI E RENDERIZAÇÃO ESTATÍSTICA (ANTI-CRASH INCORPORADO E INJEÇÃO REPLACE MATRIZ FORMAL JSON PURA ARRAY LIMITADORA MESTRE C-LEVEL) -->
             <script>
                 // O processo mágico de Injeção de DTOs via Python .replace (O Motor Backend envia os dados puros convertendo para objeto javascript de forma blindada, evitando conflitos F-String Crash)
-                const rawData = JSON_RAW_DATA;
+                // v109: rawData vem comprimido (gzip+base64) e é descomprimido aqui com pako (síncrono),
+                // reduzindo ~24x o tamanho do HTML sem perder dados. Fallback para JSON puro se algo falhar.
+                var rawData;
+                (function(){
+                    var _gz = "GZ_RAW_DATA";
+                    if (_gz && _gz.length > 4 && typeof pako !== "undefined") {
+                        try {
+                            var _bin = atob(_gz);
+                            var _bytes = new Uint8Array(_bin.length);
+                            for (var _i = 0; _i < _bin.length; _i++) { _bytes[_i] = _bin.charCodeAt(_i); }
+                            rawData = JSON.parse(pako.inflate(_bytes, { to: "string" }));
+                            return;
+                        } catch (e) { console.warn("Falha ao descomprimir rawData, usando JSON puro.", e); }
+                    }
+                    rawData = JSON_RAW_DATA;
+                })();
                 const locaisData = JSON_LOCAIS_DATA;
                 const totalsData = JSON_TOTALS_DATA;
                 const statsData = JSON_STATS_DATA;
@@ -7319,7 +7347,13 @@ class VisualizerAndExporter:
         """
         
         # INJEÇÃO PYTHON -> JSON JS EXTREMA E 100% SEGURA (.replace GARANTE ZERO F-STRING CRASH NA RENDERIZAÇÃO)
-        html_content = html_template.replace('JSON_RAW_DATA', df_json_str)
+        # v109: embute o rawData comprimido (não embute o JSON puro de 66 MB junto — usaria o dobro).
+        # Se a compressão funcionou: GZ_RAW_DATA = comprimido (~3 MB), fallback JSON_RAW_DATA = [] (vazio).
+        # Se falhou: GZ_RAW_DATA = "" e fallback JSON_RAW_DATA = JSON puro (comportamento anterior, sem perda).
+        if _raw_compressed_ok and _raw_b64gz:
+            html_content = html_template.replace('GZ_RAW_DATA', _raw_b64gz).replace('JSON_RAW_DATA', '[]')
+        else:
+            html_content = html_template.replace('GZ_RAW_DATA', '').replace('JSON_RAW_DATA', df_json_str)
         html_content = html_content.replace('JSON_LOCAIS_DATA', locais_json_str)
         html_content = html_content.replace('JSON_TOTALS_DATA', totals_json_str)
         html_content = html_content.replace('JSON_STATS_DATA', stats_json_str)
@@ -7417,6 +7451,7 @@ class VisualizerAndExporter:
             cdn_to_local = {
                 "https://code.jquery.com/jquery-3.6.0.min.js": "libs/jquery-3.6.0.min.js",
                 "https://cdn.plot.ly/plotly-2.24.1.min.js": "libs/plotly-2.24.1.min.js",
+                "https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js": "libs/pako-2.1.0.min.js",
                 "https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css": "libs/jquery.dataTables.min.css",
                 "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css": "libs/fontawesome.all.min.css",
                 "https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js": "libs/jquery.dataTables.min.js",
@@ -11230,6 +11265,7 @@ def _run_streamlit_app() -> None:
                     return None
                 # v97: leitor cacheado da aba N52 (locais/instituições) para análise de responsável/contato
                 @st.cache_data(show_spinner=False)
+                @st.cache_data(show_spinner=False)
                 def _ler_n52_cc(_bytes):
                     try:
                         _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
@@ -11239,6 +11275,20 @@ def _run_streamlit_app() -> None:
                             # N52 = locação de espaço físico: CO_LOCAL + coordenadas/responsável/e-mail, sem CO_INSCRICAO/ID_SALA
                             if "CO_LOCAL" in _up and "CO_INSCRICAO" not in _up and "ID_SALA" not in _up and (
                                     "NO_RESPONSAVEL" in _up or "TX_EMAIL_LOCAL" in _up or "NU_LATITUDE_LOCAL" in _up):
+                                return _limpa_colunas_nome(_dn)
+                    except Exception:
+                        pass
+                    return None
+                # v108: leitor cacheado da aba N91 (atendimentos) — reutilizado por todas as análises,
+                # evitando reler o Excel de 166k linhas várias vezes (causa de pico de RAM / « Oh no »).
+                @st.cache_data(show_spinner=False)
+                def _ler_n91_cc(_bytes):
+                    try:
+                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
+                        for _shn in _xn.sheet_names:
+                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
+                            _up = {str(_c).upper() for _c in _dn.columns}
+                            if "NO_ITEM_ATENDIMENTO" in _up and "CO_INSCRICAO" in _up:
                                 return _limpa_colunas_nome(_dn)
                     except Exception:
                         pass
@@ -11373,16 +11423,7 @@ def _run_streamlit_app() -> None:
                                                    "Participante", _fora_v))
                                     # v105: recorte de MÁXIMA prioridade — não ensalados que TÊM atendimento (N91)
                                     try:
-                                        def _ler_n91_x(_b):
-                                            import io as _iox
-                                            _xlx = _pdc.ExcelFile(_iox.BytesIO(_b))
-                                            for _sx in _xlx.sheet_names:
-                                                _dx = _pdc.read_excel(_xlx, _sx)
-                                                _ux = {str(c).upper() for c in _dx.columns}
-                                                if "NO_ITEM_ATENDIMENTO" in _ux and "CO_INSCRICAO" in _ux:
-                                                    return _dx
-                                            return None
-                                        _n91x = _ler_n91_x(arquivo.getvalue())
+                                        _n91x = _ler_n91_cc(arquivo.getvalue())
                                         if _n91x is not None:
                                             _ci91x = next((c for c in _n91x.columns if str(c).upper() == "CO_INSCRICAO"), None)
                                             _cit91 = next((c for c in _n91x.columns if str(c).upper() == "NO_ITEM_ATENDIMENTO"), None)
@@ -12280,19 +12321,6 @@ def _run_streamlit_app() -> None:
                             pass
                         # v102: (F) Concentração de recursos de atendimento por polo/UF (N91)
                         try:
-                            _n91 = _ler_n52_cc  # placeholder guard; usa leitor dedicado abaixo
-                        except Exception:
-                            pass
-                        try:
-                            def _ler_n91_cc(_bytes):
-                                import io as _io91
-                                _xl = _pdc.ExcelFile(_io91.BytesIO(_bytes))
-                                for _s in _xl.sheet_names:
-                                    _d = _pdc.read_excel(_xl, _s)
-                                    _up = {str(c).upper() for c in _d.columns}
-                                    if "NO_ITEM_ATENDIMENTO" in _up and "CO_INSCRICAO" in _up:
-                                        return _d
-                                return None
                             _n91d = _ler_n91_cc(arquivo.getvalue())
                             if _n91d is not None:
                                 _u91 = {str(c).upper(): c for c in _n91d.columns}
@@ -12344,16 +12372,7 @@ def _run_streamlit_app() -> None:
                                         # (iii) com atendimento (aparece no N91)
                                         _at_fora = None
                                         try:
-                                            def _ler_n91_p(_b):
-                                                import io as _io
-                                                _xl = _pdc.ExcelFile(_io.BytesIO(_b))
-                                                for _s in _xl.sheet_names:
-                                                    _d = _pdc.read_excel(_xl, _s)
-                                                    _u = {str(c).upper() for c in _d.columns}
-                                                    if "NO_ITEM_ATENDIMENTO" in _u and "CO_INSCRICAO" in _u:
-                                                        return _d
-                                                return None
-                                            _n91p = _ler_n91_p(arquivo.getvalue())
+                                            _n91p = _ler_n91_cc(arquivo.getvalue())
                                             if _n91p is not None:
                                                 _ci91 = next((c for c in _n91p.columns if str(c).upper() == "CO_INSCRICAO"), None)
                                                 if _ci91 is not None:
