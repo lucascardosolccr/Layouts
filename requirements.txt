@@ -1,6 +1,6 @@
 # Plataforma BI INEP/PND — camada Streamlit v17
 # Dependências do motor completo + interface Streamlit.
-streamlit>=1.36
+streamlit>=1.40
 pandas>=2.0
 numpy>=1.24
 scipy>=1.10
@@ -14,3 +14,4 @@ plotly>=5.20
 kaleido>=0.2.1 
 sweetviz>=2.3.0 
 tqdm>=4.66.0 
+
