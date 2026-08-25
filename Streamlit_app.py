@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "116"
+STREAMLIT_APP_VERSION = "119"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -1430,6 +1430,51 @@ class DataLoaderAndCleaner:
             
             # Leitura robusta descartando colunas e linhas 100% vazias
             self.df = pd.read_excel(excel_file, sheet_name=0).dropna(how='all', axis=1).dropna(how='all', axis=0)
+
+            # v119: FUSÃO MULTI-LAYOUT. O motor foi feito para uma base PLANA (tudo numa aba). Quando a base
+            # vem em ABAS SEPARADAS por layout (N02/N50/N52/N60), sem esta fusão o df principal fica só com o
+            # N02 (participantes) e TODOS os gráficos/KPIs de infraestrutura (capacidade, acessibilidade N60,
+            # conservação, coordenadas) ficam vazios ou pegam um ID como "capacidade". Aqui fundimos as colunas
+            # de infraestrutura por CO_LOCAL (+NO_SALA para salas), sem inflar linhas e sem sobrescrever colunas
+            # já presentes. Guardado: se algo falhar, mantém o df da 1ª aba (sem regressão).
+            try:
+                _cm = {str(c).upper() for c in self.df.columns}
+                if 'CO_LOCAL' in _cm and 'CO_INSCRICAO' in _cm and len(excel_file.sheet_names) > 1:
+                    _fused = []
+                    for _sh in excel_file.sheet_names[1:]:
+                        _od = pd.read_excel(excel_file, sheet_name=_sh).dropna(how='all', axis=1).dropna(how='all', axis=0)
+                        _oc = {str(c).upper() for c in _od.columns}
+                        # só funde layouts de INFRAESTRUTURA (têm CO_LOCAL e NÃO são de participantes)
+                        if 'CO_LOCAL' not in _oc or 'CO_INSCRICAO' in _oc:
+                            continue
+                        if 'QT_CAPACIDADE_MAXIMA_SALA' in _oc and 'NO_SALA' in _oc and 'NO_SALA' in _cm:
+                            _keys = ['CO_LOCAL', 'NO_SALA']          # N50 — grão de sala
+                        else:
+                            _keys = ['CO_LOCAL']                      # N52/N60 — grão de local
+                        _keys = [k for k in _keys if k in self.df.columns and k in _od.columns]
+                        if not _keys:
+                            continue
+                        _newcols = [c for c in _od.columns if str(c).upper() not in _cm and (
+                            str(c).upper().startswith(('QT_', 'IN_', 'TP_', 'VL_', 'NR_'))
+                            or str(c).upper() in ('NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL', 'NU_PONTOS_LOCAL_PROVA',
+                                                  'NU_LARGURA', 'NU_COMPRIMENTO', 'NO_MUNICIPIO', 'NO_BAIRRO'))]
+                        if not _newcols:
+                            continue
+                        _odd = _od.drop_duplicates(subset=_keys).copy()
+                        for _k in _keys:
+                            self.df[_k] = self.df[_k].astype(str)
+                            _odd[_k] = _odd[_k].astype(str)
+                        _n_antes = len(self.df)
+                        self.df = self.df.merge(_odd[_keys + _newcols], on=_keys, how='left')
+                        if len(self.df) != _n_antes:   # proteção contra inflação inesperada
+                            self.df = self.df.drop_duplicates(subset=['CO_INSCRICAO']) if 'CO_INSCRICAO' in self.df.columns else self.df.head(_n_antes)
+                        _cm = {str(c).upper() for c in self.df.columns}
+                        _fused.append(_sh)
+                    if _fused:
+                        self.logger.info(f"Fusão multi-layout: infraestrutura de {_fused} incorporada ao df principal → {self.df.shape[1]} colunas, {self.df.shape[0]} linhas.")
+            except Exception as _efus:
+                self.logger.warning(f"Fusão multi-layout ignorada ({_efus}); seguindo apenas com a primeira aba.")
+
             self.quality_report['linhas_brutas'], self.quality_report['colunas_brutas'] = self.df.shape
             
             self.logger.info(f"Ingestão Base Mestre concluída: {self.quality_report['linhas_brutas']} registros processados em RAM.")
@@ -1882,11 +1927,11 @@ class StatisticalMachineLearningEngine:
         
         # Mapeamento preventivo da coluna de capacidade para garantir estabilidade
         self.cap_col = None
-        if 'QT_CAPACIDADE_MAXIMA_SALA' in self.df.columns: 
+        if 'QT_CAPACIDADE_MAXIMA_SALA' in self.df.columns:
             self.cap_col = 'QT_CAPACIDADE_MAXIMA_SALA'
-        elif 'QT_CAPACIDADE_MAXIMA' in self.df.columns: 
+        elif 'QT_CAPACIDADE_MAXIMA' in self.df.columns:
             self.cap_col = 'QT_CAPACIDADE_MAXIMA'
-        elif self.num_cols: 
+        elif self.num_cols:
             self.cap_col = self.num_cols[0]
         
         self.cutoffs = {}
@@ -2206,7 +2251,10 @@ class StatisticalMachineLearningEngine:
         add('Salas Exclusivamente Destinadas a Reaplicação Extraordinária', cnt1('IN_REAPLICACAO'), 'count_flag', 'IN_REAPLICACAO')
         add('Alerta Cidadão: Prédios com Previsão de Reforma no Período', cnt1('IN_PREVISAO_REFORMA'), 'count_flag', 'IN_PREVISAO_REFORMA')
 
-        if self.cap_col:
+        # v118: só exibe KPIs de capacidade quando cap_col é REALMENTE uma coluna de capacidade.
+        # Antes, se nenhuma coluna de capacidade existia, cap_col caía para a 1ª numérica (um ID),
+        # gerando "capacidade" de bilhões de assentos. Agora, nesse caso, os KPIs são omitidos.
+        if self.cap_col and 'CAPACID' in str(self.cap_col).upper():
             add('Capacidade Física Total Instalada Nacional (Soma Bruta Vagas)', df[self.cap_col].sum(), 'sum', self.cap_col)
             add('Capacidade Média Logística por Unidade de Sala', df[self.cap_col].mean(), 'mean', self.cap_col)
             add('Capacidade Máxima Ocorrida em uma Única Sala Física (Outlier)', df[self.cap_col].max(), 'max', self.cap_col)
@@ -11279,6 +11327,21 @@ def _run_streamlit_app() -> None:
                     except Exception:
                         pass
                     return None
+                # v117: leitor cacheado da aba N50 (salas/espaço físico com capacidade máxima por sala).
+                @st.cache_data(show_spinner=False)
+                def _ler_n50_cap(_bytes):
+                    try:
+                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
+                        for _shn in _xn.sheet_names:
+                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
+                            _up = {str(_c).upper() for _c in _dn.columns}
+                            # N50 = salas com capacidade: tem NO_SALA/ID_SALA + QT_CAPACIDADE_MAXIMA_SALA, sem CO_INSCRICAO
+                            if "CO_INSCRICAO" not in _up and "QT_CAPACIDADE_MAXIMA_SALA" in _up and (
+                                    "NO_SALA" in _up or "ID_SALA" in _up):
+                                return _limpa_colunas_nome(_dn)
+                    except Exception:
+                        pass
+                    return None
                 # v108: leitor cacheado da aba N91 (atendimentos) — reutilizado por todas as análises,
                 # evitando reler o Excel de 166k linhas várias vezes (causa de pico de RAM / « Oh no »).
                 @st.cache_data(show_spinner=False)
@@ -12506,6 +12569,54 @@ def _run_streamlit_app() -> None:
                                     <div class="graf-leg">Mediana: com atendimento {_dcom.median():.1f} km · sem atendimento {_dsem.median():.1f} km.</div></div></section>"""
                         except Exception:
                             pass
+                        # v117: CAPACIDADE PLANEJADA (N50) × OCUPAÇÃO REAL (N02) — salas acima da capacidade contratada.
+                        try:
+                            _n50c = _ler_n50_cap(arquivo.getvalue())
+                            if _n50c is not None and _locc is not None and _salac is not None:
+                                _u50 = {str(c).upper(): c for c in _n50c.columns}
+                                _l50 = _u50.get("CO_LOCAL")
+                                _s50 = _u50.get("NO_SALA") or _u50.get("ID_SALA")
+                                _cap50 = _u50.get("QT_CAPACIDADE_MAXIMA_SALA") or _u50.get("QT_CAPACIDADE_MAXIMA")
+                                if _l50 and _s50 and _cap50:
+                                    _occ = _base.groupby([_base[_locc].astype(str), _base[_salac].astype(str)]).size().reset_index()
+                                    _occ.columns = ["_L", "_S", "_OCC"]
+                                    _capd = _n50c.copy()
+                                    _capd["_L"] = _capd[_l50].astype(str)
+                                    _capd["_S"] = _capd[_s50].astype(str)
+                                    _capg = _capd.groupby(["_L", "_S"])[_cap50].max().reset_index()
+                                    _mrg = _occ.merge(_capg, on=["_L", "_S"], how="left")
+                                    _mrg["_CAP"] = _pdc.to_numeric(_mrg[_cap50], errors="coerce")
+                                    _comc = _mrg[_mrg["_CAP"].notna() & (_mrg["_CAP"] > 0)].copy()
+                                    if len(_comc):
+                                        _comc["_TX"] = _comc["_OCC"] / _comc["_CAP"] * 100
+                                        _acima = _comc[_comc["_OCC"] > _comc["_CAP"]].sort_values("_OCC", ascending=False)
+                                        _n_ac = len(_acima)
+                                        _n_95 = int((_comc["_TX"] > 95).sum())
+                                        _n_sub = int((_comc["_TX"] < 50).sum())
+                                        _tx_med = _comc["_TX"].mean()
+                                        _drill_c = ""
+                                        if _n_ac:
+                                            _rw_c = "".join(
+                                                f"<tr class='row-crit'><td>{_esc_h(_limpa_nome(str(_r['_L'])))}</td><td>{_esc_h(str(_r['_S']))}</td>"
+                                                f"<td style='text-align:right'>{int(_r['_OCC'])}</td><td style='text-align:right'>{int(_r['_CAP'])}</td>"
+                                                f"<td style='text-align:right;font-weight:700'>{_r['_TX']:.0f}%</td></tr>"
+                                                for _, _r in _acima.head(500).iterrows())
+                                            _drill_c = (f"<details class='casos-det' open><summary>🔎 Ver as {_n_ac} sala(s) acima da capacidade</summary>"
+                                                        f"<table><thead><tr><th>Local</th><th>Sala</th><th>Ocupação real</th><th>Capacidade (N50)</th><th>Taxa</th></tr></thead>"
+                                                        f"<tbody>{_rw_c}</tbody></table><p class='nota'>Até 500 exibidas. Ocupação real (N02) maior que a capacidade máxima planejada (N50).</p></details>")
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">📐 Capacidade planejada (N50) × ocupação real (N02)</h2>
+                                        <div class="interp"><b>📖 O que isto verifica:</b> cruza a <b>capacidade máxima contratada de cada sala</b> (N50) com o <b>número real
+                                        de ensalados</b> (N02). Salas com ocupação <b>acima da capacidade</b> indicam superlotação — risco de conforto, acessibilidade e
+                                        conformidade. {_n_ac} sala(s) acima da capacidade; taxa média de ocupação {_tx_med:.0f}%.</div>
+                                        <div class="kpi-grid">
+                                          <div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">🔴 Salas acima da capacidade</div><div class="kpi-val">{_n_ac}</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #e67e22"><div class="kpi-lbl">🟠 Salas &gt; 95% da capacidade</div><div class="kpi-val">{_n_95:,}</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #2980b9"><div class="kpi-lbl">📊 Taxa média de ocupação</div><div class="kpi-val">{_tx_med:.0f}%</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #27ae60"><div class="kpi-lbl">🟢 Salas &lt; 50% (subutilizadas)</div><div class="kpi-val">{_n_sub}</div></div>
+                                        </div>
+                                        {_drill_c}</section>""".replace("{_n_95:,}", f"{_n_95:,}".replace(",", "."))
+                        except Exception:
+                            pass
                         # v115: PERFIL DE RISCO CONSOLIDADO — participantes que acumulam múltiplos fatores de risco.
                         # Sintetiza sinais dispersos (distância, atendimento em sala comum, versão especial de prova) num
                         # score por participante; quem tem 2+ fatores é prioridade máxima de verificação.
@@ -13718,6 +13829,22 @@ def _run_streamlit_app() -> None:
                             _sec_titulos.append(_tt)
                             return _m.group(0).replace("<section", f'<section id="sec-{_idx}"', 1)
 
+                        # v117: consolidação — remove seções com título <h2> EXATAMENTE idêntico (mantém a 1ª).
+                        # Seguro: só elimina duplicatas verdadeiras; análises distintas (títulos diferentes) são preservadas.
+                        try:
+                            _seen_h2 = set()
+                            def _dedup_sec(_mm):
+                                _sec = _mm.group(0)
+                                _tm = _re2.search(r"<h2[^>]*>(.*?)</h2>", _sec, _re2.S)
+                                if _tm:
+                                    _tt = _re2.sub(r"<[^>]+>", "", _tm.group(1)).strip()
+                                    if _tt in _seen_h2:
+                                        return ""
+                                    _seen_h2.add(_tt)
+                                return _sec
+                            _html_full = _re2.sub(r"<section.*?</section>", _dedup_sec, _html_full, flags=_re2.S)
+                        except Exception:
+                            pass
                         _html_full = _re2.sub(r"<section.*?</section>", _add_id, _html_full, flags=_re2.S)
                         if _sec_titulos:
                             _nav = ('<nav class="toc"><span class="toc-t">📑 Sumário</span>'
