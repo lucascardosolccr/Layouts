@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "114"
+STREAMLIT_APP_VERSION = "116"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -12341,6 +12341,60 @@ def _run_streamlit_app() -> None:
                                             {_svg_hbar([(_k, int(_v)) for _k, _v in _u91c.head(27).items()], cor="#16a085")}
                                             <div class="graf-leg">Concentração geográfica das solicitações de atendimento — polos que exigem mais preparo.</div></div>"""
                                     _extra += "</section>"
+                        except Exception:
+                            pass
+                        # v116: RECONCILIAÇÃO de atendimento N91 × N02 — quem solicitou item de atendimento (N91)
+                        # mas cujo ensalamento (N02) NÃO marca atendimento especializado (risco de não receber o recurso).
+                        try:
+                            _n91r = _ler_n91_cc(arquivo.getvalue())
+                            _cate_r = next((c for c in _base.columns if str(c).upper() in ("IN_ATENDIMENTO_ESPECIALIZADO", "IN_ATENDIMENTO_ESPECIFICO")), None)
+                            _cin_r = next((c for c in _base.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                            if _n91r is not None and _cate_r is not None and _cin_r is not None:
+                                _u91r = {str(c).upper(): c for c in _n91r.columns}
+                                _ci91r = _u91r.get("CO_INSCRICAO")
+                                _cit91r = _u91r.get("NO_ITEM_ATENDIMENTO")
+                                if _ci91r is not None:
+                                    # mapa inscrição -> itens solicitados no N91
+                                    if _cit91r is not None:
+                                        _map_item = _n91r.groupby(_n91r[_ci91r].astype(str))[_cit91r].apply(
+                                            lambda s: "; ".join(sorted(set(str(x) for x in s if str(x) != "nan")))).to_dict()
+                                    else:
+                                        _map_item = {}
+                                    _ids91r = set(_n91r[_ci91r].astype(str))
+                                    _base_ids_r = _base[_cin_r].astype(str)
+                                    _em91 = _base_ids_r.isin(_ids91r)
+                                    _flag = _pdc.to_numeric(_base[_cate_r], errors="coerce")
+                                    # solicitou no N91, está ensalado, mas N02 não marca atendimento
+                                    _risco = _base[_em91 & (_flag == 0)]
+                                    _n_risco = len(_risco)
+                                    _n_ok = int((_em91 & (_flag == 1)).sum())
+                                    if _n_risco or _n_ok:
+                                        _cols_rec = [(_cin_r, "Inscrição")]
+                                        for _ck in ["NO_INSCRITO", "SG_UF_PROVA", "NO_LOCAL_PROVA", "NO_SALA"]:
+                                            _cc = next((c for c in _base.columns if str(c).upper() == _ck), None)
+                                            if _cc:
+                                                _cols_rec.append((_cc, _ck.replace("_", " ").title()))
+                                        _hd_rec = "".join(f"<th>{_esc_h(_t)}</th>" for _, _t in _cols_rec) + "<th>Item solicitado (N91)</th>"
+                                        _rw_rec = ""
+                                        for _, _r in _risco.head(500).iterrows():
+                                            _idr = str(_r[_cin_r])
+                                            _rw_rec += "<tr class='row-crit'>" + "".join(
+                                                f"<td>{_esc_h(_limpa_nome(str(_r[_c])) if isinstance(_r[_c], str) else _r[_c])}</td>"
+                                                for _c, _ in _cols_rec) + f"<td>{_esc_h(_map_item.get(_idr, '—'))}</td></tr>"
+                                        _drill_rec = ("" if not _n_risco else
+                                                      f"<details class='casos-det' open><summary>🔎 Ver os {_n_risco} participante(s) com atendimento solicitado mas não marcado no ensalamento</summary>"
+                                                      f"<table><thead><tr>{_hd_rec}</tr></thead><tbody>{_rw_rec}</tbody></table>"
+                                                      f"<p class='nota'>Até 500 exibidos. Verificar se o recurso solicitado será efetivamente provido na sala.</p></details>")
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🔗 Reconciliação de atendimento (N91 × N02)</h2>
+                                        <div class="interp"><b>📖 O que isto verifica:</b> cruza quem <b>solicitou um item de atendimento</b> (N91: tempo adicional,
+                                        auxílio para leitura, etc.) com o <b>ensalamento</b> (N02). Se a pessoa solicitou mas o N02 <b>não a marca como atendimento
+                                        especializado</b>, há risco de ela <b>não receber o recurso</b> no dia da prova. {_n_risco} solicitante(s) ensalado(s) sem a
+                                        marcação de atendimento no N02; {_n_ok} corretamente marcados.</div>
+                                        <div class="kpi-grid">
+                                          <div class="kpi-box" style="border-left:5px solid #27ae60"><div class="kpi-lbl">✅ Solicitou e está marcado</div><div class="kpi-val">{_n_ok}</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">🔴 Solicitou mas NÃO marcado (risco)</div><div class="kpi-val">{_n_risco}</div></div>
+                                        </div>
+                                        {_drill_rec}</section>"""
                         except Exception:
                             pass
                         # v104: PRIORIZAÇÃO dos não ensalados (N90 ausentes do N02) — por UF, nome social e atendimento
