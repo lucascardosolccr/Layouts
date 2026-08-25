@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "110"
+STREAMLIT_APP_VERSION = "114"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -12452,6 +12452,61 @@ def _run_streamlit_app() -> None:
                                     <div class="graf-leg">Mediana: com atendimento {_dcom.median():.1f} km · sem atendimento {_dsem.median():.1f} km.</div></div></section>"""
                         except Exception:
                             pass
+                        # v115: PERFIL DE RISCO CONSOLIDADO — participantes que acumulam múltiplos fatores de risco.
+                        # Sintetiza sinais dispersos (distância, atendimento em sala comum, versão especial de prova) num
+                        # score por participante; quem tem 2+ fatores é prioridade máxima de verificação.
+                        try:
+                            _fatores = _pdc.DataFrame(index=_base.index)
+                            _labels_fat = []
+                            if _dist is not None:
+                                _fatores["dist"] = (_dist > 20).fillna(False).astype(int)
+                                _labels_fat.append(("dist", "Distância crítica (>20 km)"))
+                            _cate3 = next((c for c in _base.columns if str(c).upper() in ("IN_ATENDIMENTO_ESPECIALIZADO", "IN_ATENDIMENTO_ESPECIFICO")), None)
+                            _ctpe3 = next((c for c in _base.columns if str(c).upper() == "TP_ENSALAMENTO"), None)
+                            if _cate3 is not None and _ctpe3 is not None:
+                                _fatores["atend"] = ((_pdc.to_numeric(_base[_cate3], errors="coerce") == 1) &
+                                                     (_pdc.to_numeric(_base[_ctpe3], errors="coerce") == 0)).astype(int)
+                                _labels_fat.append(("atend", "Atendimento em sala comum"))
+                            _ckit3 = next((c for c in _base.columns if str(c).upper() == "ID_KIT_PROVA"), None)
+                            if _ckit3 is not None:
+                                _kv = _pdc.to_numeric(_base[_ckit3], errors="coerce")
+                                if _kv.notna().any() and (_kv == 0).any():
+                                    _fatores["kit"] = ((_kv != 0) & _kv.notna()).astype(int)
+                                    _labels_fat.append(("kit", "Versão especial de prova"))
+                            if len(_fatores.columns) >= 2:
+                                _fatores["_score"] = _fatores[[c for c, _ in _labels_fat]].sum(axis=1)
+                                _dist_score = _fatores["_score"].value_counts().reindex(range(len(_labels_fat) + 1)).fillna(0).astype(int)
+                                _mult = _fatores[_fatores["_score"] >= 2]
+                                _cinsc_r = next((c for c in _base.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                                _drill_r = ""
+                                if len(_mult) and _cinsc_r is not None:
+                                    _cols_r = [(_cinsc_r, "Inscrição")]
+                                    for _ck in ["NO_INSCRITO", "SG_UF_PROVA", "NO_MUNICIPIO_PROVA", "NO_LOCAL_PROVA", "NO_SALA"]:
+                                        _cc = next((c for c in _base.columns if str(c).upper() == _ck), None)
+                                        if _cc:
+                                            _cols_r.append((_cc, _ck.replace("_", " ").title()))
+                                    _sub_r = _base.loc[_mult.index]
+                                    _hd_r = "".join(f"<th>{_esc_h(_t)}</th>" for _, _t in _cols_r) + "<th>Fatores</th>"
+                                    _rw_r = ""
+                                    for _ix in _mult.sort_values("_score", ascending=False).head(500).index:
+                                        _fl = [_lbl for _k, _lbl in _labels_fat if _fatores.at[_ix, _k] == 1]
+                                        _rw_r += "<tr class='row-crit'>" + "".join(
+                                            f"<td>{_esc_h(_limpa_nome(str(_base.at[_ix, _c])) if isinstance(_base.at[_ix, _c], str) else _base.at[_ix, _c])}</td>"
+                                            for _c, _ in _cols_r) + f"<td>{_esc_h(' + '.join(_fl))}</td></tr>"
+                                    _drill_r = (f"<details class='casos-det' open><summary>🔎 Ver os {len(_mult)} participante(s) com 2+ fatores de risco</summary>"
+                                                f"<table><thead><tr>{_hd_r}</tr></thead><tbody>{_rw_r}</tbody></table>"
+                                                f"<p class='nota'>Até 500 exibidos, ordenados por nº de fatores.</p></details>")
+                                _kpis_r = "".join(
+                                    f"<div class='kpi-box' style='border-left:5px solid {_cor}'><div class='kpi-lbl'>{_n} fator(es)</div><div class='kpi-val'>{int(_dist_score.get(_n, 0)):,}</div></div>".replace(",", ".")
+                                    for _n, _cor in [(0, "#27ae60"), (1, "#f1c40f"), (2, "#e67e22"), (3, "#c0392b")] if _n <= len(_labels_fat))
+                                _extra += f"""<section><h2 style="border-left:5px solid #c0392b">🎯 Perfil de risco consolidado do participante</h2>
+                                <div class="interp"><b>📖 Como interpretar:</b> em vez de olhar cada problema isolado, esta análise <b>soma os fatores de risco por
+                                participante</b> ({', '.join(_l for _, _l in _labels_fat)}). Quem acumula <b>2 ou mais</b> fatores é <b>prioridade máxima</b> — são os
+                                casos onde vários problemas se sobrepõem na mesma pessoa. {int((_fatores['_score'] >= 2).sum()):,} participante(s) com 2+ fatores.</div>
+                                <div class="kpi-grid">{_kpis_r}</div>
+                                {_drill_r}</section>""".replace("{int((_fatores['_score'] >= 2).sum()):,}", f"{int((_fatores['_score'] >= 2).sum()):,}".replace(",", "."))
+                        except Exception:
+                            pass
                         # v106: (concentração) Top 10 salas mais lotadas
                         try:
                             if _locc is not None and _salac is not None:
@@ -13031,7 +13086,11 @@ def _run_streamlit_app() -> None:
                                 if _has_d:
                                     _sub["_DKM"] = _dist.values
                                 _limpa_loc = _cux.get("NO_LOCAL_PROVA")
-                                _rws = []
+                                # v113: VIRTUALIZAÇÃO — em vez de embutir 68 mil <tr> (que travam o navegador),
+                                # embute TODOS os registros como JSON compacto e o JS renderiza só a página visível.
+                                # Nenhum dado é perdido: busca, ordenação, filtro e exportação operam sobre o dataset COMPLETO.
+                                _dist_idx = -1
+                                _mp_rows = []
                                 for _t in _sub.itertuples(index=False):
                                     _vals = list(_t)
                                     if _has_d:
@@ -13039,42 +13098,48 @@ def _run_streamlit_app() -> None:
                                         _base_vals = _vals[:-1]
                                     else:
                                         _dv, _base_vals = None, _vals
-                                    _tds = []
+                                    _cells = []
                                     for _lbl, _c in _mp_cols:
                                         _vv = _base_vals[[cc for _, cc in _mp_cols].index(_c)]
                                         _txt = "" if _vv is None or (isinstance(_vv, float) and _vv != _vv) else str(_vv)
                                         if _c == _limpa_loc and _txt:
                                             _txt = _limpa_nome(_txt)
-                                        _tds.append(f"<td>{_esc_h(_txt)}</td>")
-                                    _rcls = ""
-                                    if _has_d and _dv is not None and _dv == _dv:
-                                        if _dv > 20:
-                                            _sev, _rcls = "🔴", " class='row-crit'"
-                                        elif _dv >= 15:
-                                            _sev, _rcls = "🟡", " class='row-aten'"
+                                        _cells.append(_txt)
+                                    if _has_d:
+                                        if _dv is not None and _dv == _dv:
+                                            _cells.append(f"{_dv:.1f}")
+                                            _cells.append("🔴" if _dv > 20 else ("🟡" if _dv >= 15 else "🟢"))
                                         else:
-                                            _sev = "🟢"
-                                        _tds.append(f"<td style='text-align:right'>{_dv:.1f}</td><td>{_sev}</td>")
-                                    _rws.append(f"<tr{_rcls}>" + "".join(_tds) + "</tr>")
-                                _head = "".join(f"<th>{_l}</th>" for _l, _ in _mp_cols) + ("<th>Dist. km</th><th>Sev.</th>" if _has_d else "")
-                                _tot_mp = len(_rws)
-                                _rows_html = "".join(
-                                    _r.replace("<tr", "<tr class='mp-hide'", 1) if (_r.startswith("<tr>") and _i >= 200) else
-                                    (_r.replace("<tr ", "<tr class='mp-hide' ", 1) if _i >= 200 else _r)
-                                    for _i, _r in enumerate(_rws))
+                                            _cells.append("")
+                                            _cells.append("")
+                                    _mp_rows.append(_cells)
+                                _all_lbls = [_l for _l, _ in _mp_cols] + (["Dist. km", "Sev."] if _has_d else [])
+                                if _has_d:
+                                    _dist_idx = len(_mp_cols)  # coluna da distância (para colorir a linha)
+                                _tot_mp = len(_mp_rows)
+                                _head = "".join(f"<th onclick='mpSort({_ix})' style='cursor:pointer' title='Ordenar'>{_esc_h(_l)} ⇅</th>"
+                                                for _ix, _l in enumerate(_all_lbls))
+                                _mp_json = json.dumps(_mp_rows, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+                                _head_json = json.dumps(_all_lbls, ensure_ascii=False).replace("<", "\\u003c")
                                 _master_section = f"""<section id="consulta-participantes"><h2 style="border-left:5px solid #1f4e79">🔍 Consulta de participantes — quem são</h2>
-                                <div class="interp"><b>📖 Rastreabilidade total:</b> para qualquer número deste relatório (participantes de um kit, de uma sala,
-                                de uma faixa de distância, de um município…), digite o termo abaixo e veja <b>exatamente quais participantes</b>. Ex.: digite o
-                                nome de um município para ver todos os seus inscritos; digite uma sala para ver quem está nela. Clique nos cabeçalhos para ordenar.
-                                <br><b>💡 Dica:</b> em qualquer tabela de análise acima, <b>clique no nome</b> (município, local, sala, bloco) para filtrar esta consulta automaticamente.</div>
-                                <input id="mp-search" placeholder="🔍 Buscar por inscrição, município, local, sala, bloco, tipo, kit…"
+                                <div class="interp"><b>📖 Rastreabilidade total:</b> os <b>{_tot_mp:,}</b> participantes estão todos aqui. Digite um termo (município, local,
+                                sala, bloco, kit, inscrição) para buscar entre <b>todos</b>; clique nos cabeçalhos para ordenar; navegue pelas páginas. A tabela é
+                                <b>virtualizada</b> — o navegador só desenha a página visível, por isso abre rápido mesmo com dezenas de milhares de registros.
+                                Em qualquer tabela acima, <b>clique no nome</b> para filtrar esta consulta.</div>
+                                <input id="mp-search" placeholder="🔍 Buscar entre todos os {_tot_mp:,} participantes…"
                                        oninput="mpFilter()" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;margin-bottom:8px">
-                                <div id="mp-count" style="font-size:13px;color:#5b6b7f;margin-bottom:8px">{_tot_mp:,} participantes — mostrando os primeiros 200</div>
-                                <div class="tbl-wrap"><table id="mp-table"><thead><tr>{_head}</tr></thead><tbody>{_rows_html}</tbody></table></div>
-                                <div style="text-align:center;margin-top:10px">
-                                  <button id="mp-more" onclick="mpShowAll()" style="padding:8px 16px;background:#1f4e79;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600">Mostrar todos os {_tot_mp:,}</button>
-                                  <button onclick="mpExport()" style="padding:8px 16px;background:#16a085;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600;margin-left:8px">⬇️ Baixar participantes (visão atual)</button>
-                                </div></section>""".replace("{_tot_mp:,}", f"{_tot_mp:,}".replace(",", "."))
+                                <div id="mp-count" style="font-size:13px;color:#5b6b7f;margin-bottom:8px">{_tot_mp:,} participantes</div>
+                                <div class="tbl-wrap"><table id="mp-table"><thead><tr>{_head}</tr></thead><tbody id="mp-tbody"></tbody></table></div>
+                                <div style="display:flex;gap:6px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap">
+                                  <button onclick="mpFirst()" class="mp-btn">« Início</button>
+                                  <button onclick="mpPage(-1)" class="mp-btn">‹ Anterior</button>
+                                  <span id="mp-pageinfo" style="font-size:13px;color:#5b6b7f;min-width:70px;text-align:center">1/1</span>
+                                  <button onclick="mpPage(1)" class="mp-btn">Próxima ›</button>
+                                  <button onclick="mpLast()" class="mp-btn">Fim »</button>
+                                  <button onclick="mpExport()" class="mp-btn" style="background:#16a085">⬇️ Baixar todos (CSV)</button>
+                                </div>
+                                <script>window.MP_DATA={_mp_json};window.MP_HEAD={_head_json};window.MP_DISTCOL={_dist_idx};
+                                if(document.getElementById('mp-tbody')&&window.mpRender){{mpRender();}}</script></section>""".replace("{_tot_mp:,}", f"{_tot_mp:,}".replace(",", "."))
                         except Exception:
                             _master_section = ""
 
@@ -13107,6 +13172,8 @@ def _run_streamlit_app() -> None:
                         #casos-backtop.show {{ opacity:.92; pointer-events:auto; }}
                         .mp-hide {{ display:none; }}
                         #mp-table {{ font-size:13px; }}
+                        .mp-btn {{ padding:7px 13px; background:#1f4e79; color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px; }}
+                        .mp-btn:hover {{ opacity:.9; }}
                         #mp-table th {{ position:sticky; top:0; }}
                         #consulta-participantes .tbl-wrap {{ max-height:600px; overflow-y:auto; }}
                         section:not(#consulta-participantes) tbody td:first-child {{ cursor:pointer; transition:background .12s; }}
@@ -13272,33 +13339,53 @@ def _run_streamlit_app() -> None:
                         {_footer}
                         <script>
                         // v84: busca e paginação da tabela-mestre de participantes
-                        var _mpAll=false;
+                        // v113: tabela VIRTUALIZADA — todos os registros ficam em window.MP_DATA; o DOM só recebe a
+                        // página visível (100 linhas). Busca, ordenação, filtro e exportação operam sobre o dataset COMPLETO.
+                        var _mpFilt=null, _mpPage=0, _mpPS=100, _mpSortCol=-1, _mpSortDir=1;
+                        function _mpIdx(){{
+                          if(_mpFilt) return _mpFilt;
+                          var a=[]; var d=window.MP_DATA||[]; for(var i=0;i<d.length;i++) a.push(i); return a;
+                        }}
+                        function _mpEsc(s){{ s=(s==null?'':''+s); return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }}
+                        function mpRender(){{
+                          var d=window.MP_DATA||[]; var idx=_mpIdx();
+                          var tot=idx.length; var pages=Math.max(1,Math.ceil(tot/_mpPS));
+                          if(_mpPage>=pages) _mpPage=pages-1; if(_mpPage<0) _mpPage=0;
+                          var start=_mpPage*_mpPS, end=Math.min(start+_mpPS,tot);
+                          var tb=document.getElementById('mp-tbody'); if(!tb) return;
+                          var dc=(window.MP_DISTCOL==null?-1:window.MP_DISTCOL); var html='';
+                          for(var k=start;k<end;k++){{
+                            var row=d[idx[k]]; if(!row) continue;
+                            var cls=''; if(dc>=0){{ var sev=row[dc+1]; cls = sev==='🔴'?" class='row-crit'":(sev==='🟡'?" class='row-aten'":''); }}
+                            var tds=''; for(var c=0;c<row.length;c++){{ tds+='<td>'+_mpEsc(row[c])+'</td>'; }}
+                            html+='<tr'+cls+'>'+tds+'</tr>';
+                          }}
+                          tb.innerHTML=html;
+                          var cnt=document.getElementById('mp-count');
+                          if(cnt) cnt.textContent=tot.toLocaleString('pt-BR')+' participante(s)'+(_mpFilt?' encontrados':'')+' · mostrando '+(tot?(start+1):0)+'–'+end;
+                          var pi=document.getElementById('mp-pageinfo'); if(pi) pi.textContent=(_mpPage+1)+'/'+pages;
+                        }}
                         function mpFilter(){{
-                          var inp=document.getElementById('mp-search'); if(!inp) return;
-                          var q=inp.value.toLowerCase().trim();
-                          var tb=document.querySelector('#mp-table tbody'); if(!tb) return;
-                          var rows=tb.querySelectorAll('tr'), vis=0;
-                          rows.forEach(function(tr){{
-                            var match = q==='' || tr.textContent.toLowerCase().indexOf(q)>=0;
-                            if(q===''){{
-                              // sem busca: respeita paginação (200) a menos que "mostrar todos"
-                              tr.style.display = (_mpAll || !tr.classList.contains('mp-hide')) ? '' : 'none';
-                            }} else {{
-                              tr.style.display = match ? '' : 'none';
-                            }}
-                            if(tr.style.display!=='none') vis++;
+                          var inp=document.getElementById('mp-search'); var q=inp?inp.value.toLowerCase().trim():'';
+                          var d=window.MP_DATA||[];
+                          if(q===''){{ _mpFilt=null; }}
+                          else {{ _mpFilt=[]; for(var i=0;i<d.length;i++){{ if(d[i].join(' ').toLowerCase().indexOf(q)>=0) _mpFilt.push(i); }} }}
+                          _mpPage=0; mpRender();
+                        }}
+                        function mpSort(col){{
+                          if(_mpSortCol===col) _mpSortDir=-_mpSortDir; else {{ _mpSortCol=col; _mpSortDir=1; }}
+                          var d=window.MP_DATA||[]; var idx=_mpIdx().slice();
+                          idx.sort(function(a,b){{
+                            var va=(d[a][col]==null?'':''+d[a][col]), vb=(d[b][col]==null?'':''+d[b][col]);
+                            var na=parseFloat(va.replace(',','.')), nb=parseFloat(vb.replace(',','.'));
+                            if(!isNaN(na)&&!isNaN(nb)&&va!==''&&vb!=='') return (na-nb)*_mpSortDir;
+                            return va.localeCompare(vb,'pt-BR')*_mpSortDir;
                           }});
-                          var c=document.getElementById('mp-count');
-                          if(c) c.textContent = q==='' ? (vis+' participantes mostrados') : (vis+' participante(s) encontrado(s) para "'+inp.value+'"');
+                          _mpFilt=idx; _mpPage=0; mpRender();
                         }}
-                        function mpShowAll(){{
-                          _mpAll=true;
-                          document.querySelectorAll('#mp-table tbody tr.mp-hide').forEach(function(tr){{ tr.style.display=''; }});
-                          var b=document.getElementById('mp-more'); if(b) b.style.display='none';
-                          var c=document.getElementById('mp-count'); var n=document.querySelectorAll('#mp-table tbody tr').length;
-                          if(c) c.textContent=n+' participantes mostrados';
-                        }}
-                        // v85: clicar em qualquer nome (município/sala/local/bloco) nas análises → filtra a tabela-mestre
+                        function mpPage(delta){{ _mpPage+=delta; mpRender(); }}
+                        function mpFirst(){{ _mpPage=0; mpRender(); }}
+                        function mpLast(){{ _mpPage=Math.ceil(_mpIdx().length/_mpPS)-1; mpRender(); }}
                         function mpJump(term){{
                           var inp=document.getElementById('mp-search');
                           var sec=document.getElementById('consulta-participantes');
@@ -13307,22 +13394,17 @@ def _run_streamlit_app() -> None:
                           sec.scrollIntoView({{behavior:'smooth', block:'start'}});
                           inp.focus();
                         }}
-                        // v86: exportar a consulta de participantes (visão atual / filtrada) em CSV
+                        // exporta o dataset COMPLETO (ou o filtrado atual) — todas as linhas, não só a página visível
                         function mpExport(){{
-                          var t=document.getElementById('mp-table'); if(!t) return;
-                          var lines=[]; var head=[];
-                          t.querySelectorAll('thead th').forEach(function(th){{ head.push('"'+th.textContent.trim().replace(/"/g,'""')+'"'); }});
-                          lines.push(head.join(','));
-                          var n=0;
-                          t.querySelectorAll('tbody tr').forEach(function(tr){{
-                            if(tr.style.display==='none') return;
-                            var row=[]; tr.querySelectorAll('td').forEach(function(td){{ row.push('"'+td.textContent.trim().replace(/"/g,'""')+'"'); }});
-                            lines.push(row.join(',')); n++;
-                          }});
-                          if(!n){{ alert('Nenhum participante visível para exportar.'); return; }}
+                          var d=window.MP_DATA||[]; var idx=_mpIdx(); var head=window.MP_HEAD||[];
+                          var lines=[head.map(function(h){{ return '"'+(''+h).replace(/"/g,'""')+'"'; }}).join(',')];
+                          for(var k=0;k<idx.length;k++){{
+                            var row=d[idx[k]]; lines.push(row.map(function(v){{ return '"'+(''+(v==null?'':v)).replace(/"/g,'""')+'"'; }}).join(','));
+                          }}
+                          if(idx.length===0){{ alert('Nenhum participante para exportar.'); return; }}
                           var blob=new Blob(['\\ufeff'+lines.join('\\n')],{{type:'text/csv;charset=utf-8'}});
                           var a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-                          a.download='participantes_visao_atual.csv'; document.body.appendChild(a); a.click(); a.remove();
+                          a.download='participantes_completo.csv'; document.body.appendChild(a); a.click(); a.remove();
                         }}
                         document.addEventListener('click', function(e){{
                           var td=e.target.closest('section td');
@@ -13334,6 +13416,10 @@ def _run_streamlit_app() -> None:
                           var txt=td.textContent.replace(/^[🔴🟠🟡🟢🔵\\s]+/,'').trim();
                           if(txt && txt.length>1 && !/^[\\d.,%\\s]+$/.test(txt)) mpJump(txt);
                         }});
+                        (function(){{
+                          function _mpInit(){{ try{{ if(window.MP_DATA && document.getElementById('mp-tbody')) mpRender(); }}catch(e){{}} }}
+                          if(document.readyState!=='loading') _mpInit(); else document.addEventListener('DOMContentLoaded', _mpInit);
+                        }})();
                         function filterCase(inp){{
                           var q=inp.value.toLowerCase();
                           var det=inp.closest('details'); if(!det) return;
@@ -13626,9 +13712,17 @@ def _run_streamlit_app() -> None:
                                 from datetime import datetime as _dtu
                                 _dash_html = html_path.read_text(encoding="utf-8", errors="ignore")
                                 _casos_html = _gera_html_casos()
-                                _ini = _casos_html.find("<body>")
-                                _fim = _casos_html.rfind("</body>")
-                                _corpo_casos = _casos_html[_ini + 6:_fim] if (_ini != -1 and _fim != -1) else _casos_html
+                                # v111: extração robusta do corpo do relatório de casos para o unificado.
+                                # Aceita <body> com atributos e, se algo falhar, cai para o HTML sem doctype/head —
+                                # garantindo que as análises (nome social, forasteiros, etc.) SEMPRE entrem no unificado.
+                                _bm = _reu.search(r"<body[^>]*>(.*)</body>", _casos_html, _reu.S)
+                                if _bm and len(_bm.group(1)) > 500:
+                                    _corpo_casos = _bm.group(1)
+                                else:
+                                    _corpo_casos = _reu.sub(r"(?is)</body>.*$", "",
+                                                            _reu.sub(r"(?is)^.*?<body[^>]*>", "", _casos_html))
+                                    if len(_corpo_casos) < 500:
+                                        _corpo_casos = _casos_html
 
                                 # v42: CSS global de responsividade/impressão aplicado ao documento INTEIRO
                                 _head_inject = """
@@ -13697,6 +13791,33 @@ def _run_streamlit_app() -> None:
                                 .chart-container .plotly-graph-div,.chart-container .js-plotly-plot,
                                 .card .plotly-graph-div,.card .js-plotly-plot{width:100%!important;min-width:0!important}
                                 .chart-grid,.kpi-grid{gap:18px!important}
+                                /* v114: layout de gráficos organizado como o demo_estilo_unificado — cards espaçados,
+                                   títulos fortes, grid responsivo, boa respiração entre gráfico e texto. Só CSS (aditivo). */
+                                .chart-grid{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))!important;
+                                            gap:30px!important;margin:20px 0!important;align-items:start!important}
+                                .card{padding:22px 24px!important;margin:0 0 26px 0!important;border:1px solid #e3e8ef!important;
+                                      border-radius:14px!important;box-shadow:0 1px 4px rgba(16,42,67,.06)!important;
+                                      background:#fff!important;overflow:hidden!important}
+                                .card-title{font-weight:800!important;font-size:clamp(1.02rem,2.2vw,1.3rem)!important;
+                                            color:#1f4e79!important;margin-bottom:6px!important;line-height:1.32!important}
+                                .chart-container{margin:20px 0 10px 0!important;padding:12px!important;min-height:220px!important;
+                                                 min-width:0!important;overflow-x:auto!important}
+                                .card-title + .chart-container{margin-top:18px!important}
+                                .chart-container + .aula-box,.chart-container + .interp{margin-top:24px!important}
+                                .chart-container text.gtitle,.gtitle{font-weight:700!important}
+                                .section-header{font-weight:800!important;margin:44px 0 18px 0!important;
+                                                padding:10px 0 12px 0!important;border-bottom:2px solid #e3e8ef!important;
+                                                color:#1f4e79!important;font-size:clamp(1.12rem,2.4vw,1.5rem)!important}
+                                .section-header:first-of-type{margin-top:16px!important}
+                                /* gráficos SVG dos casos (._svg_hbar/_svg_vbar) com o mesmo padrão de card e espaçamento */
+                                .grafico{background:#fff;border:1px solid #e3e8ef;border-radius:14px;padding:18px 20px;
+                                         margin:22px 0;box-shadow:0 1px 4px rgba(16,42,67,.06)}
+                                .graf-titulo{font-weight:800;color:#1f4e79;font-size:clamp(1rem,2vw,1.2rem);margin-bottom:14px;line-height:1.3}
+                                .graf-leg{margin-top:14px;font-size:12.5px;color:#5b6b7f;line-height:1.5}
+                                .grafico svg{max-width:100%;height:auto;display:block}
+                                @media (max-width:900px){.chart-grid{grid-template-columns:1fr!important}}
+                                @media (min-width:1400px){.chart-grid{grid-template-columns:repeat(auto-fit,minmax(560px,1fr))!important}}
+                                @media (max-width:480px){.kpi-grid{grid-template-columns:1fr 1fr!important}.grafico{padding:14px}}
                                 .table-wrapper-div{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
                                 .mestre-filter{flex-wrap:wrap!important;gap:10px!important;align-items:center}
                                 .aula-box{margin:14px 0;line-height:1.55}
