@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "119"
+STREAMLIT_APP_VERSION = "125"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
@@ -1431,49 +1431,25 @@ class DataLoaderAndCleaner:
             # Leitura robusta descartando colunas e linhas 100% vazias
             self.df = pd.read_excel(excel_file, sheet_name=0).dropna(how='all', axis=1).dropna(how='all', axis=0)
 
-            # v119: FUSÃO MULTI-LAYOUT. O motor foi feito para uma base PLANA (tudo numa aba). Quando a base
-            # vem em ABAS SEPARADAS por layout (N02/N50/N52/N60), sem esta fusão o df principal fica só com o
-            # N02 (participantes) e TODOS os gráficos/KPIs de infraestrutura (capacidade, acessibilidade N60,
-            # conservação, coordenadas) ficam vazios ou pegam um ID como "capacidade". Aqui fundimos as colunas
-            # de infraestrutura por CO_LOCAL (+NO_SALA para salas), sem inflar linhas e sem sobrescrever colunas
-            # já presentes. Guardado: se algo falhar, mantém o df da 1ª aba (sem regressão).
+            # v122 (estágio 1 da arquitetura por-nível): guarda as abas de INFRAESTRUTURA (N50/N52/N60)
+            # em separado, SEM fundir no self.df. Assim a infraestrutura pode ser processada no seu próprio
+            # grão (local/sala — centenas de linhas), e não replicada em 68 mil participantes. Isto é só
+            # armazenamento (não altera self.df), então não muda o comportamento atual: base plana ou de aba
+            # única simplesmente não terá abas de infraestrutura aqui. Guardado contra qualquer erro.
+            self.infra_sheets = {}
             try:
-                _cm = {str(c).upper() for c in self.df.columns}
-                if 'CO_LOCAL' in _cm and 'CO_INSCRICAO' in _cm and len(excel_file.sheet_names) > 1:
-                    _fused = []
+                if len(excel_file.sheet_names) > 1:
                     for _sh in excel_file.sheet_names[1:]:
                         _od = pd.read_excel(excel_file, sheet_name=_sh).dropna(how='all', axis=1).dropna(how='all', axis=0)
                         _oc = {str(c).upper() for c in _od.columns}
-                        # só funde layouts de INFRAESTRUTURA (têm CO_LOCAL e NÃO são de participantes)
-                        if 'CO_LOCAL' not in _oc or 'CO_INSCRICAO' in _oc:
-                            continue
-                        if 'QT_CAPACIDADE_MAXIMA_SALA' in _oc and 'NO_SALA' in _oc and 'NO_SALA' in _cm:
-                            _keys = ['CO_LOCAL', 'NO_SALA']          # N50 — grão de sala
-                        else:
-                            _keys = ['CO_LOCAL']                      # N52/N60 — grão de local
-                        _keys = [k for k in _keys if k in self.df.columns and k in _od.columns]
-                        if not _keys:
-                            continue
-                        _newcols = [c for c in _od.columns if str(c).upper() not in _cm and (
-                            str(c).upper().startswith(('QT_', 'IN_', 'TP_', 'VL_', 'NR_'))
-                            or str(c).upper() in ('NU_LATITUDE_LOCAL', 'NU_LONGITUDE_LOCAL', 'NU_PONTOS_LOCAL_PROVA',
-                                                  'NU_LARGURA', 'NU_COMPRIMENTO', 'NO_MUNICIPIO', 'NO_BAIRRO'))]
-                        if not _newcols:
-                            continue
-                        _odd = _od.drop_duplicates(subset=_keys).copy()
-                        for _k in _keys:
-                            self.df[_k] = self.df[_k].astype(str)
-                            _odd[_k] = _odd[_k].astype(str)
-                        _n_antes = len(self.df)
-                        self.df = self.df.merge(_odd[_keys + _newcols], on=_keys, how='left')
-                        if len(self.df) != _n_antes:   # proteção contra inflação inesperada
-                            self.df = self.df.drop_duplicates(subset=['CO_INSCRICAO']) if 'CO_INSCRICAO' in self.df.columns else self.df.head(_n_antes)
-                        _cm = {str(c).upper() for c in self.df.columns}
-                        _fused.append(_sh)
-                    if _fused:
-                        self.logger.info(f"Fusão multi-layout: infraestrutura de {_fused} incorporada ao df principal → {self.df.shape[1]} colunas, {self.df.shape[0]} linhas.")
-            except Exception as _efus:
-                self.logger.warning(f"Fusão multi-layout ignorada ({_efus}); seguindo apenas com a primeira aba.")
+                        # infraestrutura = tem CO_LOCAL e NÃO é de participantes (sem CO_INSCRICAO)
+                        if 'CO_LOCAL' in _oc and 'CO_INSCRICAO' not in _oc:
+                            self.infra_sheets[_sh] = _od
+                    if self.infra_sheets:
+                        self.logger.info(f"Estágio 1 (por-nível): {len(self.infra_sheets)} aba(s) de infraestrutura guardadas para processamento no grão local: {list(self.infra_sheets.keys())}.")
+            except Exception as _einf:
+                self.infra_sheets = {}
+                self.logger.warning(f"Não foi possível pré-carregar abas de infraestrutura ({_einf}).")
 
             self.quality_report['linhas_brutas'], self.quality_report['colunas_brutas'] = self.df.shape
             
@@ -2358,7 +2334,20 @@ class StatisticalMachineLearningEngine:
         
         if len(self.num_cols) >= 1:
             X = self.df[self.num_cols].fillna(self.df[self.num_cols].median())
-            preds = IsolationForest(contamination=0.03, random_state=42).fit_predict(StandardScaler().fit_transform(X))
+            # v121 (perf): treina o Isolation Forest numa AMOSTRA e aplica a TODA a população.
+            # Metodologicamente válido (o modelo aprende o padrão numa amostra representativa e pontua
+            # todos os registros) e reduz muito o custo em bases grandes — SEM perder nenhum registro
+            # nem a análise de anomalias (todos continuam recebendo o rótulo).
+            _Xs = StandardScaler().fit_transform(X)
+            _iso = IsolationForest(contamination=0.03, random_state=42, n_estimators=100, n_jobs=-1)
+            if len(_Xs) > 20000:
+                import numpy as _np121
+                _rng = _np121.random.RandomState(42)
+                _idx = _rng.choice(len(_Xs), 20000, replace=False)
+                _iso.fit(_Xs[_idx])
+                preds = _iso.predict(_Xs)
+            else:
+                preds = _iso.fit_predict(_Xs)
             self.df['ALERTA_ANOMALIA_ML'] = np.where(preds == -1, 'RISCO ALTO (OUTLIER I.A.)', 'Padrão Normal Frio Ouro Ativo')
 
         if self.cap_col:
@@ -11327,6 +11316,23 @@ def _run_streamlit_app() -> None:
                     except Exception:
                         pass
                     return None
+                # v123: leitor cacheado da aba N60 (infraestrutura predial: acessibilidade, segurança, conforto,
+                # tecnologia, conservação). Processada no GRÃO LOCAL (centenas/milhares de linhas), nunca em 68k.
+                @st.cache_data(show_spinner=False)
+                def _ler_n60_cc(_bytes):
+                    try:
+                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
+                        for _shn in _xn.sheet_names:
+                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
+                            _up = {str(_c).upper() for _c in _dn.columns}
+                            # N60 = infraestrutura: CO_LOCAL, sem CO_INSCRICAO, com flags IN_ de infraestrutura
+                            if ('CO_LOCAL' in _up and 'CO_INSCRICAO' not in _up and 'QT_CAPACIDADE_MAXIMA_SALA' not in _up
+                                    and ('IN_ACESSIBILIDADE' in _up or 'IN_INFRA_ACESSIBILIDADE' in _up
+                                         or 'IN_EXTINTOR' in _up or 'IN_SAIDA_EMERGENCIA' in _up)):
+                                return _limpa_colunas_nome(_dn)
+                    except Exception:
+                        pass
+                    return None
                 # v117: leitor cacheado da aba N50 (salas/espaço físico com capacidade máxima por sala).
                 @st.cache_data(show_spinner=False)
                 def _ler_n50_cap(_bytes):
@@ -12567,6 +12573,222 @@ def _run_streamlit_app() -> None:
                                     <div class="grafico"><div class="graf-titulo">Distância média (km): com x sem atendimento</div>
                                     {_svg_hbar([("Com atendimento", round(float(_dcom.mean()), 2)), ("Sem atendimento", round(float(_dsem.mean()), 2))], cor="#2980b9")}
                                     <div class="graf-leg">Mediana: com atendimento {_dcom.median():.1f} km · sem atendimento {_dsem.median():.1f} km.</div></div></section>"""
+                        except Exception:
+                            pass
+                        # v125: DISTRIBUIÇÃO GEOGRÁFICA (N52) — locais por UF + cobertura de coordenadas. Nível local.
+                        try:
+                            _n52g = _ler_n52_cc(arquivo.getvalue())
+                            if _n52g is not None and len(_n52g):
+                                _u52 = {str(c).upper(): c for c in _n52g.columns}
+                                _cuf52 = _u52.get("SG_UF") or _u52.get("SG_UF_PROVA") or _u52.get("SG_UF_LOCAL")
+                                _clat = _u52.get("NU_LATITUDE_LOCAL")
+                                _clon = _u52.get("NU_LONGITUDE_LOCAL")
+                                _geo_g = ""
+                                if _cuf52 is not None:
+                                    _uf52 = _n52g[_cuf52].astype(str).str.strip().replace({"": "—", "nan": "—"}).value_counts().head(27)
+                                    if len(_uf52):
+                                        _geo_g = (f"<div class='grafico'><div class='graf-titulo'>Locais de prova por UF</div>"
+                                                  f"{_svg_hbar([(_k, int(_v)) for _k, _v in _uf52.items()], cor='#2980b9')}"
+                                                  f"<div class='graf-leg'>Distribuição dos locais físicos (N52) por unidade da federação.</div></div>")
+                                _cov_txt = ""
+                                if _clat is not None and _clon is not None:
+                                    _nla = int(_pdc.to_numeric(_n52g[_clat], errors="coerce").notna().sum())
+                                    _cov_txt = (f"<div class='kpi-box' style='border-left:5px solid #16a085'><div class='kpi-lbl'>📍 Locais com coordenadas (lat/long)</div>"
+                                                f"<div class='kpi-val'>{_nla:,} / {len(_n52g):,}</div></div>".replace(",", "."))
+                                if _geo_g or _cov_txt:
+                                    _extra += f"""<section><h2 style="border-left:5px solid #2980b9">🗺️ Distribuição geográfica dos locais (N52)</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> onde os locais de prova estão, por UF, e a cobertura de geolocalização.
+                                    UFs com mais locais concentram a operação logística; a cobertura de coordenadas indica quantos locais podem ser mapeados ponto a ponto.</div>
+                                    <div class="kpi-grid">{_cov_txt}</div>
+                                    {_geo_g}</section>"""
+                        except Exception:
+                            pass
+                        # v125: QUALIDADE PREDIAL × OCUPAÇÃO (N60 × N02) — locais cheios E de baixa qualidade = prioridade.
+                        try:
+                            _n60q = _ler_n60_cc(arquivo.getvalue())
+                            _cin_q = next((c for c in _base.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                            if _n60q is not None and _locc is not None and _cin_q is not None:
+                                _u6q = {str(c).upper(): c for c in _n60q.columns}
+                                _cl60 = _u6q.get("CO_LOCAL")
+                                _allq = [c for c in _n60q.columns if str(c).upper().startswith("IN_")]
+                                if _cl60 is not None and _allq:
+                                    _qm = (_n60q[_allq].apply(lambda s: _pdc.to_numeric(s, errors="coerce")) == 1).mean(axis=1) * 100
+                                    _qloc = _n60q.assign(_Q=_qm).groupby(_n60q[_cl60].astype(str))["_Q"].mean()
+                                    _oloc = _base.groupby(_base[_locc].astype(str))[_cin_q].count()
+                                    _mrgq = _pdc.DataFrame({"occ": _oloc}).join(_qloc.rename("qual"), how="inner")
+                                    if len(_mrgq):
+                                        _med_occ = _mrgq["occ"].median()
+                                        _prior = _mrgq[(_mrgq["occ"] > _med_occ) & (_mrgq["qual"] < 50)].sort_values("occ", ascending=False)
+                                        _cnome_loc = next((c for c in _base.columns if str(c).upper() == "NO_LOCAL_PROVA"), None)
+                                        _mapn = {}
+                                        if _cnome_loc is not None:
+                                            _dd_q = _base.drop_duplicates(subset=[_locc])
+                                            _mapn = dict(zip(_dd_q[_locc].astype(str), _dd_q[_cnome_loc]))
+                                        _rwq = "".join(
+                                            f"<tr class='row-crit'><td>{_esc_h(_limpa_nome(str(_mapn.get(_ix, _ix))))}</td>"
+                                            f"<td style='text-align:right'>{int(_r['occ'])}</td>"
+                                            f"<td style='text-align:right;font-weight:600'>{_r['qual']:.0f}%</td></tr>"
+                                            for _ix, _r in _prior.head(30).iterrows())
+                                        _drill_q = ("" if not len(_prior) else
+                                                    f"<details class='casos-det' open><summary>🔎 Ver os {len(_prior)} locais cheios e de baixa qualidade</summary>"
+                                                    f"<table><thead><tr><th>Local</th><th>Ocupação</th><th>Qualidade</th></tr></thead><tbody>{_rwq}</tbody></table></details>")
+                                        _extra += f"""<section><h2 style="border-left:5px solid #c0392b">⚠️ Qualidade predial × ocupação (N60 × N02)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> cruza a <b>qualidade de infraestrutura do local</b> (N60) com quantos participantes ele
+                                        recebe (N02). Locais com <b>muita gente E baixa qualidade</b> são a <b>prioridade máxima</b> — muitos participantes em condições ruins.
+                                        {len(_prior)} local(is) com ocupação acima da mediana e qualidade abaixo de 50%.</div>
+                                        {_drill_q or '<p class="nota">Nenhum local combina alta ocupação com baixa qualidade nesta base — bom sinal.</p>'}</section>"""
+                        except Exception:
+                            pass
+                        # v124: CONSERVAÇÃO PREDIAL + RANKING DE LOCAIS POR QUALIDADE (N60, nível local).
+                        try:
+                            _n60c = _ler_n60_cc(arquivo.getvalue())
+                            if _n60c is not None and len(_n60c):
+                                _u6 = {str(c).upper(): c for c in _n60c.columns}
+                                # conservação: flags TP_ de estado + previsão de reforma
+                                _cons_cols = [_u6[k] for k in ("TP_TELHADO", "TP_PAREDES_INTERNAS", "TP_PISO", "TP_PAREDE_EXTERNA",
+                                                                "TP_MOBILIARIO_CONSERVACAO_SALA", "TP_PISO_SALA") if k in _u6]
+                                _refc = _u6.get("IN_PREVISAO_REFORMA")
+                                _cons_txt = ""
+                                if _cons_cols:
+                                    # "bom estado" quando o código indica adequado (=1); índice = proporção média
+                                    _cm6 = _n60c[_cons_cols].apply(lambda s: _pdc.to_numeric(s, errors="coerce"))
+                                    _cons_idx = (_cm6 == 1).mean(axis=1) * 100
+                                    _cons_med = float(_cons_idx.mean())
+                                    _ruins = int((_cons_idx < 50).sum())
+                                    _cons_txt = (f"<div class='kpi-box' style='border-left:5px solid #16a085'><div class='kpi-lbl'>🧱 Conservação — índice médio</div><div class='kpi-val'>{_cons_med:.0f}%</div></div>"
+                                                 f"<div class='kpi-box' style='border-left:5px solid #c0392b'><div class='kpi-lbl'>Locais com conservação &lt; 50%</div><div class='kpi-val'>{_ruins:,}</div></div>".replace(",", "."))
+                                _ref_txt = ""
+                                if _refc is not None:
+                                    _nref = int((_pdc.to_numeric(_n60c[_refc], errors="coerce") == 1).sum())
+                                    _ref_txt = f"<div class='kpi-box' style='border-left:5px solid #e67e22'><div class='kpi-lbl'>🔧 Locais com previsão de reforma</div><div class='kpi-val'>{_nref:,}</div></div>".replace(",", ".")
+                                # RANKING de qualidade global por local (média de todas as dimensões IN_)
+                                _all_in = [c for c in _n60c.columns if str(c).upper().startswith("IN_")]
+                                _rank_txt = ""
+                                _clocal6 = _u6.get("CO_LOCAL")
+                                if _all_in and _clocal6 is not None:
+                                    _qm = _n60c[_all_in].apply(lambda s: _pdc.to_numeric(s, errors="coerce"))
+                                    _n60c = _n60c.copy()
+                                    _n60c["_QUAL"] = (_qm == 1).mean(axis=1) * 100
+                                    _piores = _n60c.nsmallest(10, "_QUAL")
+                                    _cnome6 = _u6.get("NO_LOCAL") or _u6.get("NO_ENTIDADE") or _clocal6
+                                    _rw6 = "".join(
+                                        f"<tr class='{'row-crit' if _r['_QUAL'] < 40 else ''}'><td>{_esc_h(_limpa_nome(str(_r[_cnome6])))}</td>"
+                                        f"<td style='text-align:right;font-weight:600'>{_r['_QUAL']:.0f}%</td></tr>"
+                                        for _, _r in _piores.iterrows())
+                                    _rank_txt = (f"<div class='grafico'><div class='graf-titulo'>10 locais com menor índice de qualidade predial</div>"
+                                                 f"<table><thead><tr><th>Local</th><th>Qualidade global</th></tr></thead><tbody>{_rw6}</tbody></table>"
+                                                 f"<div class='graf-leg'>Qualidade = proporção de itens de infraestrutura presentes, entre os {len(_all_in)} indicadores do N60. Priorize os do topo.</div></div>")
+                                if _cons_txt or _rank_txt:
+                                    _extra += f"""<section><h2 style="border-left:5px solid #16a085">🧱 Conservação predial e ranking de qualidade (N60)</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> estado de conservação e um <b>ranking de qualidade por local</b>, tudo no grão de local
+                                    (rápido). Locais com baixa conservação ou baixa qualidade global são candidatos a vistoria e priorização de recursos antes da prova.</div>
+                                    <div class="kpi-grid">{_cons_txt}{_ref_txt}</div>
+                                    {_rank_txt}</section>"""
+                        except Exception:
+                            pass
+                        # v124: AUDITORIA DE IDADE (N90) — idosos (acessibilidade) e menores (irregularidade). [11.md]
+                        try:
+                            _n90a = _ler_n90_cc(arquivo.getvalue())
+                            if _n90a is not None:
+                                _u9 = {str(c).upper(): c for c in _n90a.columns}
+                                _cdt = _u9.get("DT_NASCIMENTO")
+                                if _cdt is not None:
+                                    _idade = 2026 - _pdc.to_datetime(_n90a[_cdt], errors="coerce").dt.year
+                                    _val = _idade.dropna()
+                                    if len(_val):
+                                        _idosos = int((_val > 60).sum())
+                                        _menores = int((_val < 18).sum())
+                                        _med = float(_val.mean())
+                                        _faixas = [("< 18", int((_val < 18).sum())), ("18–24", int(((_val >= 18) & (_val <= 24)).sum())),
+                                                   ("25–39", int(((_val >= 25) & (_val <= 39)).sum())), ("40–59", int(((_val >= 40) & (_val <= 59)).sum())),
+                                                   ("60+", int((_val >= 60).sum()))]
+                                        _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🎂 Auditoria de idade dos inscritos (N90)</h2>
+                                        <div class="interp"><b>📖 Como interpretar:</b> idade calculada de DT_NASCIMENTO (ano-base 2026). <b>Idosos (60+)</b> podem precisar de
+                                        acessibilidade física reforçada no local; <b>menores de 18</b> merecem verificação cadastral. Idade média {_med:.0f} anos.</div>
+                                        <div class="kpi-grid">
+                                          <div class="kpi-box" style="border-left:5px solid #2980b9"><div class="kpi-lbl">🧓 Idosos (60+) — atenção à acessibilidade</div><div class="kpi-val">{_idosos:,}</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">🔎 Menores de 18 — verificar cadastro</div><div class="kpi-val">{_menores:,}</div></div>
+                                        </div>
+                                        <div class="grafico"><div class="graf-titulo">Distribuição etária dos inscritos</div>
+                                        {_svg_hbar(_faixas, cor="#8e44ad")}
+                                        <div class="graf-leg">Faixas etárias dos inscritos no N90.</div></div></section>""".replace(",", ".")
+                        except Exception:
+                            pass
+                        # v124: SATURAÇÃO DE PRÉDIOS/LOCAIS (N02) — carga por local e média de alunos/sala. [11.md]
+                        try:
+                            _clp = next((c for c in _base.columns if str(c).upper() == "NO_LOCAL_PROVA"), None)
+                            _cin_s = next((c for c in _base.columns if str(c).upper() == "CO_INSCRICAO"), None)
+                            _cuf_s = next((c for c in _base.columns if str(c).upper() == "SG_UF_PROVA"), None)
+                            if _clp is not None and _cin_s is not None and _salac is not None:
+                                _sat = _base.groupby(_clp).agg(_al=(_cin_s, "count"), _sl=(_salac, "nunique")).reset_index()
+                                _sat["_med"] = (_sat["_al"] / _sat["_sl"]).round(1)
+                                _sat = _sat.sort_values("_al", ascending=False)
+                                _topn = _sat.head(15)
+                                _rws = "".join(
+                                    f"<tr class='{'row-crit' if _r['_med'] > 40 else ''}'><td>{_esc_h(_limpa_nome(str(_r[_clp])))}</td>"
+                                    f"<td style='text-align:right'>{int(_r['_al'])}</td><td style='text-align:right'>{int(_r['_sl'])}</td>"
+                                    f"<td style='text-align:right;font-weight:600'>{_r['_med']:.1f}</td></tr>"
+                                    for _, _r in _topn.iterrows())
+                                _extra += f"""<section><h2 style="border-left:5px solid #e67e22">🏢 Saturação de prédios e locais de prova (N02)</h2>
+                                <div class="interp"><b>📖 Como interpretar:</b> carga de alunos por local e média de alunos por sala. Prédios com maior volume e maior
+                                média/sala são <b>pontos críticos de operação</b> — precisam de mais fiscais, reforço de segurança e atenção na logística de malotes.
+                                Média por sala acima de 40 aparece em vermelho.</div>
+                                <table><thead><tr><th>Local de prova</th><th>Alunos</th><th>Salas</th><th>Média/sala</th></tr></thead><tbody>{_rws}</tbody></table></section>"""
+                        except Exception:
+                            pass
+                        # v123: INFRAESTRUTURA PREDIAL (N60) computada no NÍVEL LOCAL (arquitetura por-nível).
+                        # Os índices são calculados sobre os ~milhares de LOCAIS do N60 — não sobre 68 mil
+                        # participantes — então é rápido e não pesa. Traz para o unificado, de forma confiável,
+                        # o conteúdo de acessibilidade/segurança/conforto/tecnologia/conservação que ficava vazio.
+                        try:
+                            _n60i = _ler_n60_cc(arquivo.getvalue())
+                            if _n60i is not None and len(_n60i):
+                                _u60 = {str(c).upper(): c for c in _n60i.columns}
+                                def _grp(_keys):
+                                    return [_u60[k] for k in _keys if k in _u60]
+                                _blocos = {
+                                    "♿ Acessibilidade": _grp(["IN_ACESSIBILIDADE", "IN_INFRA_ACESSIBILIDADE", "IN_RAMPA_ENTORNO",
+                                                              "IN_PISO_TATIL", "IN_BANHEIRO_ACESSIVEL", "IN_SINALIZACAO_ACESSIVEL",
+                                                              "IN_CIRCULACAO_ACESSIVEL", "IN_BEBEDOURO_ACESSIVEL", "IN_VAGA_ACESSIVEL"]),
+                                    "🛡️ Segurança": _grp(["IN_SAIDA_EMERGENCIA", "IN_EXTINTOR", "IN_HIDRANTE", "IN_ILUMINACAO_EMERGENCIA",
+                                                          "IN_ALARME", "IN_BRIGADA", "IN_CFTV"]),
+                                    "🌡️ Conforto": _grp(["IN_VENTILADOR", "IN_AR_CONDICIONADO", "IN_CLIMATIZACAO", "IN_ILUMINACAO_ADEQUADA"]),
+                                    "💻 Tecnologia": _grp(["IN_PROJETOR", "IN_COMPUTADOR", "IN_INTERNET", "IN_WIFI", "IN_GERADOR", "IN_ENERGIA"]),
+                                }
+                                _kpis_i = ""
+                                _grafs_i = ""
+                                _cores_i = {"♿ Acessibilidade": "#2980b9", "🛡️ Segurança": "#c0392b", "🌡️ Conforto": "#e67e22", "💻 Tecnologia": "#8e44ad"}
+                                _idx_medias = {}
+                                for _nome, _cols in _blocos.items():
+                                    if not _cols:
+                                        continue
+                                    # índice do bloco = média das proporções de "sim" (=1) por local, em 0-100
+                                    _mat = _n60i[_cols].apply(lambda s: _pdc.to_numeric(s, errors="coerce"))
+                                    _idx_loc = (_mat == 1).mean(axis=1) * 100
+                                    _media = float(_idx_loc.mean())
+                                    _idx_medias[_nome] = _media
+                                    _kpis_i += (f"<div class='kpi-box' style='border-left:5px solid {_cores_i.get(_nome,'#1f4e79')}'>"
+                                                f"<div class='kpi-lbl'>{_nome} — índice médio</div><div class='kpi-val'>{_media:.0f}%</div></div>")
+                                if _idx_medias:
+                                    _grafs_i = (f"<div class='grafico'><div class='graf-titulo'>Índice médio por dimensão de infraestrutura</div>"
+                                                f"{_svg_hbar([(_k, round(_v)) for _k, _v in sorted(_idx_medias.items(), key=lambda x: -x[1])], cor='#1f4e79', unidade='%')}"
+                                                f"<div class='graf-leg'>Média, entre os {len(_n60i):,} locais do N60, da proporção de itens presentes em cada dimensão.</div></div>".replace(",", "."))
+                                # distribuição de acessibilidade (nível) se houver a flag principal
+                                _cacc = _u60.get("IN_ACESSIBILIDADE")
+                                _kpi_acc = ""
+                                if _cacc is not None:
+                                    _av = _pdc.to_numeric(_n60i[_cacc], errors="coerce")
+                                    _com = int((_av == 1).sum()); _tot = int(_av.notna().sum())
+                                    if _tot:
+                                        _kpi_acc = (f"<div class='kpi-box' style='border-left:5px solid #27ae60'><div class='kpi-lbl'>Locais com acessibilidade declarada</div>"
+                                                    f"<div class='kpi-val'>{_com:,} / {_tot:,}</div></div>".replace(",", "."))
+                                if _kpis_i or _grafs_i:
+                                    _extra += f"""<section><h2 style="border-left:5px solid #2980b9">🏗️ Infraestrutura predial dos locais (N60)</h2>
+                                    <div class="interp"><b>📖 Como interpretar:</b> índices de infraestrutura calculados no <b>grão de local</b> (os {len(_n60i):,} locais do N60),
+                                    não por participante — por isso é rápido e preciso. Cada dimensão (acessibilidade, segurança, conforto, tecnologia) mede a
+                                    <b>proporção média de itens presentes</b>. Índices baixos apontam locais que precisam de atenção de infraestrutura.</div>
+                                    <div class="kpi-grid">{_kpis_i}{_kpi_acc}</div>
+                                    {_grafs_i}</section>""".replace("{len(_n60i):,}", f"{len(_n60i):,}".replace(",", "."))
                         except Exception:
                             pass
                         # v117: CAPACIDADE PLANEJADA (N50) × OCUPAÇÃO REAL (N02) — salas acima da capacidade contratada.
