@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "133"
+STREAMLIT_APP_VERSION = "134"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine calamine (4-7x mais rápido que openpyxl em arquivos
@@ -14220,20 +14220,32 @@ def _run_streamlit_app() -> None:
                             if _fora:
                                 st.info(f"Não serão exibidas (mas a capacidade permanece): {', '.join(_fora)}.")
 
+                    # v134: a Central de Casos É o RELATÓRIO COMPLETO E ÚNICO — todas as análises, gráficos em
+                    # cards, tabelas, KPIs e os dados dos participantes, autocontido e abrindo em qualquer navegador.
+                    # É este o download principal. O "dashboard do motor + casos" abaixo é apenas uma opção avançada.
+                    st.markdown("### 📥 Relatório completo (todas as análises num só arquivo)")
                     st.download_button(
-                        "⬇️ Baixar Central de Casos em HTML (relatório exportável)",
+                        "⬇️ Baixar RELATÓRIO COMPLETO em HTML (todas as análises, gráficos e dados)",
                         _gera_html_casos().encode("utf-8"),
-                        file_name="central_de_casos_PND.html", mime="text/html",
-                        help="Relatório HTML autocontido com o resumo e os registros de cada caso (até 500 por caso), "
-                             "abrindo em qualquer navegador — os mesmos ganhos da visão nativa, exportáveis.")
+                        file_name="relatorio_completo_PND.html", mime="text/html",
+                        key="dl_completo",
+                        help="Relatório HTML único e autocontido: todas as análises em cards no padrão visual, "
+                             "KPIs, tabelas, gráficos e os registros de cada caso — abre em qualquer navegador, "
+                             "sem depender de mais nada. É o relatório unificado que você quer.")
+                    st.caption("✅ Este é o **relatório único e completo**: reúne todas as análises, gráficos em cards, "
+                               "tabelas, KPIs e os dados dos participantes num só HTML. Não precisa gerar mais nada.")
 
-                    # v31: HTML UNIFICADO (Dashboard_BI.html do motor + Central de Casos).
-                    # Sob demanda (lê o HTML de ~13 MB só quando pedido), para não pesar/OOM.
+                    # v31/v134: OPÇÃO AVANÇADA — anexa também o dashboard do motor por cima (tem gráficos de
+                    # infraestrutura que dependem da arquitetura do motor). Mantido para quem quiser, mas não é
+                    # necessário: o relatório completo acima já traz todas as análises.
                     if html_path.exists():
-                        if st.checkbox("➕ Gerar HTML unificado (Dashboard do motor + Central de Casos)",
+                        with st.expander("⚙️ Opção avançada: incluir também o dashboard do motor (maior e mais pesado)"):
+                            st.caption("O relatório completo acima já tem todas as análises. Esta opção apenas **anexa "
+                                       "o dashboard do motor** por cima, num arquivo maior. Use só se precisar do dashboard do motor.")
+                        if st.checkbox("➕ Gerar também o HTML com dashboard do motor + relatório completo",
                                        value=False, key="casos_unif",
-                                       help="Combina o dashboard completo do motor e este relatório de casos num único "
-                                            "arquivo .html. Lê o dashboard de ~13 MB — pode consumir memória; use sob demanda."):
+                                       help="Combina o dashboard do motor e o relatório completo num único arquivo maior. "
+                                            "Opcional — o relatório completo acima já é suficiente."):
                             try:
                                 import re as _reu
                                 from datetime import datetime as _dtu
