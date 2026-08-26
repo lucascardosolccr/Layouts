@@ -225,29 +225,46 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "125"
+STREAMLIT_APP_VERSION = "126"
 
 def _read_excel_fast(_src, **kwargs):
-    """Lê Excel de forma estável (engine padrão openpyxl). Mantido como helper único
-    para todas as leituras do wrapper; reposiciona o buffer quando a fonte é BytesIO.
-    (O engine calamine foi removido por incompatibilidade em alguns ambientes.)"""
+    """Lê Excel priorizando o engine calamine (4-7x mais rápido que openpyxl em arquivos
+    muito estilizados), com FALLBACK automático ao openpyxl se o calamine não estiver
+    disponível ou falhar. Reposiciona o buffer quando a fonte é BytesIO."""
     import pandas as _pd
     try:
         if hasattr(_src, "seek"):
             _src.seek(0)
     except Exception:
         pass
+    if "engine" not in kwargs:
+        try:
+            return _pd.read_excel(_src, engine="calamine", **kwargs)
+        except Exception:
+            try:
+                if hasattr(_src, "seek"):
+                    _src.seek(0)
+            except Exception:
+                pass
     return _pd.read_excel(_src, **kwargs)
 
 
 def _excelfile_fast(_src):
-    """Abre um ExcelFile de forma estável (engine padrão), com reposicionamento do buffer."""
+    """Abre um ExcelFile priorizando calamine (mais rápido), com fallback ao openpyxl."""
     import pandas as _pd
     try:
         if hasattr(_src, "seek"):
             _src.seek(0)
     except Exception:
         pass
+    try:
+        return _pd.ExcelFile(_src, engine="calamine")
+    except Exception:
+        try:
+            if hasattr(_src, "seek"):
+                _src.seek(0)
+        except Exception:
+            pass
     return _pd.ExcelFile(_src)
 
 
@@ -1425,32 +1442,11 @@ class DataLoaderAndCleaner:
     def ingest_data(self):
         self.logger.info(f"Ingerindo conjunto de microdados brutos: {self.filepath}")
         try:
-            excel_file = pd.ExcelFile(self.filepath)
+            excel_file = _excelfile_fast(self.filepath)
             self.quality_report['abas_originais'] = excel_file.sheet_names
             
             # Leitura robusta descartando colunas e linhas 100% vazias
             self.df = pd.read_excel(excel_file, sheet_name=0).dropna(how='all', axis=1).dropna(how='all', axis=0)
-
-            # v122 (estágio 1 da arquitetura por-nível): guarda as abas de INFRAESTRUTURA (N50/N52/N60)
-            # em separado, SEM fundir no self.df. Assim a infraestrutura pode ser processada no seu próprio
-            # grão (local/sala — centenas de linhas), e não replicada em 68 mil participantes. Isto é só
-            # armazenamento (não altera self.df), então não muda o comportamento atual: base plana ou de aba
-            # única simplesmente não terá abas de infraestrutura aqui. Guardado contra qualquer erro.
-            self.infra_sheets = {}
-            try:
-                if len(excel_file.sheet_names) > 1:
-                    for _sh in excel_file.sheet_names[1:]:
-                        _od = pd.read_excel(excel_file, sheet_name=_sh).dropna(how='all', axis=1).dropna(how='all', axis=0)
-                        _oc = {str(c).upper() for c in _od.columns}
-                        # infraestrutura = tem CO_LOCAL e NÃO é de participantes (sem CO_INSCRICAO)
-                        if 'CO_LOCAL' in _oc and 'CO_INSCRICAO' not in _oc:
-                            self.infra_sheets[_sh] = _od
-                    if self.infra_sheets:
-                        self.logger.info(f"Estágio 1 (por-nível): {len(self.infra_sheets)} aba(s) de infraestrutura guardadas para processamento no grão local: {list(self.infra_sheets.keys())}.")
-            except Exception as _einf:
-                self.infra_sheets = {}
-                self.logger.warning(f"Não foi possível pré-carregar abas de infraestrutura ({_einf}).")
-
             self.quality_report['linhas_brutas'], self.quality_report['colunas_brutas'] = self.df.shape
             
             self.logger.info(f"Ingestão Base Mestre concluída: {self.quality_report['linhas_brutas']} registros processados em RAM.")
@@ -7779,7 +7775,7 @@ class MultiLayoutLoader:
 
     def load(self) -> Dict[str, pd.DataFrame]:
         try:
-            xls = pd.ExcelFile(self.filepath)
+            xls = _excelfile_fast(self.filepath)
         except Exception as exc:
             self.logger.warning(f"Auditoria de cruzamento: não foi possível abrir o workbook ({exc}).")
             return {}
