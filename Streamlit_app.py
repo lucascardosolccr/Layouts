@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "132"
+STREAMLIT_APP_VERSION = "133"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine calamine (4-7x mais rápido que openpyxl em arquivos
@@ -11434,6 +11434,11 @@ def _run_streamlit_app() -> None:
                                 "CO_MUNICIPIO_RESIDENCIA" in _up or "TP_SITUACAO" in _up or "SG_UF_MUNICIPIO_RESIDENCIA" in _up):
                             return _d
                     return None
+                # v133: CORREÇÃO CRÍTICA — esta atribuição foi perdida por volta da v94, fazendo a Central de
+                # Casos falhar inteira com "cannot access local variable '_base'". Sem ela, NENHUMA análise era
+                # renderizada no app real (embora os testes com harness, que injetavam _base, não pegassem isso).
+                # É a causa raiz de "nada aparece no HTML unificado".
+                _base = _ler_base_cc(arquivo.getvalue())
                 if _base is None:
                     st.warning("Não encontrei uma aba com CO_INSCRICAO (N02) para montar a central de casos.")
                 else:
