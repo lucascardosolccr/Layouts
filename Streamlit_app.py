@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "126"
+STREAMLIT_APP_VERSION = "130"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine calamine (4-7x mais rápido que openpyxl em arquivos
@@ -423,6 +423,19 @@ def _ram_disponivel_mb():
         return (_os.sysconf("SC_AVPHYS_PAGES") * _os.sysconf("SC_PAGE_SIZE")) / (1024.0 * 1024.0)
     except Exception:
         return None
+
+
+def _ram_processo_mb():
+    """RAM usada por ESTE processo (RSS) em MB, via /proc/self/status. None se indisponível.
+    Usado no indicador de memória da tela para monitorar o consumo durante a análise."""
+    try:
+        with open("/proc/self/status") as _f:
+            for _ln in _f:
+                if _ln.startswith("VmRSS:"):
+                    return int(_ln.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return None
 
 
 def _avaliar_capacidades(df):
@@ -7785,9 +7798,21 @@ class MultiLayoutLoader:
             if str(sheet).strip().upper() in {'BASE_PLANA', 'BASE', 'FLAT'}:
                 continue  # a base denormalizada não é um layout
             try:
-                df = pd.read_excel(xls, sheet_name=sheet).dropna(how='all', axis=1).dropna(how='all', axis=0)
+                # v127: exclui colunas de texto pesado que a auditoria de cruzamento não usa (endereço completo,
+                # linha crua, cabeçalho) — em bases grandes (N90 com 600k+ linhas) isto evita o pico de ~900 MB
+                # de RAM que causava OOM ("Oh no"). A reconciliação usa CO_INSCRICAO, CO_LOCAL, municípios/UF,
+                # capacidade e flags — todas preservadas.
+                _DROP_PESADO = {"TX_END_LOGRADOURO", "TX_END_NUMERO", "TX_END_COMPLEMENTO", "TX_END_BAIRRO",
+                                "TX_END_CEP", "DS_LINHA_ARQUIVO", "TX_CABECALHO", "ID_ENADE_ORIGEM",
+                                "CO_INSCRICAO_APLICADORA", "TX_END_ENDERECO", "NO_LOGRADOURO"}
+                df = pd.read_excel(xls, sheet_name=sheet,
+                                   usecols=lambda _c: str(_c).upper() not in _DROP_PESADO
+                                   ).dropna(how='all', axis=1).dropna(how='all', axis=0)
             except Exception:
-                continue
+                try:
+                    df = pd.read_excel(xls, sheet_name=sheet).dropna(how='all', axis=1).dropna(how='all', axis=0)
+                except Exception:
+                    continue
             if df.empty:
                 continue
             cols = set(map(str, df.columns))
@@ -10704,6 +10729,26 @@ def _run_streamlit_app() -> None:
         "demonstração. O sistema executa a MESMA análise completa e oferece TUDO de duas formas: "
         "visualização nativa interativa aqui dentro e o dashboard/planilha prontos para download.")
 
+    # v129: indicador de memória ao vivo — ajuda a monitorar o consumo e antecipar o « Oh no » (OOM).
+    try:
+        _rss = _ram_processo_mb()
+        _disp = _ram_disponivel_mb()
+        if _rss is not None or _disp is not None:
+            _partes = []
+            if _rss is not None:
+                _partes.append(f"🧠 uso atual do app: **{_rss:.0f} MB**")
+            if _disp is not None:
+                _ico = "🟢" if _disp > 700 else ("🟡" if _disp > 300 else "🔴")
+                _partes.append(f"{_ico} memória livre: **{_disp:.0f} MB**")
+            _ult = st.session_state.get("bi_tempo")
+            if _ult:
+                _partes.append(f"⏱️ última análise: **{_ult:.0f}s**")
+            st.caption("Monitor de recursos — " + " · ".join(_partes) +
+                       (". ⚠️ Memória livre baixa: prefira gerar sem o dashboard pesado."
+                        if (_disp is not None and _disp < 300) else "."))
+    except Exception:
+        pass
+
     if _DEPS_FALTANDO:
         st.error(
             "⚠️ Faltam pacotes necessários para a análise completa: **" + ", ".join(_DEPS_FALTANDO) + "**.\n\n"
@@ -11079,6 +11124,22 @@ def _run_streamlit_app() -> None:
                                              offline=bool(offline), mapa_path=_mapa_arg)
                 import time as _time
                 _t0 = _time.time()
+                # v129: amostrador de PICO de memória do processo (RSS) durante a geração, numa thread leve.
+                # Serve ao indicador de memória na tela, para o usuário monitorar o consumo e antecipar o « Oh no ».
+                import threading as _thr129
+                _mem_pico = [_ram_processo_mb() or 0.0]
+                _mem_stop = _thr129.Event()
+                def _amostra_mem():
+                    while not _mem_stop.is_set():
+                        _m = _ram_processo_mb()
+                        if _m and _m > _mem_pico[0]:
+                            _mem_pico[0] = _m
+                        _mem_stop.wait(0.4)
+                try:
+                    _mem_thr = _thr129.Thread(target=_amostra_mem, daemon=True)
+                    _mem_thr.start()
+                except Exception:
+                    _mem_thr = None
                 # v84: GARANTIA anti-« Oh no » — se a RAM disponível estiver baixa, desativa automaticamente
                 # a geração pesada (que causa o OOM que mata o processo), mesmo que o usuário a tenha marcado.
                 # Um OOM real mata o processo e o Python não consegue capturá-lo; a única garantia é PREVENIR.
@@ -11138,6 +11199,15 @@ def _run_streamlit_app() -> None:
                 except Exception:
                     pass
                 st.session_state["bi_tempo"] = round(_time.time() - _t0, 1)
+                # v129: encerra o amostrador e guarda o pico de memória + a RAM disponível para o indicador.
+                try:
+                    _mem_stop.set()
+                    if _mem_thr is not None:
+                        _mem_thr.join(timeout=1.0)
+                except Exception:
+                    pass
+                st.session_state["bi_mem_pico"] = round(_mem_pico[0]) if _mem_pico[0] else None
+                st.session_state["bi_ram_disp"] = _ram_disponivel_mb()
                 st.session_state["bi_outdir"] = str(outdir)
                 st.session_state["bi_ok"] = True
                 st.session_state["bi_eh_demo"] = (modo != "Enviar planilha (.xlsx)")
@@ -11287,91 +11357,82 @@ def _run_streamlit_app() -> None:
             try:
                 import io as _ioc
                 import pandas as _pdc
-                # v81: leitura da base cacheada também na Central de Casos — não reparseia a cada rerun
+                # v128: LEITURA ÚNICA COMPARTILHADA. Antes, cada leitor (_ler_n90_cc, _ler_n91_cc, ...) reabria
+                # o arquivo e relia as abas até achar a sua — a N90 (600k linhas) chegava a ser lida 2-3x.
+                # Agora TODAS as abas são lidas UMA vez aqui (calamine, sem as colunas de texto pesado que
+                # nenhuma análise usa), cacheadas, e cada leitor apenas SELECIONA a sua aba deste dicionário.
+                # Corta tempo e memória sem tirar nada das análises.
+                _DROP_PESADO = {"TX_END_LOGRADOURO", "TX_END_NUMERO", "TX_END_COMPLEMENTO", "TX_END_BAIRRO",
+                                "TX_END_CEP", "DS_LINHA_ARQUIVO", "TX_CABECALHO", "ID_ENADE_ORIGEM",
+                                "CO_INSCRICAO_APLICADORA", "TX_END_ENDERECO", "NO_LOGRADOURO"}
+                @st.cache_data(show_spinner=False)
+                def _ler_todas_abas(_bytes):
+                    _out = {}
+                    try:
+                        _xf = _excelfile_fast(_ioc.BytesIO(_bytes))
+                        for _sh in _xf.sheet_names:
+                            try:
+                                _d = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_sh,
+                                                      usecols=lambda _c: str(_c).upper() not in _DROP_PESADO)
+                                _out[str(_sh)] = _limpa_colunas_nome(_d)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    return _out
+                def _abas_cols(_bytes):
+                    # gera (df, conjunto de colunas em maiúsculas) para cada aba já lida
+                    for _d in _ler_todas_abas(_bytes).values():
+                        yield _d, {str(_c).upper() for _c in _d.columns}
+                # v81: base (N02) — primeira aba com CO_INSCRICAO e ID_SALA (participantes ensalados)
                 @st.cache_data(show_spinner=False)
                 def _ler_base_cc(_bytes):
-                    _xcc = _excelfile_fast(_ioc.BytesIO(_bytes))
-                    for _shcc in _xcc.sheet_names:
-                        _dcc = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shcc)
-                        if any(str(_c).upper() == "CO_INSCRICAO" for _c in _dcc.columns):
-                            return _limpa_colunas_nome(_dcc)   # v34: nomes sem escapes _x0020_ (feito 1x, no cache)
+                    for _d, _up in _abas_cols(_bytes):
+                        if "CO_INSCRICAO" in _up and "ID_SALA" in _up:
+                            return _d
+                    for _d, _up in _abas_cols(_bytes):
+                        if "CO_INSCRICAO" in _up:
+                            return _d
                     return None
-                # v97: leitor cacheado da aba N52 (locais/instituições) para análise de responsável/contato
-                @st.cache_data(show_spinner=False)
+                # v97: N52 (locais/instituições) — responsável/contato/coordenadas
                 @st.cache_data(show_spinner=False)
                 def _ler_n52_cc(_bytes):
-                    try:
-                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
-                        for _shn in _xn.sheet_names:
-                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
-                            _up = {str(_c).upper() for _c in _dn.columns}
-                            # N52 = locação de espaço físico: CO_LOCAL + coordenadas/responsável/e-mail, sem CO_INSCRICAO/ID_SALA
-                            if "CO_LOCAL" in _up and "CO_INSCRICAO" not in _up and "ID_SALA" not in _up and (
-                                    "NO_RESPONSAVEL" in _up or "TX_EMAIL_LOCAL" in _up or "NU_LATITUDE_LOCAL" in _up):
-                                return _limpa_colunas_nome(_dn)
-                    except Exception:
-                        pass
+                    for _d, _up in _abas_cols(_bytes):
+                        if "CO_LOCAL" in _up and "CO_INSCRICAO" not in _up and "ID_SALA" not in _up and (
+                                "NO_RESPONSAVEL" in _up or "TX_EMAIL_LOCAL" in _up or "NU_LATITUDE_LOCAL" in _up):
+                            return _d
                     return None
-                # v123: leitor cacheado da aba N60 (infraestrutura predial: acessibilidade, segurança, conforto,
-                # tecnologia, conservação). Processada no GRÃO LOCAL (centenas/milhares de linhas), nunca em 68k.
+                # v123: N60 (infraestrutura predial: acessibilidade, segurança, conforto, tecnologia, conservação)
                 @st.cache_data(show_spinner=False)
                 def _ler_n60_cc(_bytes):
-                    try:
-                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
-                        for _shn in _xn.sheet_names:
-                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
-                            _up = {str(_c).upper() for _c in _dn.columns}
-                            # N60 = infraestrutura: CO_LOCAL, sem CO_INSCRICAO, com flags IN_ de infraestrutura
-                            if ('CO_LOCAL' in _up and 'CO_INSCRICAO' not in _up and 'QT_CAPACIDADE_MAXIMA_SALA' not in _up
-                                    and ('IN_ACESSIBILIDADE' in _up or 'IN_INFRA_ACESSIBILIDADE' in _up
-                                         or 'IN_EXTINTOR' in _up or 'IN_SAIDA_EMERGENCIA' in _up)):
-                                return _limpa_colunas_nome(_dn)
-                    except Exception:
-                        pass
+                    for _d, _up in _abas_cols(_bytes):
+                        if ('CO_LOCAL' in _up and 'CO_INSCRICAO' not in _up and 'QT_CAPACIDADE_MAXIMA_SALA' not in _up
+                                and ('IN_ACESSIBILIDADE' in _up or 'IN_INFRA_ACESSIBILIDADE' in _up
+                                     or 'IN_EXTINTOR' in _up or 'IN_SAIDA_EMERGENCIA' in _up)):
+                            return _d
                     return None
-                # v117: leitor cacheado da aba N50 (salas/espaço físico com capacidade máxima por sala).
+                # v117: N50 (salas com capacidade máxima por sala)
                 @st.cache_data(show_spinner=False)
                 def _ler_n50_cap(_bytes):
-                    try:
-                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
-                        for _shn in _xn.sheet_names:
-                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
-                            _up = {str(_c).upper() for _c in _dn.columns}
-                            # N50 = salas com capacidade: tem NO_SALA/ID_SALA + QT_CAPACIDADE_MAXIMA_SALA, sem CO_INSCRICAO
-                            if "CO_INSCRICAO" not in _up and "QT_CAPACIDADE_MAXIMA_SALA" in _up and (
-                                    "NO_SALA" in _up or "ID_SALA" in _up):
-                                return _limpa_colunas_nome(_dn)
-                    except Exception:
-                        pass
+                    for _d, _up in _abas_cols(_bytes):
+                        if "CO_INSCRICAO" not in _up and "QT_CAPACIDADE_MAXIMA_SALA" in _up and (
+                                "NO_SALA" in _up or "ID_SALA" in _up):
+                            return _d
                     return None
-                # v108: leitor cacheado da aba N91 (atendimentos) — reutilizado por todas as análises,
-                # evitando reler o Excel de 166k linhas várias vezes (causa de pico de RAM / « Oh no »).
+                # v108: N91 (atendimentos/recursos)
                 @st.cache_data(show_spinner=False)
                 def _ler_n91_cc(_bytes):
-                    try:
-                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
-                        for _shn in _xn.sheet_names:
-                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
-                            _up = {str(_c).upper() for _c in _dn.columns}
-                            if "NO_ITEM_ATENDIMENTO" in _up and "CO_INSCRICAO" in _up:
-                                return _limpa_colunas_nome(_dn)
-                    except Exception:
-                        pass
+                    for _d, _up in _abas_cols(_bytes):
+                        if "NO_ITEM_ATENDIMENTO" in _up and "CO_INSCRICAO" in _up:
+                            return _d
                     return None
-                # v96: leitor cacheado da aba N90 (inscritos) para cruzamentos de nome social
+                # v96: N90 (inscritos) — nome social, forasteiros, idade. Texto pesado já excluído na leitura única.
                 @st.cache_data(show_spinner=False)
                 def _ler_n90_cc(_bytes):
-                    try:
-                        _xn = _excelfile_fast(_ioc.BytesIO(_bytes))
-                        for _shn in _xn.sheet_names:
-                            _dn = _read_excel_fast(_ioc.BytesIO(_bytes), sheet_name=_shn)
-                            _up = {str(_c).upper() for _c in _dn.columns}
-                            # N90 = inscritos: tem CO_INSCRICAO + colunas de residência/situação, NÃO tem ID_SALA
-                            if "CO_INSCRICAO" in _up and "ID_SALA" not in _up and (
-                                    "CO_MUNICIPIO_RESIDENCIA" in _up or "TP_SITUACAO" in _up or "SG_UF_MUNICIPIO_RESIDENCIA" in _up):
-                                return _limpa_colunas_nome(_dn)
-                    except Exception:
-                        pass
+                    for _d, _up in _abas_cols(_bytes):
+                        if "CO_INSCRICAO" in _up and "ID_SALA" not in _up and (
+                                "CO_MUNICIPIO_RESIDENCIA" in _up or "TP_SITUACAO" in _up or "SG_UF_MUNICIPIO_RESIDENCIA" in _up):
+                            return _d
                     return None
                 if _base is None:
                     st.warning("Não encontrei uma aba com CO_INSCRICAO (N02) para montar a central de casos.")
@@ -12689,25 +12750,34 @@ def _run_streamlit_app() -> None:
                                 _u9 = {str(c).upper(): c for c in _n90a.columns}
                                 _cdt = _u9.get("DT_NASCIMENTO")
                                 if _cdt is not None:
-                                    _idade = 2026 - _pdc.to_datetime(_n90a[_cdt], errors="coerce").dt.year
+                                    # v130: ano de referência DINÂMICO (não mais fixo em 2026) — o cálculo continua
+                                    # correto em anos futuros. Usa o ano corrente como base da idade na data da prova.
+                                    _anoref = _dt.now().year
+                                    _idade = _anoref - _pdc.to_datetime(_n90a[_cdt], errors="coerce").dt.year
                                     _val = _idade.dropna()
+                                    _val = _val[(_val >= 0) & (_val <= 120)]  # descarta datas inválidas/absurdas
                                     if len(_val):
+                                        _tot_id = len(_val)
                                         _idosos = int((_val > 60).sum())
                                         _menores = int((_val < 18).sum())
                                         _med = float(_val.mean())
+                                        _mediana = float(_val.median())
+                                        _pct_id = _idosos / _tot_id * 100
+                                        _pct_men = _menores / _tot_id * 100
                                         _faixas = [("< 18", int((_val < 18).sum())), ("18–24", int(((_val >= 18) & (_val <= 24)).sum())),
                                                    ("25–39", int(((_val >= 25) & (_val <= 39)).sum())), ("40–59", int(((_val >= 40) & (_val <= 59)).sum())),
                                                    ("60+", int((_val >= 60).sum()))]
                                         _extra += f"""<section><h2 style="border-left:5px solid #8e44ad">🎂 Auditoria de idade dos inscritos (N90)</h2>
-                                        <div class="interp"><b>📖 Como interpretar:</b> idade calculada de DT_NASCIMENTO (ano-base 2026). <b>Idosos (60+)</b> podem precisar de
-                                        acessibilidade física reforçada no local; <b>menores de 18</b> merecem verificação cadastral. Idade média {_med:.0f} anos.</div>
+                                        <div class="interp"><b>📖 Como interpretar:</b> idade calculada de DT_NASCIMENTO (ano-base {_anoref}). <b>Idosos (60+)</b> podem precisar de
+                                        acessibilidade física reforçada no local; <b>menores de 18</b> merecem verificação cadastral. Idade média {_med:.0f} anos (mediana {_mediana:.0f}).</div>
                                         <div class="kpi-grid">
-                                          <div class="kpi-box" style="border-left:5px solid #2980b9"><div class="kpi-lbl">🧓 Idosos (60+) — atenção à acessibilidade</div><div class="kpi-val">{_idosos:,}</div></div>
-                                          <div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">🔎 Menores de 18 — verificar cadastro</div><div class="kpi-val">{_menores:,}</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #2980b9"><div class="kpi-lbl">🧓 Idosos (60+) — atenção à acessibilidade</div><div class="kpi-val">{_idosos:,}</div><div class="kpi-lbl">{_pct_id:.1f}% dos inscritos</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">🔎 Menores de 18 — verificar cadastro</div><div class="kpi-val">{_menores:,}</div><div class="kpi-lbl">{_pct_men:.2f}% dos inscritos</div></div>
+                                          <div class="kpi-box" style="border-left:5px solid #8e44ad"><div class="kpi-lbl">📊 Idade mediana</div><div class="kpi-val">{_mediana:.0f} anos</div></div>
                                         </div>
                                         <div class="grafico"><div class="graf-titulo">Distribuição etária dos inscritos</div>
                                         {_svg_hbar(_faixas, cor="#8e44ad")}
-                                        <div class="graf-leg">Faixas etárias dos inscritos no N90.</div></div></section>""".replace(",", ".")
+                                        <div class="graf-leg">Faixas etárias dos {_tot_id:,} inscritos com data de nascimento válida (N90).</div></div></section>""".replace(",", ".")
                         except Exception:
                             pass
                         # v124: SATURAÇÃO DE PRÉDIOS/LOCAIS (N02) — carga por local e média de alunos/sala. [11.md]
@@ -12779,11 +12849,19 @@ def _run_streamlit_app() -> None:
                                         _kpi_acc = (f"<div class='kpi-box' style='border-left:5px solid #27ae60'><div class='kpi-lbl'>Locais com acessibilidade declarada</div>"
                                                     f"<div class='kpi-val'>{_com:,} / {_tot:,}</div></div>".replace(",", "."))
                                 if _kpis_i or _grafs_i:
+                                    # v130: destaque acionável da dimensão MAIS FRACA — orienta onde investir primeiro.
+                                    _fraca = ""
+                                    if _idx_medias:
+                                        _pior_dim = min(_idx_medias.items(), key=lambda x: x[1])
+                                        _fraca = (f"<div class='interp' style='border-left-color:#e67e22;background:#fff7f0'>"
+                                                  f"<b>🎯 Prioridade:</b> a dimensão mais fraca é <b>{_esc_h(_pior_dim[0])}</b> "
+                                                  f"({_pior_dim[1]:.0f}%) — é onde concentrar investimento e vistoria antes da prova.</div>")
                                     _extra += f"""<section><h2 style="border-left:5px solid #2980b9">🏗️ Infraestrutura predial dos locais (N60)</h2>
                                     <div class="interp"><b>📖 Como interpretar:</b> índices de infraestrutura calculados no <b>grão de local</b> (os {len(_n60i):,} locais do N60),
                                     não por participante — por isso é rápido e preciso. Cada dimensão (acessibilidade, segurança, conforto, tecnologia) mede a
                                     <b>proporção média de itens presentes</b>. Índices baixos apontam locais que precisam de atenção de infraestrutura.</div>
                                     <div class="kpi-grid">{_kpis_i}{_kpi_acc}</div>
+                                    {_fraca}
                                     {_grafs_i}</section>""".replace("{len(_n60i):,}", f"{len(_n60i):,}".replace(",", "."))
                         except Exception:
                             pass
@@ -15113,6 +15191,21 @@ def _run_streamlit_app() -> None:
             _c2.metric("Camada Streamlit", f"v{STREAMLIT_APP_VERSION}")
             _c3.metric("Tempo de processamento", f"{_tempo}s" if _tempo is not None else "—")
             _c4.metric("Análises geradas", len(abas))
+            # v129: indicador de memória — pico do processo durante a geração e RAM disponível agora.
+            # Ajuda a monitorar o consumo e antecipar o « Oh no » (OOM) em ambientes com pouca RAM (ex.: 1 GB).
+            _mem_pico = st.session_state.get("bi_mem_pico")
+            _ram_disp = st.session_state.get("bi_ram_disp")
+            _m1, _m2, _m3 = st.columns(3)
+            _m1.metric("Pico de memória (geração)", f"{_mem_pico:,} MB".replace(",", ".") if _mem_pico else "—")
+            _m2.metric("RAM disponível agora", f"{_ram_disp:,.0f} MB".replace(",", ".") if _ram_disp else "—")
+            _agora_proc = _ram_processo_mb()
+            _m3.metric("Memória em uso agora", f"{_agora_proc:,.0f} MB".replace(",", ".") if _agora_proc else "—")
+            if _mem_pico and _ram_disp is not None:
+                _folga = _ram_disp
+                if _folga < 300:
+                    st.warning(f"⚠️ RAM disponível baixa (~{_ram_disp:.0f} MB). Se aparecer « Oh no », prefira gerar sem o Excel/dashboard pesado, ou use o relatório leve da Central de Casos.")
+                elif _mem_pico > 700:
+                    st.caption(f"ℹ️ O pico de memória foi ~{_mem_pico} MB. Em ambientes de ~1 GB, mantenha o Excel pesado desligado ao gerar bases grandes.")
             # tamanhos dos artefatos
             def _kb(p):
                 try:
