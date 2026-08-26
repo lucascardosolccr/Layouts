@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "134"
+STREAMLIT_APP_VERSION = "135"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine calamine (4-7x mais rápido que openpyxl em arquivos
@@ -13828,6 +13828,31 @@ def _run_streamlit_app() -> None:
                             th {{ position:static; }} .tbl-wrap {{ overflow:visible; }} table {{ min-width:0; }} .toc {{ display:none; }}
                             h1,h2 {{ break-after:avoid; }}
                         }}
+                        /* v135: MESMO polimento visual do HTML unificado (padrão demo_estilo_unificado) —
+                           cards espaçados, títulos fortes com clamp, grid responsivo, tabelas com scroll no mobile,
+                           e boa respiração entre gráfico e texto. Só CSS aditivo (overrides com !important). */
+                        .wrap {{ max-width:1240px; margin:0 auto; padding:26px 22px 64px; }}
+                        section {{ padding:24px 26px !important; margin:0 0 28px 0 !important; border:1px solid #e3e8ef !important;
+                                   border-radius:14px !important; box-shadow:0 1px 4px rgba(16,42,67,.06) !important;
+                                   background:#fff !important; overflow:hidden !important; }}
+                        h2 {{ font-weight:800 !important; font-size:clamp(1.08rem,2.4vw,1.45rem) !important; line-height:1.32 !important;
+                              margin:0 0 16px 0 !important; padding:8px 0 12px 14px !important; border-bottom:2px solid #eef2f7 !important; }}
+                        .chart-grid {{ display:grid !important; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)) !important;
+                                       gap:26px !important; margin:20px 0 !important; align-items:start !important; }}
+                        .kpi-grid {{ display:grid !important; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)) !important;
+                                     gap:16px !important; margin:18px 0 !important; }}
+                        .grafico {{ background:#fff !important; border:1px solid #e3e8ef !important; border-radius:14px !important;
+                                    padding:20px 22px !important; margin:22px 0 !important; box-shadow:0 1px 4px rgba(16,42,67,.06) !important; }}
+                        .graf-titulo {{ font-weight:800 !important; color:#1f4e79 !important; font-size:clamp(1rem,2vw,1.2rem) !important;
+                                        margin-bottom:16px !important; line-height:1.3 !important; }}
+                        .graf-leg {{ margin-top:16px !important; font-size:12.5px !important; color:#5b6b7f !important; line-height:1.5 !important; }}
+                        .grafico svg {{ max-width:100% !important; height:auto !important; display:block !important; }}
+                        .interp {{ margin:18px 0 !important; }}
+                        table {{ width:100% !important; border-collapse:collapse !important; }}
+                        .tbl-wrap, .table-wrapper-div {{ overflow-x:auto !important; -webkit-overflow-scrolling:touch !important; max-width:100% !important; margin:16px 0 !important; }}
+                        @media (max-width:900px) {{ .chart-grid {{ grid-template-columns:1fr !important; }} }}
+                        @media (min-width:1400px) {{ .chart-grid {{ grid-template-columns:repeat(auto-fit,minmax(560px,1fr)) !important; }} }}
+                        @media (max-width:480px) {{ .kpi-grid {{ grid-template-columns:1fr 1fr !important; }} .grafico {{ padding:14px !important; }} section {{ padding:16px 16px !important; }} }}
                         </style></head><body><div class="wrap"><a id="topo-casos"></a>
                         <div class="print-header">Central de Casos — Auditoria PND · {_N:,} participantes · {_dt.now().strftime('%d/%m/%Y')}</div>
                         {_hero}
