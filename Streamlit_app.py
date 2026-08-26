@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "135"
+STREAMLIT_APP_VERSION = "137"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine calamine (4-7x mais rápido que openpyxl em arquivos
@@ -13853,6 +13853,30 @@ def _run_streamlit_app() -> None:
                         @media (max-width:900px) {{ .chart-grid {{ grid-template-columns:1fr !important; }} }}
                         @media (min-width:1400px) {{ .chart-grid {{ grid-template-columns:repeat(auto-fit,minmax(560px,1fr)) !important; }} }}
                         @media (max-width:480px) {{ .kpi-grid {{ grid-template-columns:1fr 1fr !important; }} .grafico {{ padding:14px !important; }} section {{ padding:16px 16px !important; }} }}
+                        /* v136: MENU LATERAL À ESQUERDA (navegável, interativo, responsivo) — molde do dashboard do motor. */
+                        body.has-side {{ margin:0; }}
+                        .side-menu {{ position:fixed; top:0; left:0; width:270px; height:100vh; overflow-y:auto; z-index:40;
+                                      background:#0f2740; color:#dfe7f0; padding:20px 0 40px; box-shadow:2px 0 14px rgba(0,0,0,.18); }}
+                        .side-title {{ font-weight:800; font-size:15px; color:#fff; padding:6px 20px 16px; letter-spacing:.3px;
+                                       border-bottom:1px solid rgba(255,255,255,.12); margin-bottom:8px; }}
+                        .side-nav {{ display:flex; flex-direction:column; }}
+                        .side-link {{ color:#cdd8e6; text-decoration:none; font-size:13px; line-height:1.35; padding:9px 20px;
+                                      border-left:3px solid transparent; transition:background .15s,border-color .15s,color .15s; }}
+                        .side-link:hover {{ background:rgba(255,255,255,.07); color:#fff; }}
+                        .side-link.active {{ background:rgba(74,144,217,.18); border-left-color:#4a90d9; color:#fff; font-weight:700; }}
+                        body.has-side .wrap {{ margin-left:270px !important; max-width:1180px !important; }}
+                        #side-toggle {{ display:none; position:fixed; top:12px; left:12px; z-index:60; background:#0f2740; color:#fff;
+                                        border:none; border-radius:8px; padding:9px 14px; font-size:14px; font-weight:700; cursor:pointer;
+                                        box-shadow:0 2px 8px rgba(0,0,0,.25); }}
+                        .side-overlay {{ display:none; }}
+                        @media print {{ .side-menu,#side-toggle,.side-overlay {{ display:none !important; }} body.has-side .wrap {{ margin-left:0 !important; }} }}
+                        @media (max-width:1024px) {{
+                          #side-toggle {{ display:block; }}
+                          .side-menu {{ transform:translateX(-100%); transition:transform .25s ease; }}
+                          body.side-open .side-menu {{ transform:translateX(0); }}
+                          body.has-side .wrap {{ margin-left:0 !important; padding-top:60px !important; }}
+                          body.side-open .side-overlay {{ display:block; position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:35; }}
+                        }}
                         </style></head><body><div class="wrap"><a id="topo-casos"></a>
                         <div class="print-header">Central de Casos — Auditoria PND · {_N:,} participantes · {_dt.now().strftime('%d/%m/%Y')}</div>
                         {_hero}
@@ -14218,10 +14242,27 @@ def _run_streamlit_app() -> None:
                             pass
                         _html_full = _re2.sub(r"<section.*?</section>", _add_id, _html_full, flags=_re2.S)
                         if _sec_titulos:
-                            _nav = ('<nav class="toc"><span class="toc-t">📑 Sumário</span>'
-                                    + "".join(f'<a href="#sec-{_i}">{_t}</a>' for _i, _t in enumerate(_sec_titulos))
-                                    + "</nav>")
-                            _html_full = _html_full.replace('<div class="kpi-grid">', _nav + '<div class="kpi-grid">', 1)
+                            # v136: MENU LATERAL À ESQUERDA (como o dashboard do motor) — fixo, navegável, com
+                            # scrollspy (destaca a seção ativa) e toggle no mobile. O conteúdo é deslocado à direita.
+                            _links = "".join(
+                                f'<a href="#sec-{_i}" class="side-link" data-target="sec-{_i}">{_t}</a>'
+                                for _i, _t in enumerate(_sec_titulos))
+                            _sidebar = (
+                                '<button id="side-toggle" aria-label="Menu" onclick="document.body.classList.toggle(\'side-open\')">☰ Menu</button>'
+                                '<aside class="side-menu"><div class="side-title">📑 Menu Analítico</div>'
+                                f'<nav class="side-nav">{_links}</nav></aside>'
+                                '<div class="side-overlay" onclick="document.body.classList.remove(\'side-open\')"></div>')
+                            # insere o menu logo após <body> e marca o body para o layout com sidebar
+                            _html_full = _html_full.replace("<body>", "<body class=\"has-side\">" + _sidebar, 1)
+                            # scrollspy + fechar menu ao clicar (mobile)
+                            _spy = ("<script>(function(){var ls=document.querySelectorAll('.side-link');"
+                                    "var secs=[].map.call(ls,function(a){return document.getElementById(a.dataset.target);});"
+                                    "function onScroll(){var y=window.scrollY+120,cur=-1;for(var i=0;i<secs.length;i++){"
+                                    "if(secs[i]&&secs[i].offsetTop<=y)cur=i;}ls.forEach(function(a,i){a.classList.toggle('active',i===cur);});}"
+                                    "window.addEventListener('scroll',onScroll,{passive:true});onScroll();"
+                                    "ls.forEach(function(a){a.addEventListener('click',function(){document.body.classList.remove('side-open');});});"
+                                    "})();</script>")
+                            _html_full = _html_full.replace("</body>", _spy + "</body>", 1)
                         return _html_full
 
                     # v73: seleção de análises (camada 2) — núcleo obrigatório sempre presente
@@ -14287,6 +14328,29 @@ def _run_streamlit_app() -> None:
                                                             _reu.sub(r"(?is)^.*?<body[^>]*>", "", _casos_html))
                                     if len(_corpo_casos) < 500:
                                         _corpo_casos = _casos_html
+
+                                # v137: no UNIFICADO, o menu lateral é o do MOTOR — então removemos a sidebar própria
+                                # dos casos (v136) do corpo injetado, evitando um segundo menu. Em seguida, extraímos os
+                                # links de cada análise da central de casos para INJETÁ-LOS no "Menu Analítico" do motor,
+                                # deixando TODAS as análises navegáveis a partir de um único menu.
+                                _menu_casos_links = ""
+                                try:
+                                    # remove os elementos da sidebar dos casos (botão, aside, overlay, scrollspy)
+                                    _corpo_casos = _reu.sub(r'<button id="side-toggle".*?</button>', "", _corpo_casos, flags=_reu.S)
+                                    _corpo_casos = _reu.sub(r'<aside class="side-menu".*?</aside>', "", _corpo_casos, flags=_reu.S)
+                                    _corpo_casos = _reu.sub(r'<div class="side-overlay".*?</div>', "", _corpo_casos, flags=_reu.S)
+                                    _corpo_casos = _reu.sub(r'<script>\(function\(\)\{var ls=document\.querySelectorAll.*?</script>', "", _corpo_casos, flags=_reu.S)
+                                    # monta os itens de menu (id + título) das seções dos casos
+                                    _pares = _reu.findall(r'<section id="(sec-\d+)"[^>]*>.*?<h2[^>]*>(.*?)</h2>', _corpo_casos, _reu.S)
+                                    _itens = []
+                                    for _sid, _raw in _pares:
+                                        _tt = _reu.sub(r"<[^>]+>", "", _raw).strip()
+                                        _itens.append(f'<a href="#{_sid}"><i class="fas fa-angle-right"></i> {_tt}</a>')
+                                    if _itens:
+                                        _menu_casos_links = ('<h2 style="margin-top:18px"><i class="fas fa-triangle-exclamation"></i> '
+                                                             'Central de Casos</h2>' + "".join(_itens))
+                                except Exception:
+                                    _menu_casos_links = ""
 
                                 # v42: CSS global de responsividade/impressão aplicado ao documento INTEIRO
                                 _head_inject = """
@@ -14620,6 +14684,12 @@ def _run_streamlit_app() -> None:
                                     _dash_html = _dash_html.replace("</head>", _head_inject + "</head>", 1)
                                 else:
                                     _dash_html = _head_inject + _dash_html
+                                # v137: injeta os links das análises da central de casos DENTRO do "Menu Analítico" do motor
+                                # (dentro de <div class="sidebar-nav">...</div>), para tudo ficar navegável num único menu.
+                                if _menu_casos_links and 'class="sidebar-nav"' in _dash_html:
+                                    _dash_html = _reu.sub(r'(<div class="sidebar-nav">.*?)(</div>)',
+                                                          lambda _mm: _mm.group(1) + _menu_casos_links + _mm.group(2),
+                                                          _dash_html, count=1, flags=_reu.S)
                                 # v110: atalho fixo visível que leva à Central de Casos (que fica ao FINAL do unificado,
                                 # após todo o dashboard do motor). Sem isto, muitos não rolam até as análises de casos.
                                 _atalho_casos = ('<a href="#central-casos" id="unif-gotocasos" '
