@@ -225,7 +225,7 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = "32.0"
-STREAMLIT_APP_VERSION = "130"
+STREAMLIT_APP_VERSION = "132"
 
 def _read_excel_fast(_src, **kwargs):
     """Lê Excel priorizando o engine calamine (4-7x mais rápido que openpyxl em arquivos
@@ -12641,12 +12641,37 @@ def _run_streamlit_app() -> None:
                                 _clat = _u52.get("NU_LATITUDE_LOCAL")
                                 _clon = _u52.get("NU_LONGITUDE_LOCAL")
                                 _geo_g = ""
+                                _conc_txt = ""
+                                _reg_g = ""
                                 if _cuf52 is not None:
-                                    _uf52 = _n52g[_cuf52].astype(str).str.strip().replace({"": "—", "nan": "—"}).value_counts().head(27)
+                                    _serie_uf = _n52g[_cuf52].astype(str).str.strip().str.upper().replace({"": "—", "NAN": "—"})
+                                    _uf52 = _serie_uf.value_counts().head(27)
                                     if len(_uf52):
                                         _geo_g = (f"<div class='grafico'><div class='graf-titulo'>Locais de prova por UF</div>"
                                                   f"{_svg_hbar([(_k, int(_v)) for _k, _v in _uf52.items()], cor='#2980b9')}"
                                                   f"<div class='graf-leg'>Distribuição dos locais físicos (N52) por unidade da federação.</div></div>")
+                                        # v131: CONCENTRAÇÃO por UF — quantas UFs concentram 80% dos locais + top-3.
+                                        _tl = int(_uf52.sum()); _cum = 0; _n80uf = 0
+                                        for _v in _uf52.values:
+                                            _cum += _v; _n80uf += 1
+                                            if _cum / max(_tl, 1) >= 0.8:
+                                                break
+                                        _top3 = _uf52.head(3)
+                                        _top3_txt = ", ".join(f"{_k} ({int(_v)})" for _k, _v in _top3.items())
+                                        _top3_pct = _top3.sum() / max(_tl, 1) * 100
+                                        _conc_txt = (f"<div class='kpi-box' style='border-left:5px solid #2980b9'><div class='kpi-lbl'>🗺️ UFs que concentram ~80% dos locais</div><div class='kpi-val'>{_n80uf}</div><div class='kpi-lbl'>de {int(_uf52.size)} UFs</div></div>"
+                                                     f"<div class='kpi-box' style='border-left:5px solid #16a085'><div class='kpi-lbl'>🥇 Top-3 UFs — fatia dos locais</div><div class='kpi-val'>{_top3_pct:.0f}%</div><div class='kpi-lbl'>{_esc_h(_top3_txt)}</div></div>")
+                                        # v131: agrupamento por REGIÃO (densidade macro-regional)
+                                        _REG = {"AC":"Norte","AP":"Norte","AM":"Norte","PA":"Norte","RO":"Norte","RR":"Norte","TO":"Norte",
+                                                "AL":"Nordeste","BA":"Nordeste","CE":"Nordeste","MA":"Nordeste","PB":"Nordeste","PE":"Nordeste","PI":"Nordeste","RN":"Nordeste","SE":"Nordeste",
+                                                "DF":"Centro-Oeste","GO":"Centro-Oeste","MT":"Centro-Oeste","MS":"Centro-Oeste",
+                                                "ES":"Sudeste","MG":"Sudeste","RJ":"Sudeste","SP":"Sudeste",
+                                                "PR":"Sul","RS":"Sul","SC":"Sul"}
+                                        _regs = _serie_uf.map(_REG).dropna().value_counts()
+                                        if len(_regs):
+                                            _reg_g = (f"<div class='grafico'><div class='graf-titulo'>Locais por região</div>"
+                                                      f"{_svg_hbar([(_k, int(_v)) for _k, _v in _regs.items()], cor='#16a085')}"
+                                                      f"<div class='graf-leg'>Densidade macro-regional dos locais — orienta o planejamento logístico por região.</div></div>")
                                 _cov_txt = ""
                                 if _clat is not None and _clon is not None:
                                     _nla = int(_pdc.to_numeric(_n52g[_clat], errors="coerce").notna().sum())
@@ -12654,10 +12679,11 @@ def _run_streamlit_app() -> None:
                                                 f"<div class='kpi-val'>{_nla:,} / {len(_n52g):,}</div></div>".replace(",", "."))
                                 if _geo_g or _cov_txt:
                                     _extra += f"""<section><h2 style="border-left:5px solid #2980b9">🗺️ Distribuição geográfica dos locais (N52)</h2>
-                                    <div class="interp"><b>📖 Como interpretar:</b> onde os locais de prova estão, por UF, e a cobertura de geolocalização.
-                                    UFs com mais locais concentram a operação logística; a cobertura de coordenadas indica quantos locais podem ser mapeados ponto a ponto.</div>
-                                    <div class="kpi-grid">{_cov_txt}</div>
-                                    {_geo_g}</section>"""
+                                    <div class="interp"><b>📖 Como interpretar:</b> onde os locais de prova estão, por UF e por região, e a cobertura de geolocalização.
+                                    UFs/regiões com mais locais concentram a operação logística; a cobertura de coordenadas indica quantos locais podem ser mapeados ponto a ponto.</div>
+                                    <div class="kpi-grid">{_conc_txt}{_cov_txt}</div>
+                                    {_geo_g}
+                                    {_reg_g}</section>"""
                         except Exception:
                             pass
                         # v125: QUALIDADE PREDIAL × OCUPAÇÃO (N60 × N02) — locais cheios E de baixa qualidade = prioridade.
@@ -12789,17 +12815,36 @@ def _run_streamlit_app() -> None:
                                 _sat = _base.groupby(_clp).agg(_al=(_cin_s, "count"), _sl=(_salac, "nunique")).reset_index()
                                 _sat["_med"] = (_sat["_al"] / _sat["_sl"]).round(1)
                                 _sat = _sat.sort_values("_al", ascending=False)
+                                # v131: métricas de CONCENTRAÇÃO — quanto poucos prédios respondem por muito do público.
+                                _tot_al = int(_sat["_al"].sum())
+                                _n_locais = len(_sat)
+                                _sat["_pct"] = _sat["_al"] / max(_tot_al, 1) * 100
+                                _sat["_acum"] = _sat["_pct"].cumsum()
+                                # nº de prédios que concentram 80% dos alunos (Pareto)
+                                _n80 = int((_sat["_acum"] <= 80).sum()) + 1
+                                _n80 = min(_n80, _n_locais)
+                                _pct_top = _sat.head(_n80)["_pct"].sum()
+                                _pct_maior = float(_sat.iloc[0]["_pct"]) if _n_locais else 0.0
+                                _sobrelot = int((_sat["_med"] > 40).sum())
                                 _topn = _sat.head(15)
                                 _rws = "".join(
                                     f"<tr class='{'row-crit' if _r['_med'] > 40 else ''}'><td>{_esc_h(_limpa_nome(str(_r[_clp])))}</td>"
-                                    f"<td style='text-align:right'>{int(_r['_al'])}</td><td style='text-align:right'>{int(_r['_sl'])}</td>"
+                                    f"<td style='text-align:right'>{int(_r['_al'])}</td>"
+                                    f"<td style='text-align:right'>{_r['_pct']:.1f}%</td>"
+                                    f"<td style='text-align:right'>{int(_r['_sl'])}</td>"
                                     f"<td style='text-align:right;font-weight:600'>{_r['_med']:.1f}</td></tr>"
                                     for _, _r in _topn.iterrows())
                                 _extra += f"""<section><h2 style="border-left:5px solid #e67e22">🏢 Saturação de prédios e locais de prova (N02)</h2>
                                 <div class="interp"><b>📖 Como interpretar:</b> carga de alunos por local e média de alunos por sala. Prédios com maior volume e maior
                                 média/sala são <b>pontos críticos de operação</b> — precisam de mais fiscais, reforço de segurança e atenção na logística de malotes.
                                 Média por sala acima de 40 aparece em vermelho.</div>
-                                <table><thead><tr><th>Local de prova</th><th>Alunos</th><th>Salas</th><th>Média/sala</th></tr></thead><tbody>{_rws}</tbody></table></section>"""
+                                <div class="kpi-grid">
+                                  <div class="kpi-box" style="border-left:5px solid #e67e22"><div class="kpi-lbl">🏢 Prédios que concentram ~80% dos alunos</div><div class="kpi-val">{_n80}</div><div class="kpi-lbl">de {_n_locais} locais ({_pct_top:.0f}% do público)</div></div>
+                                  <div class="kpi-box" style="border-left:5px solid #2980b9"><div class="kpi-lbl">🥇 Maior local — fatia do público</div><div class="kpi-val">{_pct_maior:.1f}%</div></div>
+                                  <div class="kpi-box" style="border-left:5px solid #c0392b"><div class="kpi-lbl">🔴 Locais com média/sala &gt; 40</div><div class="kpi-val">{_sobrelot}</div></div>
+                                </div>
+                                <div class="interp" style="border-left-color:#e67e22;background:#fff7f0"><b>🎯 Concentração (Pareto):</b> apenas <b>{_n80}</b> de {_n_locais} locais concentram cerca de <b>{_pct_top:.0f}%</b> de todos os inscritos — priorize esses prédios na logística, fiscalização e contingência.</div>
+                                <table><thead><tr><th>Local de prova</th><th>Alunos</th><th>% do total</th><th>Salas</th><th>Média/sala</th></tr></thead><tbody>{_rws}</tbody></table></section>""".replace("{_n_locais}", str(_n_locais))
                         except Exception:
                             pass
                         # v123: INFRAESTRUTURA PREDIAL (N60) computada no NÍVEL LOCAL (arquitetura por-nível).
@@ -14753,10 +14798,32 @@ def _run_streamlit_app() -> None:
                                 _sep = ('<hr id="central-casos" style="margin:44px 0;border:none;border-top:3px solid #1f4e79">'
                                         '<div style="max-width:1240px;margin:0 auto;padding:0 18px">'
                                         + _corpo_casos + '</div>' + _js_ux)
+                                # v132: AUDITORIA DE INTEGRIDADE — conta os componentes NO CORPO DOS CASOS e depois
+                                # confirma que sobrevivem no HTML unificado FINAL (o que será baixado). Se algo se
+                                # perder na montagem, o app avisa exatamente quanto — em vez de afirmar que "está lá".
+                                _aud = {
+                                    "secoes_casos": _corpo_casos.count("<h2"),
+                                    "svg_casos": _corpo_casos.count("<svg"),
+                                    "tabelas_casos": _corpo_casos.count("<table"),
+                                    "kpis_casos": _corpo_casos.count("kpi-box"),
+                                }
                                 if "</body>" in _dash_html:
                                     _unif = _dash_html.replace("</body>", _sep + "</body>", 1)
                                 else:
                                     _unif = _dash_html + _sep
+                                # conta no HTML unificado FINAL (dashboard + casos)
+                                _aud.update({
+                                    "secoes_unif": _unif.count("<h2"),
+                                    "svg_unif": _unif.count("<svg"),
+                                    "tabelas_unif": _unif.count("<table"),
+                                    "kpis_unif": _unif.count("kpi-box"),
+                                    "part_json": ("MP_DATA" in _unif or "window.MP_DATA" in _unif),
+                                    "css_casos": (".grafico" in _unif and ".interp" in _unif),
+                                })
+                                # as seções dos casos precisam SOBREVIVER à injeção (unif >= casos)
+                                _casos_preservados = _aud["secoes_unif"] >= _aud["secoes_casos"] and _aud["secoes_casos"] > 0
+                                st.session_state["bi_aud_unif"] = _aud
+                                st.session_state["bi_aud_ok"] = _casos_preservados
                                 # v86: libera as strings intermediárias grandes (~13-16 MB cada) ANTES de codificar,
                                 # e codifica _unif UMA única vez — antes o app mantinha _dash_html + _casos_html + _unif
                                 # e ainda chamava _unif.encode() duas vezes (download + legenda), multiplicando o pico de RAM.
@@ -14780,6 +14847,34 @@ def _run_streamlit_app() -> None:
                                     key="dl_unif")
                                 st.caption(f"Arquivo unificado pronto (~{_mb_unif} MB) "
                                            "— com capa, sumário navegável, responsividade e estilos de impressão.")
+                                # v132: RELATÓRIO DE AUDITORIA DO HTML UNIFICADO (o que será baixado)
+                                _a = st.session_state.get("bi_aud_unif", {})
+                                _ok = st.session_state.get("bi_aud_ok", False)
+                                if _a:
+                                    if _ok:
+                                        st.success(f"✅ Auditoria do HTML unificado: as **{_a.get('secoes_casos',0)} seções** da Central de Casos "
+                                                   f"estão presentes no arquivo final (o unificado tem {_a.get('secoes_unif',0)} seções no total, "
+                                                   f"somando o dashboard do motor).")
+                                    else:
+                                        st.error(f"⚠️ Auditoria: divergência detectada — a Central de Casos gerou {_a.get('secoes_casos',0)} seções, "
+                                                 f"mas o unificado final tem {_a.get('secoes_unif',0)}. Parte do conteúdo pode não ter sido incorporada.")
+                                    with st.expander("🔍 Auditoria de integridade do HTML unificado (componentes no arquivo baixado)"):
+                                        st.markdown("Contagem **no arquivo HTML final** (o que você baixa e abre no navegador):")
+                                        _ca, _cb = st.columns(2)
+                                        _ca.metric("Seções da Central de Casos", _a.get("secoes_casos", 0))
+                                        _cb.metric("Seções no unificado (total)", _a.get("secoes_unif", 0))
+                                        _ca.metric("Gráficos SVG (casos)", _a.get("svg_casos", 0))
+                                        _cb.metric("Gráficos SVG (unificado)", _a.get("svg_unif", 0))
+                                        _ca.metric("Tabelas (casos)", _a.get("tabelas_casos", 0))
+                                        _cb.metric("Tabelas (unificado)", _a.get("tabelas_unif", 0))
+                                        _ca.metric("KPIs (casos)", _a.get("kpis_casos", 0))
+                                        _cb.metric("KPIs (unificado)", _a.get("kpis_unif", 0))
+                                        st.markdown(
+                                            f"- {'✅' if _a.get('part_json') else '❌'} **Dados dos participantes** embutidos (tabela virtualizada com todos os registros)\n"
+                                            f"- {'✅' if _a.get('css_casos') else '❌'} **CSS da Central de Casos** presente no `<head>` do unificado (estilos aplicados)\n"
+                                            f"- {'✅' if _ok else '❌'} **Todas as seções preservadas** na injeção final")
+                                        st.caption("Esta contagem é feita sobre a STRING do HTML unificado imediatamente antes do download — "
+                                                   "reflete exatamente o conteúdo do arquivo exportado.")
                             except MemoryError:
                                 st.warning("⚠️ Memória insuficiente para gerar o HTML unificado (~16 MB). Use o **relatório "
                                            "leve** acima (« Baixar Central de Casos em HTML »), que tem os mesmos dados, gráficos "
